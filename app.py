@@ -922,6 +922,20 @@ PAGE = r"""<!DOCTYPE html>
 <link rel="shortcut icon" href="/icon.png?v=2" type="image/png">
 <link rel="apple-touch-icon" href="/icon.png?v=2">
 <link rel="manifest" href="/manifest.json">
+<script>
+/* 判斷是不是在 App（加入主畫面／TWA）裡開啟。
+   台股是不同來源，從 App 點過去會跳出帶網址列的分頁，所以 App 裡不顯示這顆鈕。
+   在 <head> 就把 class 掛上去，CSS 才來得及在畫面出現前隱藏，不會閃一下才消失。 */
+(function(){
+  try {
+    var inApp = window.matchMedia('(display-mode: standalone)').matches
+             || window.matchMedia('(display-mode: fullscreen)').matches
+             || window.navigator.standalone === true
+             || document.referrer.indexOf('android-app://') === 0;
+    if (inApp) document.documentElement.classList.add('in-app');
+  } catch (e) {}
+})();
+</script>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -946,8 +960,11 @@ PAGE = r"""<!DOCTYPE html>
   * { box-sizing:border-box; font-family:var(--font-body); }
   body { margin:0; color:var(--espresso);
     background:radial-gradient(120% 80% at 50% -10%, #F7F1E4 0%, var(--milk) 55%, #EADFC9 100%);
-    min-height:100vh; -webkit-font-smoothing:antialiased; }
-  .wrap { max-width:960px; margin:0 auto; padding:16px; padding-top:70px; }
+    min-height:100vh;            /* 舊瀏覽器 fallback */
+    min-height:100dvh;           /* 手機：跟著網址列伸縮的實際可視高度 */
+    -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:960px; margin:0 auto; padding:16px; padding-top:70px;
+          padding-bottom:calc(24px + env(safe-area-inset-bottom)); }
   h1, .ptitle { text-align:center; font-family:var(--font-head); font-weight:900; font-size:24px;
        color:var(--espresso); letter-spacing:.04em; margin:0 0 6px; }
   h1::after, .ptitle::after { content:"☕"; display:block; font-size:16px; margin-top:2px; opacity:.7; }
@@ -1313,6 +1330,8 @@ PAGE = r"""<!DOCTYPE html>
             font-family:var(--font-head); font-weight:700; font-size:13px;
             box-shadow:var(--shadow); }
   #mktBtn:hover { border-color:var(--caramel); color:var(--caramel-2); }
+  /* App 裡隱藏跨網域的台股入口 —— 見 <head> 的 in-app 偵測 */
+  html.in-app #mktBtn { display:none; }
   @media(max-width:420px){ #mktBtn, #topBtns #langBtn { padding:0 11px; font-size:12.5px; } }
 </style>
 </head>
@@ -1380,12 +1399,6 @@ PAGE = r"""<!DOCTYPE html>
     <span class="ic">🎯</span>
     <span class="body"><span class="nm" data-i18n="p3.title">飆股拉回找買點</span>
       <span class="ds" data-i18n="home.c2">收盤回到指定均線 ±3%</span></span>
-    <span class="chev">›</span>
-  </a>
-  <a class="menu-item" href="__TW_URL__" style="text-decoration:none;color:inherit">
-    <span class="ic">🇹🇼</span>
-    <span class="body"><span class="nm" data-i18n="nav.tw">台股咖啡館</span>
-      <span class="ds" data-i18n="home.c3">同一套邏輯的台股版，已上線</span></span>
     <span class="chev">›</span>
   </a>
 </div>
@@ -2173,6 +2186,34 @@ def icon():
     #    只有「換一個網址」才會讓它重抓，所以版本號是必要的。
     resp.headers["Cache-Control"] = "public, max-age=604800"
     return resp
+
+
+@app.route("/.well-known/assetlinks.json")
+def assetlinks():
+    """Google Play TWA 的 Digital Asset Links 驗證檔。
+
+    為什麼美股版也要有：TWA 只信任 assetlinks 驗證過的網域。
+    us.stock-coffee.com 對 App 來說是**不同來源**，沒驗證過的話，
+    從台股版點過來會被丟進 Custom Tab —— 那就是使用者看到的網址列。
+
+    設定：Render → Environment 加上與台股版**完全相同**的
+    TWA_PACKAGE 與 TWA_FINGERPRINT（同一個 App、同一組簽章）。
+    另外 TWA 專案的 twa-manifest.json 要把本網域加進 additionalTrustedOrigins。
+    """
+    pkg = os.environ.get("TWA_PACKAGE", "")
+    fps = []
+    for k in sorted(os.environ):
+        if k.startswith("TWA_FINGERPRINT"):
+            fps += [f.strip() for f in os.environ[k].split(",") if f.strip()]
+    seen = set()
+    fps = [f for f in fps if not (f in seen or seen.add(f))]
+    if not pkg or not fps:
+        return jsonify([]), 200
+    return jsonify([{
+        "relation": ["delegate_permission/common.handle_all_urls"],
+        "target": {"namespace": "android_app", "package_name": pkg,
+                   "sha256_cert_fingerprints": fps},
+    }])
 
 
 @app.route("/manifest.json")

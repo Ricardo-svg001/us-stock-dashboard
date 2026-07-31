@@ -1,0 +1,6 @@
+cache/
+venv/
+__pycache__/
+.DS_Store
+*.tmp
+待翻譯.txt

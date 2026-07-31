@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: us-stock-screener
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    # workers 1 是刻意的：背景預抓與快取都在單一 process 內，
+    # 多 worker 會各自預抓一份，浪費頻寬也吃記憶體。用 threads 撐併發即可。
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 600
+
+    # 持久化磁碟：3 年份股價約 26 MB + 季報資料，跨部署保留才不用每次重抓
+    disk:
+      name: usstock-cache
+      mountPath: /opt/render/project/src/cache
+      sizeGB: 1
+
+    envVars:
+      - key: CACHE_DIR
+        value: /opt/render/project/src/cache
+      # 姊妹站連結（台股版已上線）
+      - key: TW_URL
+        value: https://stock-coffee.com

@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from flask import Flask, jsonify, request, render_template_string
@@ -189,6 +189,23 @@ def _get(url, timeout=30, tries=3, wait=1.2):
     raise last
 
 
+def _utcnow():
+    """現在時刻，**帶時區的 UTC**。
+
+    ⚠️ 不要用 `datetime.utcnow()`。它回傳的是 naive datetime，
+    「代表 UTC」只存在於命名，物件本身不知道自己是什麼時區。
+    後果是 `.timestamp()` 會被當成本地時間換算（台灣差 8 小時），
+    跟 `datetime.now()` 比較也會**安靜地算錯**而不是報錯。
+    Python 3.12 起已標記 deprecated，未來會移除。
+
+    ⚠️ 換成 aware 之後，**全檔都必須一致**。混用 naive 與 aware 會丟
+    `TypeError: can't compare offset-naive and offset-aware datetimes`。
+    特別注意 `datetime(...)` 直接建構與 `strptime()` 預設都是 naive，
+    要記得補 `tzinfo=timezone.utc`。
+    """
+    return datetime.now(timezone.utc)
+
+
 def _num(x):
     """把 '$1,234.50'、'12.3%'、'--' 這類字串轉成 float，失敗回 None。"""
     if x is None:
@@ -298,9 +315,9 @@ def _hist_nasdaq(symbol, frm_date=None):
 
     frm_date（"YYYY-MM-DD"）只抓該日之後 —— 增量更新用，避免每天重抓三年份。
     """
-    to = datetime.utcnow()
+    to = _utcnow()
     if frm_date:
-        frm = datetime.strptime(frm_date, "%Y-%m-%d")
+        frm = datetime.strptime(frm_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     else:
         frm = to - timedelta(days=int(HIST_DAYS * 1.5))   # 交易日換算日曆天
     j = _get(NASDAQ_HIST.format(sym=symbol.upper(),
@@ -351,7 +368,7 @@ def _hist_yahoo(symbol, frm_date=None):
             for t, c in zip(ts, q):
                 if c is None:
                     continue               # 停牌日
-                rows.append((datetime.utcfromtimestamp(t).strftime("%Y-%m-%d"),
+                rows.append((datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%d"),
                              float(c)))
             if rows:
                 return rows
@@ -412,7 +429,7 @@ def _get_history_now(symbol, key, debug=False):
     #    改為：① 已經有滿額筆數，或 ② meta 記錄了上次完整抓取的起始日且涵蓋現在的需求。
     meta_key = "histmeta_%s.json" % symbol.upper()
     meta = _load_cache(meta_key, None) or {}
-    need_from = (datetime.utcnow() - timedelta(days=int(HIST_DAYS * 1.5))).strftime("%Y-%m-%d")
+    need_from = (_utcnow() - timedelta(days=int(HIST_DAYS * 1.5))).strftime("%Y-%m-%d")
     have_full = bool(old) and (len(old) >= HIST_DAYS
                                or str(meta.get("full_from", "9999")) <= need_from)
     frm = old[-1][0] if have_full else None   # 從最後一天開始抓（含當天，讓當日收盤有機會更新）
@@ -723,7 +740,7 @@ def _is_regular_session(now_utc=None):
     會照常抓一次現價，拿到的是前一日收盤。成本可接受，
     不值得為此維護一份每年要更新的假日清單。
     """
-    now_utc = now_utc or datetime.utcnow()
+    now_utc = now_utc or _utcnow()
     et = now_utc - timedelta(hours=_et_offset_hours(now_utc))
     if et.weekday() >= 5:
         return False
@@ -1078,7 +1095,7 @@ def prefetch(universe_n=300):
         PREFETCH_STATE["stage"] = "讀取基本面資料 %d / %d" % (i, total)
     load_fundamentals(syms, status_cb=cb2)   # 預抓時不算本益比，篩選時才用當下價格重算
     PREFETCH_STATE.update(stage="完成", done=True,
-                          finished_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
+                          finished_at=_utcnow().strftime("%Y-%m-%d %H:%M UTC"))
 
 
 # ---------------------------------------------------------------- 每日自動更新
@@ -1138,7 +1155,7 @@ def _sched_save():
 
 def _nth_weekday_utc(year, month, weekday, n):
     """該月第 n 個 weekday（Monday=0 … Sunday=6）的 00:00。"""
-    first = datetime(year, month, 1)
+    first = datetime(year, month, 1, tzinfo=timezone.utc)
     return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (n - 1))
 
 
@@ -1161,16 +1178,19 @@ def _next_update_utc(now_utc=None):
     美股國定假日不特別排除 —— 那天 API 只會回到前一交易日，
     增量抓取本來就會判定沒有新資料，多跑一次的成本很低。
     """
-    now_utc = now_utc or datetime.utcnow()
+    now_utc = now_utc or _utcnow()
     et_today = (now_utc - timedelta(hours=_et_offset_hours(now_utc))).date()
     for d in range(0, 8):
         day = et_today + timedelta(days=d)
         if day.weekday() >= 5:          # 週六 / 週日
             continue
-        naive_et = datetime(day.year, day.month, day.day, UPDATE_HOUR_ET, 0)
+        # 美東牆上時間。標成 UTC 只是為了讓型別一致（aware），
+        # 加上時差之後才是真正的 UTC 瞬間，數值完全相同。
+        et_wall = datetime(day.year, day.month, day.day,
+                           UPDATE_HOUR_ET, 0, tzinfo=timezone.utc)
         # 先用冬令時差估一次，再用估出來的 UTC 時間決定真正的時差
-        guess = naive_et + timedelta(hours=5)
-        run_utc = naive_et + timedelta(hours=_et_offset_hours(guess))
+        guess = et_wall + timedelta(hours=5)
+        run_utc = et_wall + timedelta(hours=_et_offset_hours(guess))
         if run_utc > now_utc:
             return run_utc
     return now_utc + timedelta(days=1)   # 理論上到不了
@@ -1189,7 +1209,7 @@ def _beat():
     """心跳。用來判斷執行緒還活著 —— 只靠 enabled 旗標看不出來，
     那個旗標設過一次就不會變，執行緒死掉了它還是顯示「是」。"""
     SCHED_STATE["heartbeat_ts"] = time.time()
-    SCHED_STATE["heartbeat"] = _fmt_et(datetime.utcnow())
+    SCHED_STATE["heartbeat"] = _fmt_et(_utcnow())
 
 
 def _daily_updater():
@@ -1219,7 +1239,7 @@ def _daily_updater():
             SCHED_STATE["next_run"] = _fmt_et(nxt)
             # 分段睡眠：一次睡太久遇到系統時間調整會失準；順便定期更新心跳
             while True:
-                remain = (nxt - datetime.utcnow()).total_seconds()
+                remain = (nxt - _utcnow()).total_seconds()
                 if remain <= 0:
                     break
                 time.sleep(min(300.0, remain))
@@ -1229,7 +1249,7 @@ def _daily_updater():
                 SCHED_STATE["last_result"] = "成功"
             except Exception as e:
                 SCHED_STATE["last_result"] = "失敗：%s" % str(e)[:120]
-            SCHED_STATE["last_run"] = _fmt_et(datetime.utcnow())
+            SCHED_STATE["last_run"] = _fmt_et(_utcnow())
             SCHED_STATE["loop_error"] = ""
             _beat()
             _sched_save()
@@ -2524,7 +2544,7 @@ def api_diag():
 
     w("=" * 60)
     w("  美股咖啡館 — 伺服器端診斷")
-    w("  " + (datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")))
+    w("  " + (_utcnow().strftime("%Y-%m-%d %H:%M UTC")))
     w("=" * 60)
 
     w("\n【環境】")

@@ -15,6 +15,13 @@ services:
       sizeGB: 1
 
     envVars:
+      # ⚠️ 鎖定 Python 版本。不指定的話會跟著 Render 的預設飄，
+      #    而版本一升就可能移除已 deprecated 的 API（例如 datetime.utcnow()），
+      #    症狀是「部署成功、跑起來才炸」——比建置失敗難查得多。
+      #    升版要是你決定的，不是 Render 決定的。
+      #    ⚠️ 若建置失敗說找不到這個版本，改成 Render 支援的相近版本即可。
+      - key: PYTHON_VERSION
+        value: "3.12.7"
       - key: CACHE_DIR
         value: /opt/render/project/src/cache
       # 姊妹站連結（台股版已上線）

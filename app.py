@@ -2611,10 +2611,17 @@ def api_diag():
         res = screen_watchlist(150, ma=50, direction="above", days=1, align="none")
         w("  耗時 %.0f 秒｜資料日期 %s｜符合 %d 檔"
           % (time.time() - t0, res.get("as_of"), len(res.get("rows", []))))
+        w("  現價欄位        : %s"
+          % ("已附加（盤中）" if res.get("quote", {}).get("ts")
+             else "未附加（休市，符合預期）" if res.get("quote", {}).get("open") is False
+             else "未附加 ← 盤中卻沒抓到，值得查"))
+        w("    %-6s %-18.18s %8s %8s %7s  %s"
+          % ("代號", "名稱", "收盤", "現價", "乖離", "創新高"))
         for r in res.get("rows", [])[:5]:
-            w("    %-6s %-18.18s %8.2f  %+6.2f%%  %s"
-              % (r["symbol"], r.get("name_zh") or r["name"], r["price"], r["gap"],
-                 r.get("new_high") or "-"))
+            w("    %-6s %-18.18s %8.2f %8s %+6.2f%%  %s"
+              % (r["symbol"], r.get("name_zh") or r["name"], r["price"],
+                 ("%.2f" % r["last"]) if r.get("last") is not None else "—",
+                 r["gap"], r.get("new_high") or "-"))
         if not res.get("rows"):
             w("  ⚠️ 沒有任何結果 —— 多半是股價抓不到（看上面對外連線那段）")
     except Exception as e:

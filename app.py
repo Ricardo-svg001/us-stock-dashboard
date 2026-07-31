@@ -910,6 +910,100 @@ def prefetch(universe_n=300):
                           finished_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
 
 
+# ---------------------------------------------------------------- 每日自動更新
+#
+# 為什麼需要這個：原本只有「程式啟動時預抓一次」。Render 不會每天重啟，
+# 所以服務跑一週之後，使用者看到的還是一週前的收盤價。
+#
+# 時間怎麼定的：
+#   美股 16:00 ET 收盤 → 台灣 04:00（夏令）／05:00（冬令）
+#   但 Nasdaq historical API 的當日 K 線要等官方結算寫入，
+#   收盤瞬間去抓常常只到前一交易日。實測穩定要收盤後約 1.5～2 小時。
+#   因此固定用 **18:00 ET**（收盤後 2 小時），換算台灣時間是
+#   夏令 06:00、冬令 07:00。留 2 小時緩衝，比壓在 05:00 安全得多。
+#
+# ⚠️ 不要把觸發時間改早到 16:00～17:00 ET。那時 API 常只回到前一交易日，
+#    histmeta 的增量判斷會認定「今天沒有新資料」，要等隔天才補上，
+#    等於整天資料都慢一天。這個坑不要踩。
+#
+# ⚠️ 刻意不裝 pytz / 不依賴系統 tzdata。美國 DST 規則是固定的
+#    （3 月第 2 個週日 ～ 11 月第 1 個週日），自己算 15 行就好，
+#    符合本專案「只用 flask/requests/gunicorn」的相依原則。
+
+UPDATE_HOUR_ET = int(os.environ.get("UPDATE_HOUR_ET", "18"))
+SCHED_STATE = {"enabled": False, "next_run": "—", "last_run": "—", "last_result": "—"}
+
+
+def _nth_weekday_utc(year, month, weekday, n):
+    """該月第 n 個 weekday（Monday=0 … Sunday=6）的 00:00。"""
+    first = datetime(year, month, 1)
+    return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (n - 1))
+
+
+def _et_offset_hours(dt_utc):
+    """美東相對 UTC 的時差（小時）。夏令 4、冬令 5。
+
+    夏令起：3 月第 2 個週日 02:00 EST = 07:00 UTC
+    夏令迄：11 月第 1 個週日 02:00 EDT = 06:00 UTC
+    """
+    y = dt_utc.year
+    start = _nth_weekday_utc(y, 3, 6, 2) + timedelta(hours=7)
+    end = _nth_weekday_utc(y, 11, 6, 1) + timedelta(hours=6)
+    return 4 if start <= dt_utc < end else 5
+
+
+def _next_update_utc(now_utc=None):
+    """下一次該跑更新的 UTC 時間：最近一個「美東平日 UPDATE_HOUR_ET 整點」。
+
+    週六、週日的美東日期直接跳過（沒有收盤）。
+    美股國定假日不特別排除 —— 那天 API 只會回到前一交易日，
+    增量抓取本來就會判定沒有新資料，多跑一次的成本很低。
+    """
+    now_utc = now_utc or datetime.utcnow()
+    et_today = (now_utc - timedelta(hours=_et_offset_hours(now_utc))).date()
+    for d in range(0, 8):
+        day = et_today + timedelta(days=d)
+        if day.weekday() >= 5:          # 週六 / 週日
+            continue
+        naive_et = datetime(day.year, day.month, day.day, UPDATE_HOUR_ET, 0)
+        # 先用冬令時差估一次，再用估出來的 UTC 時間決定真正的時差
+        guess = naive_et + timedelta(hours=5)
+        run_utc = naive_et + timedelta(hours=_et_offset_hours(guess))
+        if run_utc > now_utc:
+            return run_utc
+    return now_utc + timedelta(days=1)   # 理論上到不了
+
+
+def _fmt_et(dt):
+    off = _et_offset_hours(dt)
+    tw = dt + timedelta(hours=8)
+    return "%s UTC（台灣 %s・美東 %s）" % (
+        dt.strftime("%Y-%m-%d %H:%M"),
+        tw.strftime("%m-%d %H:%M"),
+        (dt - timedelta(hours=off)).strftime("%m-%d %H:%M"))
+
+
+def _daily_updater():
+    """背景執行緒：每個美東交易日收盤後重跑一次 prefetch。"""
+    SCHED_STATE["enabled"] = True
+    while True:
+        nxt = _next_update_utc()
+        SCHED_STATE["next_run"] = _fmt_et(nxt)
+        # 分段睡眠：一次睡太久遇到系統時間調整會失準
+        while True:
+            remain = (nxt - datetime.utcnow()).total_seconds()
+            if remain <= 0:
+                break
+            time.sleep(min(300.0, remain))
+        try:
+            prefetch(300)
+            SCHED_STATE["last_result"] = "成功"
+        except Exception as e:
+            SCHED_STATE["last_result"] = "失敗：%s" % str(e)[:120]
+        SCHED_STATE["last_run"] = _fmt_et(datetime.utcnow())
+        time.sleep(90)   # 跨過觸發點，避免同一分鐘內重複觸發
+
+
 PAGE = r"""<!DOCTYPE html>
 <html lang="zh-Hant-TW">
 <head>
@@ -2135,6 +2229,15 @@ def api_diag():
         w("  %-14s : %s" % (k, v))
     w("  最近來源        : %s" % LAST_SOURCE)
 
+    w("\n【每日自動更新】")
+    w("  排程執行中      : %s" % ("是" if SCHED_STATE["enabled"] else
+                                  "否 ← ENABLE_DAILY_UPDATE=0，資料不會自動變新"))
+    w("  觸發時間        : 每個美東交易日 %02d:00 ET（收盤後 %d 小時）"
+      % (UPDATE_HOUR_ET, UPDATE_HOUR_ET - 16))
+    w("  下次更新        : %s" % SCHED_STATE["next_run"])
+    w("  上次更新        : %s" % SCHED_STATE["last_run"])
+    w("  上次結果        : %s" % SCHED_STATE["last_result"])
+
     w("\n【對外連線】—— 這一段最關鍵")
     tests = [
         ("Nasdaq 股票清單", lambda: len(_get(NASDAQ_SCREENER, timeout=40, tries=1)
@@ -2297,6 +2400,7 @@ def api_prefetch_status():
     # 快取會在每次部署後消失，等於每次都要重新預抓 6 分鐘。
     st["cache_dir"] = CACHE_DIR
     st["disk_mounted"] = "/opt/render" in CACHE_DIR
+    st["schedule"] = dict(SCHED_STATE)
     try:
         files = os.listdir(CACHE_DIR)
         st["cached_symbols"] = len([f for f in files if f.startswith("hist_")])
@@ -2310,6 +2414,10 @@ def api_prefetch_status():
 
 if os.environ.get("ENABLE_PREFETCH", "1") == "1":
     threading.Thread(target=lambda: prefetch(300), daemon=True).start()
+
+# 每日自動更新。設 ENABLE_DAILY_UPDATE=0 可關閉（本機開發時通常會關）。
+if os.environ.get("ENABLE_DAILY_UPDATE", "1") == "1":
+    threading.Thread(target=_daily_updater, daemon=True).start()
 
 
 if __name__ == "__main__":

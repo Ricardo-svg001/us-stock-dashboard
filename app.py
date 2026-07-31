@@ -916,6 +916,11 @@ PAGE = r"""<!DOCTYPE html>
 <title>美股咖啡館 US Stock Coffee｜美股選股工具・均線篩選</title>
 <meta name="description" content="免費美股選股工具。用 10/20/50/150 日均線與均線排列篩選市值前 300 大美股，找出強勢股與轉弱股。免註冊、開啟即用。">
 <meta name="theme-color" content="#33241A">
+<link rel="icon" href="/icon.png" type="image/png">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700;900&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -1889,6 +1894,116 @@ for _slug, _pid in PAGE_ROUTES.items():
                      (lambda p=_pid: (lambda: _render(p)))())
 
 
+@app.route("/api/diag")
+def api_diag():
+    """伺服器端診斷：一次查完「為什麼篩選不出來」的所有可能原因。
+
+    回傳純文字（瀏覽器直接開得起來）。這比在本機猜有用得多 ——
+    最關鍵的是**確認 Render 的機房 IP 能不能連上 Nasdaq**：
+    Stooq 與 Yahoo 都擋機房 IP，Nasdaq 也可能一樣，
+    而那在本機（家用 IP）測是測不出來的。
+    """
+    import io as _io
+    import traceback
+    out = _io.StringIO()
+
+    def w(line=""):
+        out.write(str(line) + "\n")
+
+    w("=" * 60)
+    w("  美股咖啡館 — 伺服器端診斷")
+    w("  " + (datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")))
+    w("=" * 60)
+
+    w("\n【環境】")
+    w("  CACHE_DIR      : %s" % CACHE_DIR)
+    w("  磁碟已掛載      : %s" % ("是" if "/opt/render" in CACHE_DIR else
+                                  "否 ← 快取每次部署會消失"))
+    w("  TW_URL         : %s" % TW_URL)
+    try:
+        files = os.listdir(CACHE_DIR)
+        w("  快取 hist_     : %d 檔" % len([f for f in files if f.startswith("hist_")]))
+        w("  快取 fund_     : %d 檔" % len([f for f in files if f.startswith("fund_")]))
+        w("  快取大小        : %.1f MB" % (sum(
+            os.path.getsize(os.path.join(CACHE_DIR, f)) for f in files) / 1e6))
+    except Exception as e:
+        w("  快取讀取失敗    : %s" % e)
+
+    w("\n【預抓狀態】")
+    for k, v in PREFETCH_STATE.items():
+        w("  %-14s : %s" % (k, v))
+    w("  最近來源        : %s" % LAST_SOURCE)
+
+    w("\n【對外連線】—— 這一段最關鍵")
+    tests = [
+        ("Nasdaq 股票清單", lambda: len(_get(NASDAQ_SCREENER, timeout=40, tries=1)
+                                        .json().get("data", {}).get("rows", []))),
+        ("Nasdaq 歷史報價 AAPL", lambda: len(_hist_nasdaq("AAPL"))),
+        ("Nasdaq 季報 AAPL", lambda: str(get_fundamentals("AAPL", max_age_hours=0))[:90]),
+    ]
+    for name, fn in tests:
+        t0 = time.time()
+        try:
+            r = fn()
+            w("  ✅ %-22s %s（%.1f 秒）" % (name, r, time.time() - t0))
+        except Exception as e:
+            w("  ❌ %-22s %s: %s" % (name, type(e).__name__, str(e)[:120]))
+            w("     %s" % traceback.format_exc().strip().split("\n")[-1][:120])
+
+    w("\n【實跑一次小型篩選】市值前 150 大 / 50MA / 站上 / 不限排列")
+    try:
+        t0 = time.time()
+        res = screen_watchlist(150, ma=50, direction="above", days=1, align="none")
+        w("  耗時 %.0f 秒｜資料日期 %s｜符合 %d 檔"
+          % (time.time() - t0, res.get("as_of"), len(res.get("rows", []))))
+        for r in res.get("rows", [])[:5]:
+            w("    %-6s %-18.18s %8.2f  %+6.2f%%  %s"
+              % (r["symbol"], r.get("name_zh") or r["name"], r["price"], r["gap"],
+                 r.get("new_high") or "-"))
+        if not res.get("rows"):
+            w("  ⚠️ 沒有任何結果 —— 多半是股價抓不到（看上面對外連線那段）")
+    except Exception as e:
+        w("  ❌ 篩選拋出例外: %s: %s" % (type(e).__name__, str(e)[:150]))
+        w(traceback.format_exc()[-800:])
+
+    w("\n" + "=" * 60)
+    w("  把整份輸出貼給 Claude")
+    w("=" * 60)
+    return app.response_class(out.getvalue(), mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/icon.png")
+def icon():
+    """網站圖示。與台股版用同一張（咖啡杯 + 紅K笑臉）—— 同一個品牌家族。"""
+    p = os.path.join(BASE_DIR, "icon.png")
+    if os.path.exists(p):
+        from flask import send_file
+        return send_file(p, mimetype="image/png")
+    return "", 404
+
+
+@app.route("/manifest.json")
+def manifest():
+    return jsonify({
+        "name": "美股咖啡館",
+        "short_name": "美股咖啡館",
+        "description": "美股選股工具：用 10/20/50/150 日均線與均線排列篩選市值前 300 大美股。",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "portrait",
+        "lang": "zh-Hant-TW",
+        "categories": ["finance", "productivity"],
+        "background_color": "#F1EAD9",
+        "theme_color": "#33241A",
+        "icons": [
+            {"src": "/icon.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        ],
+    })
+
+
 @app.route("/api/screen", methods=["POST"])
 def api_screen():
     if request.headers.get("X-App-Token") != APP_TOKEN:
@@ -1943,9 +2058,15 @@ def api_job(job_id):
 def api_prefetch_status():
     st = dict(PREFETCH_STATE)
     st["source"] = dict(LAST_SOURCE)
+    # cache_dir 用來確認 Render 的持久化磁碟有沒有掛上 ——
+    # 若顯示的是專案目錄而不是磁碟路徑，代表 CACHE_DIR 沒設，
+    # 快取會在每次部署後消失，等於每次都要重新預抓 6 分鐘。
+    st["cache_dir"] = CACHE_DIR
+    st["disk_mounted"] = "/opt/render" in CACHE_DIR
     try:
         files = os.listdir(CACHE_DIR)
         st["cached_symbols"] = len([f for f in files if f.startswith("hist_")])
+        st["cached_fundamentals"] = len([f for f in files if f.startswith("fund_")])
         st["cache_mb"] = round(sum(
             os.path.getsize(os.path.join(CACHE_DIR, f)) for f in files) / 1e6, 1)
     except Exception:

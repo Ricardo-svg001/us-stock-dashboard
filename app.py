@@ -1301,12 +1301,28 @@ PAGE = r"""<!DOCTYPE html>
              font-family:var(--font-head); font-weight:700; font-size:13px;
              box-shadow:var(--shadow); }
   #langBtn:hover { border-color:var(--caramel); color:var(--caramel-2); }
+
+  /* 右上角按鈕列：市場切換 ＋ 語言。用 flex 排，寬度變動不會互相蓋到 */
+  #topBtns { position:fixed; top:14px; right:14px; z-index:100;
+             display:flex; gap:8px; align-items:center; }
+  #topBtns #langBtn, #topBtns #mktBtn { position:static; top:auto; right:auto; }
+  #mktBtn { height:40px; padding:0 14px; border-radius:20px;
+            border:1.5px solid var(--grounds); background:var(--foam);
+            color:var(--espresso); cursor:pointer; display:inline-flex;
+            align-items:center; gap:5px; text-decoration:none; white-space:nowrap;
+            font-family:var(--font-head); font-weight:700; font-size:13px;
+            box-shadow:var(--shadow); }
+  #mktBtn:hover { border-color:var(--caramel); color:var(--caramel-2); }
+  @media(max-width:420px){ #mktBtn, #topBtns #langBtn { padding:0 11px; font-size:12.5px; } }
 </style>
 </head>
 <body>
 
 <button id="menuBtn" aria-label="選單" data-i18n-aria="ui.menu"><span></span><span></span><span></span></button>
-<button id="langBtn" title="切換公司與產業的顯示語言">EN</button>
+<div id="topBtns">
+  <a id="mktBtn" href="__TW_URL__" title="切換到台股咖啡館" aria-label="切換到台股咖啡館" data-i18n-aria="ui.mkt.aria">🇹🇼 <span data-i18n="ui.mkt">台股</span></a>
+  <button id="langBtn" title="切換公司與產業的顯示語言">EN</button>
+</div>
 <div id="overlay"></div>
 
 <div id="brewModal">
@@ -1327,7 +1343,6 @@ PAGE = r"""<!DOCTYPE html>
   <a class="navitem active" data-page="home" href="/"><i>☕</i><b data-i18n="nav.home">菜單首頁</b><small>US Stock Coffee</small></a>
   <a class="navitem" data-page="p1" href="/screener"><i>📈</i><b data-i18n="p1.title">觀察清單策略</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
   <a class="navitem" data-page="p3" href="/pullback"><i>🎯</i><b data-i18n="p3.title">飆股拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
-  <a class="navitem" href="__TW_URL__"><i>🇹🇼</i><b data-i18n="nav.tw">台股咖啡館</b><small data-i18n="nav.tw.sub">Stock Coffee · 台股選股</small></a>
 </nav>
 
 <div class="wrap">
@@ -1497,6 +1512,7 @@ const I18N = { en: {
   "nav.home": "Menu", "nav.screen.sub": "Find leading stocks",
   "nav.pull.sub": "Close back within ±3% of an MA",
   "nav.tw": "Taiwan Stock Coffee", "nav.tw.sub": "Stock Coffee · TW screener",
+  "ui.mkt": "TW", "ui.mkt.aria": "Switch to Taiwan Stock Coffee",
   "home.about": "About this tool",
   "home.aboutBody": "The US edition of Stock Coffee. Screen the top 300 US companies by market cap using <b>moving averages</b> \u2014 crossing above or below a chosen MA, or matching a specific MA alignment.<br><br>The MA set follows US convention: <b>10 / 20 / 50 / 150-day</b>. The 50-day line plays the role Taiwan's 60-day line does; the 150-day tracks the intermediate trend.<br><br>Data is daily closing prices, not real-time quotes.",
   "home.c1": "Screen by moving average and MA alignment",

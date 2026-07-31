@@ -17,6 +17,8 @@
 """
 
 import csv
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -1547,6 +1549,20 @@ function brewClose(){
   document.body.style.overflow = "";
 }
 
+/* 連線憑證過期時自動重新整理一次。
+   會發生在：伺服器重啟換了密鑰，或分頁開太久（token 24 小時到期）。
+   用 sessionStorage 記錄避免無限重整 —— 如果重整後還是失敗，就顯示訊息讓人知道。 */
+function retryOnStaleToken(j){
+  if (!j || !/憑證|token/i.test(j.error || "")) return false;
+  if (sessionStorage.getItem("tokenRetry")) {
+    sessionStorage.removeItem("tokenRetry");
+    return false;                       /* 已經重整過還是不行 → 讓錯誤顯示出來 */
+  }
+  sessionStorage.setItem("tokenRetry", "1");
+  location.reload();
+  return true;
+}
+
 function val(name){
   const el = document.querySelector(`input[name=${name}]:checked`);
   return el ? el.value : "";
@@ -1578,7 +1594,9 @@ if ($("#go1")) $("#go1").onclick = () => {
     method:"POST", headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},
     body: JSON.stringify(params)
   }).then(r => r.json()).then(j => {
-    if (!j.job){ brewClose(); $("#go1").disabled = false;
+    if (!j.job){
+      brewClose(); $("#go1").disabled = false;
+      if (retryOnStaleToken(j)) return;
       $("#status1").textContent = j.error || "無法建立工作"; return; }
     poll(j.job);
   }).catch(e => { brewClose(); $("#go1").disabled = false;
@@ -1594,6 +1612,7 @@ function poll(id){
     }
     brewClose();
     $("#go1").disabled = false;
+    sessionStorage.removeItem("tokenRetry");
     if (j.error){ $("#status1").textContent = "篩選失敗：" + j.error; return; }
     render(j.result);
   }).catch(e => { brewClose(); $("#go1").disabled = false;
@@ -1743,7 +1762,9 @@ if ($("#go3")) $("#go3").onclick = () => {
     method:"POST", headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},
     body: JSON.stringify(params)
   }).then(r => r.json()).then(j => {
-    if (!j.job){ brewClose(); $("#go3").disabled = false;
+    if (!j.job){
+      brewClose(); $("#go3").disabled = false;
+      if (retryOnStaleToken(j)) return;
       $("#status3").textContent = j.error || "無法建立工作"; return; }
     poll3(j.job);
   }).catch(e => { brewClose(); $("#go3").disabled = false;
@@ -1755,6 +1776,7 @@ function poll3(id){
     if (!j.done){ brewProgress(j.progress, j.status); setTimeout(() => poll3(id), 900); return; }
     brewClose();
     $("#go3").disabled = false;
+    sessionStorage.removeItem("tokenRetry");
     if (j.error){ $("#status3").textContent = "篩選失敗：" + j.error; return; }
     render3(j.result);
   }).catch(e => { brewClose(); $("#go3").disabled = false;
@@ -1842,7 +1864,53 @@ if (START_PAGE && $("#" + START_PAGE)){
 # ---------------------------------------------------------------- Flask
 
 app = Flask(__name__)
-APP_TOKEN = uuid.uuid4().hex
+# ---- App token ----
+# ⚠️ **不能用「每次啟動產生一組隨機值」**。Render 掛了磁碟就沒有零停機部署，
+#    每次部署／重啟都是新 process；使用者開著的分頁裡是舊 token，
+#    按下篩選就一律 403 —— 而且看起來像「網站壞了」，很難聯想到 token。
+#    改用台股版那套：HMAC 簽發、帶到期時間，重啟後舊 token 依然有效。
+#
+# 密鑰存在快取目錄（有掛持久化磁碟就跨部署保留）。
+# 沒有磁碟時會重新產生 —— 那種情況下 token 也只是防外站盜用，重簽即可。
+def _app_secret():
+    p = os.path.join(CACHE_DIR, ".app_secret")
+    try:
+        with open(p, "r") as f:
+            v = f.read().strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    v = uuid.uuid4().hex
+    try:
+        with open(p, "w") as f:
+            f.write(v)
+    except Exception:
+        pass
+    return v
+
+
+APP_SECRET = os.environ.get("APP_SECRET") or _app_secret()
+TOKEN_TTL = 24 * 3600
+
+
+def make_app_token():
+    """簽發 24 小時有效的 token，隨頁面一起下發。"""
+    exp = str(int(time.time()) + TOKEN_TTL)
+    sig = hmac.new(APP_SECRET.encode(), exp.encode(), hashlib.sha256).hexdigest()[:32]
+    return "%s.%s" % (exp, sig)
+
+
+def _valid_app_token(tok):
+    try:
+        exp, sig = (tok or "").split(".", 1)
+        if int(exp) < time.time():
+            return False
+        good = hmac.new(APP_SECRET.encode(), exp.encode(),
+                        hashlib.sha256).hexdigest()[:32]
+        return hmac.compare_digest(sig, good)
+    except Exception:
+        return False
 
 # 網址 → 分頁 id（與台股版同一套：功能頁各有自己的網址）
 # 姊妹站（台股咖啡館）。已經上線，所以直接給預設值；
@@ -1878,7 +1946,7 @@ def _compress(resp):
 
 
 def _render(start_page="home"):
-    html = PAGE.replace("__APP_TOKEN__", APP_TOKEN)
+    html = PAGE.replace("__APP_TOKEN__", make_app_token())
     html = html.replace("__START_PAGE__", start_page, 1)
     html = html.replace("__TW_URL__", TW_URL)
     return render_template_string(html)
@@ -2006,8 +2074,8 @@ def manifest():
 
 @app.route("/api/screen", methods=["POST"])
 def api_screen():
-    if request.headers.get("X-App-Token") != APP_TOKEN:
-        return jsonify(error="無效的請求來源"), 403
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
     p = request.get_json(silent=True) or {}
     params = {
         "universe_n": int(p.get("universe_n") or 150),
@@ -2028,8 +2096,8 @@ def api_screen():
 
 @app.route("/api/pullback", methods=["POST"])
 def api_pullback():
-    if request.headers.get("X-App-Token") != APP_TOKEN:
-        return jsonify(error="無效的請求來源"), 403
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
     p = request.get_json(silent=True) or {}
     params = {
         "universe_n": int(p.get("universe_n") or 150),

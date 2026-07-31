@@ -627,7 +627,14 @@ def _quote_now(symbol):
       data.keyStats.fiftyTwoWeekHighLow.value  "201.50 - 344.57"
 
     ⚠️ 欄位名以實測為準（2026-07-31 盤中），不要照 API 文件猜。
-       secondaryData 盤中是空的，休市時才驗得到 —— 所以這裡對它做防禦性解析。
+
+    ⚠️ **secondaryData 這條路現在很少走到，但不是死碼**：
+       `attach_quotes()` 只在 09:30–16:00 ET 呼叫，所以正常日子都是 primaryData。
+       但**半日交易**（感恩節隔天、平安夜等，13:00 ET 就收盤，一年約 3 天）
+       在 13:00–16:00 這段我們的時間窗說「盤中」、Nasdaq 卻已回報 After Hours，
+       這時就會走到 secondaryData。欄位名假設與 primaryData 相同，
+       **這個假設沒有實測過**（需要挑半日交易當天才驗得到）。
+       真的出錯也只是該檔顯示「—」，不影響篩選。
     """
     try:
         j = _get(QUOTE_URL % symbol.upper(), timeout=20, tries=2).json()
@@ -705,6 +712,24 @@ def load_quotes(symbols, workers=8):
     return out
 
 
+def _is_regular_session(now_utc=None):
+    """現在是不是美股**正常交易時段**（09:30–16:00 ET 的平日）。
+
+    盤前（04:00–09:30）與盤後（16:00–20:00）刻意回 False —— 見 attach_quotes()。
+    純時間計算，不打任何 API。`_et_offset_hours()` 定義在下面的排程區塊，
+    Python 是呼叫時才解析名稱，所以順序沒問題。
+
+    ⚠️ **美股國定假日不會被排除**（沒有假日表）。那幾天（一年約 9 天）
+    會照常抓一次現價，拿到的是前一日收盤。成本可接受，
+    不值得為此維護一份每年要更新的假日清單。
+    """
+    now_utc = now_utc or datetime.utcnow()
+    et = now_utc - timedelta(hours=_et_offset_hours(now_utc))
+    if et.weekday() >= 5:
+        return False
+    return 570 <= et.hour * 60 + et.minute < 960      # 09:30 – 16:00 ET
+
+
 def attach_quotes(rows):
     """把現價附加到篩選結果上。就地修改並回傳 (rows, 報價中繼資料)。
 
@@ -714,6 +739,13 @@ def attach_quotes(rows):
     """
     if not rows or os.environ.get("ENABLE_QUOTES", "1") != "1":
         return rows, {}
+    # ⚠️ 只在**盤中**抓現價。
+    #    盤前／盤後抓到的價格意義不大（成交量薄、價差大），
+    #    但要付出完整的等待成本（每檔約 2.4 秒，50 檔就是 15 秒）。
+    #    台灣早上看盤前計畫時美股已休市，這時篩選應該要**立刻**回來。
+    #    時間判斷是純計算、不花任何網路請求。
+    if not _is_regular_session():
+        return rows, {"open": False}
     quotes = load_quotes([r["symbol"] for r in rows])
     meta = {}
     for r in rows:
@@ -1867,6 +1899,7 @@ const I18N = { en: {
   "th.close": "Close", "th.last": "Last", "th.lastgap": "vs Close%",
   "q.last": "Last", "q.regular": "market hours",
   "q.extended": "pre/after-hours", "q.close": "at close",
+  "q.closed": "Market closed — showing last close",
   "th.eps": "Q EPS YoY", "th.rev": "Q Rev YoY", "th.nh": "New high",
   "th.align": "MA alignment", "th.hit": "Match date", "th.asof": "Data date",
   "flt.sector": "Sector", "flt.allSector": "All sectors",
@@ -2047,6 +2080,7 @@ function render(res){
   lastRows = res.rows || [];
   lastMeta = {as_of: res.as_of, ma_name_zh: res.ma_name_zh, ma_name: res.ma_name};
   const showAlign = val("align") === "none";
+  const showQ = hasQuote(res.quote);
   const per = lastRows.find(r => r.period);
   $("#status1").innerHTML = t("st.asof","資料日期") + " " + (res.as_of || "—")
     + (per ? "｜" + t("st.quarter","財報季") + " " + per.period : "")
@@ -2078,14 +2112,15 @@ function render(res){
      + "<th>" + t("th.rank","市值排名") + "</th><th>" + t("th.sym","代號")
      + "</th><th>" + t("th.name","公司名稱") + "</th><th>" + t("th.sector","產業") + "</th>"
      + "<th>" + t("th.close","收盤") + "</th>"
-     + "<th>" + t("th.last","現價") + "</th><th>" + t("th.lastgap","與收盤差%") + "</th>"
+     + (showQ ? "<th>" + t("th.last","現價") + "</th><th>"
+              + t("th.lastgap","與收盤差%") + "</th>" : "")
      + "<th>" + t("th.gap","均線乖離%") + "</th>"
      + "<th>" + t("th.eps","季EPS年增") + "</th><th>" + t("th.rev","季營收年增")
      + "</th><th>" + t("th.nh","創新高") + "</th>"
      + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
-     + "<th>" + t("th.hit","符合日期") + "</th></tr></thead><tbody id='tb1'>" + rowsHtml(lastRows, showAlign)
+     + "<th>" + t("th.hit","符合日期") + "</th></tr></thead><tbody id='tb1'>" + rowsHtml(lastRows, showAlign, showQ)
      + "</tbody></table></div>";
-  h += "<div id='cd1'>" + cardsHtml(lastRows, showAlign, t("th.hit","符合日期")) + "</div>";
+  h += "<div id='cd1'>" + cardsHtml(lastRows, showAlign, t("th.hit","符合日期"), showQ) + "</div>";
   $("#result1").innerHTML = h;
 }
 
@@ -2169,12 +2204,16 @@ function fmtLastPct(s){
 /* 報價狀態：讓使用者一眼知道這個價格是什麼時候、哪個時段的。
    不標「延遲」——實測 isRealTime=True，標錯反而誤導。 */
 function quoteNote(q){
+  if (q && q.open === false) return "｜" + t("q.closed","美股休市中，顯示收盤價");
   if (!q || !q.ts) return "";
   const kind = {regular:  t("q.regular","盤中"),
                 extended: t("q.extended","盤前／盤後"),
                 close:    t("q.close","已收盤")}[q.kind] || "";
   return "｜" + t("q.last","現價") + " " + kind + " " + q.ts;
 }
+/* 休市時整組現價欄位都不要出現 —— 全是「—」的兩欄只是白佔寬度。
+   ⚠️ 表頭、資料列、卡片三個地方都吃這個旗標，改的時候要一起改。 */
+function hasQuote(q){ return !!(q && q.ts); }
 
 /* 基本面欄位的顯示：抓不到就顯示「—」，不要留空白讓人以為壞掉 */
 function fmtYoY(v){ return (v == null) ? "—" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%"; }
@@ -2187,14 +2226,14 @@ function fmtHit(s){
   return d + " <small style='color:var(--mocha)'>(" + s.hit_days + "/" + s.days + ")</small>";
 }
 
-function rowsHtml(rows, showAlign){
+function rowsHtml(rows, showAlign, showQ){
   return rows.map(s =>
     "<tr data-sector=\"" + sectorKey(s) + "\">"
     + "<td>" + s.rank + "</td><td><b>" + s.symbol + "</b></td>"
     + "<td class='coname' title=\"" + s.name + "\">" + coName(s) + "</td>"
     + "<td class='sector' title=\"" + s.sector + "\">" + coSector(s) + "</td>"
     + "<td>" + s.price.toFixed(2) + "</td>"
-    + "<td>" + fmtLast(s) + "</td><td>" + fmtLastPct(s) + "</td>"
+    + (showQ ? "<td>" + fmtLast(s) + "</td><td>" + fmtLastPct(s) + "</td>" : "")
     + "<td class='" + (s.gap >= 0 ? "pos" : "neg") + "'>" + (s.gap >= 0 ? "+" : "") + s.gap.toFixed(2) + "%</td>"
     + "<td class='" + yoyCls(s.eps_yoy) + "'>" + fmtYoY(s.eps_yoy) + "</td>"
     + "<td class='" + yoyCls(s.rev_yoy) + "'>" + fmtYoY(s.rev_yoy) + "</td>"
@@ -2208,15 +2247,16 @@ function rowsHtml(rows, showAlign){
    改顯示 .res-cards。**所以每個輸出表格的地方都必須同時輸出卡片**，
    否則手機上會只剩狀態列、下面一片空白（狀態列還會顯示「符合 N 檔」，
    看起來像資料抓不到，其實是版面問題）。這個坑踩過，見變更紀錄。 */
-function cardsHtml(rows, showAlign, lastLabel){
+function cardsHtml(rows, showAlign, lastLabel, showQ){
   return "<div class='res-cards'>" + rows.map((s, i) =>
     "<details class='scard' data-i='" + i + "'>"
     /* 卡片標題列優先顯示現價（手機上只看得到這一行，要放最新的那個數字） */
     + "<summary><span class='sc-l'><b>" + s.symbol + "</b> " + coName(s) + "</span>"
-    + "<span class='sc-r'>" + (s.last != null ? fmtLast(s) : s.price.toFixed(2)) + "</span></summary>"
+    + "<span class='sc-r'>" + (showQ && s.last != null ? fmtLast(s) : s.price.toFixed(2)) + "</span></summary>"
     + "<div class='scard-body'>"
     + "<div class='kv'><span>" + t("th.close","收盤") + "</span><b>" + s.price.toFixed(2) + "</b></div>"
-    + "<div class='kv'><span>" + t("th.lastgap","與收盤差%") + "</span><b>" + fmtLastPct(s) + "</b></div>"
+    + (showQ ? "<div class='kv'><span>" + t("th.lastgap","與收盤差%")
+             + "</span><b>" + fmtLastPct(s) + "</b></div>" : "")
     + "<div class='kv'><span>" + t("th.rank","市值排名") + "</span><b>" + s.rank + "</b></div>"
     + "<div class='kv'><span>" + t("th.sector","產業") + "</span><b>" + coSector(s) + "</b></div>"
     + "<div class='kv'><span>" + t("th.gap","均線乖離%") + "</span><b class='"
@@ -2276,6 +2316,7 @@ function render3(res){
   lastMeta3 = {as_of: res.as_of, band: res.band,
                ma_name_zh: res.ma_name_zh, ma_name: res.ma_name};
   const showAlign = val("align3") === "none";
+  const showQ = hasQuote(res.quote);
   const per3 = lastRows3.find(r => r.period);
   $("#status3").innerHTML = t("st.asof","資料日期") + " " + (res.as_of || "—")
     + (per3 ? "｜" + t("st.quarter","財報季") + " " + per3.period : "")
@@ -2308,14 +2349,15 @@ function render3(res){
      + "<th>" + t("th.rank","市值排名") + "</th><th>" + t("th.sym","代號")
      + "</th><th>" + t("th.name","公司名稱") + "</th><th>" + t("th.sector","產業") + "</th>"
      + "<th>" + t("th.close","收盤") + "</th>"
-     + "<th>" + t("th.last","現價") + "</th><th>" + t("th.lastgap","與收盤差%") + "</th>"
+     + (showQ ? "<th>" + t("th.last","現價") + "</th><th>"
+              + t("th.lastgap","與收盤差%") + "</th>" : "")
      + "<th>" + t("th.gap","均線乖離%") + "</th>"
      + "<th>" + t("th.eps","季EPS年增") + "</th><th>" + t("th.rev","季營收年增")
      + "</th><th>" + t("th.nh","創新高") + "</th>"
      + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
      + "<th>" + t("th.asof","資料日期") + "</th></tr></thead><tbody id='tb3'>"
-     + rowsHtml(lastRows3, showAlign) + "</tbody></table></div>";
-  h += "<div id='cd3'>" + cardsHtml(lastRows3, showAlign, t("th.asof","資料日期")) + "</div>";
+     + rowsHtml(lastRows3, showAlign, showQ) + "</tbody></table></div>";
+  h += "<div id='cd3'>" + cardsHtml(lastRows3, showAlign, t("th.asof","資料日期"), showQ) + "</div>";
   $("#result3").innerHTML = h;
 }
 

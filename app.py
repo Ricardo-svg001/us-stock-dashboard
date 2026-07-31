@@ -1304,7 +1304,7 @@ PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
 
-<button id="menuBtn">☰ 菜單</button>
+<button id="menuBtn">☰ <span data-i18n="ui.menu">菜單</span></button>
 <button id="langBtn" title="切換公司與產業的顯示語言">EN</button>
 <div id="overlay"></div>
 
@@ -1315,18 +1315,18 @@ PAGE = r"""<!DOCTYPE html>
       <span class="cup"></span><span class="handle"></span><span class="saucer"></span>
     </div>
     <div class="bm-title" data-i18n="brew.title">沖泡中，請稍候</div>
-    <div class="bm-msg" id="bmMsg">準備中…</div>
+    <div class="bm-msg" id="bmMsg" data-i18n="brew.wait">準備中…</div>
     <div class="bar" id="bmBarWrap" style="display:none"><div id="bmBar" style="width:0%"></div></div>
     <div class="bm-pct" id="bmPct" style="display:none">0%</div>
   </div>
 </div>
 
 <nav id="sidebar">
-  <div class="sbTitle">☕ 美股咖啡館</div>
-  <a class="navitem active" data-page="home" href="/"><i>☕</i><b>菜單首頁</b><small>US Stock Coffee</small></a>
-  <a class="navitem" data-page="p1" href="/screener"><i>📈</i><b>觀察清單策略</b><small>找出強勢主流題材股</small></a>
-  <a class="navitem" data-page="p3" href="/pullback"><i>🎯</i><b>飆股拉回找買點</b><small>收盤回到均線±3%</small></a>
-  <a class="navitem" href="__TW_URL__"><i>🇹🇼</i><b>台股咖啡館</b><small>Stock Coffee · 台股選股</small></a>
+  <div class="sbTitle">☕ <span data-i18n="brand.name">美股咖啡館</span></div>
+  <a class="navitem active" data-page="home" href="/"><i>☕</i><b data-i18n="nav.home">菜單首頁</b><small>US Stock Coffee</small></a>
+  <a class="navitem" data-page="p1" href="/screener"><i>📈</i><b data-i18n="p1.title">觀察清單策略</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
+  <a class="navitem" data-page="p3" href="/pullback"><i>🎯</i><b data-i18n="p3.title">飆股拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
+  <a class="navitem" href="__TW_URL__"><i>🇹🇼</i><b data-i18n="nav.tw">台股咖啡館</b><small data-i18n="nav.tw.sub">Stock Coffee · 台股選股</small></a>
 </nav>
 
 <div class="wrap">
@@ -1335,7 +1335,7 @@ PAGE = r"""<!DOCTYPE html>
 <div class="page show" id="home">
   <div class="brandhead">
     <div class="cup">☕</div>
-    <h1 class="btitle">美股咖啡館</h1>
+    <h1 class="btitle" data-i18n="brand.name">美股咖啡館</h1>
     <div class="bsub">US Stock Coffee</div>
     <div class="bstatus" id="bstatus">
       <span class="dot"></span><span class="stat" id="bstat">OPEN</span>
@@ -1344,8 +1344,8 @@ PAGE = r"""<!DOCTYPE html>
   </div>
 
   <div class="card" style="max-width:560px">
-    <h2>關於這個工具</h2>
-    <div style="font-size:14.5px;color:#555;line-height:1.95">
+    <h2 data-i18n="home.about">關於這個工具</h2>
+    <div style="font-size:14.5px;color:#555;line-height:1.95" data-i18n-html="home.aboutBody">
       台股咖啡館的美股版。用<b>均線</b>從市值前 300 大的美股裡，
       篩出站上或跌破指定均線、以及符合特定均線排列的股票。<br><br>
       均線採美股習慣的 <b>10 / 20 / 50 / 150 日</b>——
@@ -1356,30 +1356,30 @@ PAGE = r"""<!DOCTYPE html>
 
   <a class="menu-item" href="/screener" style="text-decoration:none;color:inherit">
     <span class="ic">📈</span>
-    <span class="body"><span class="nm">觀察清單策略</span>
-      <span class="ds">依均線與均線排列篩選個股</span></span>
+    <span class="body"><span class="nm" data-i18n="p1.title">觀察清單策略</span>
+      <span class="ds" data-i18n="home.c1">依均線與均線排列篩選個股</span></span>
     <span class="chev">›</span>
   </a>
   <a class="menu-item" href="/pullback" style="text-decoration:none;color:inherit">
     <span class="ic">🎯</span>
-    <span class="body"><span class="nm">飆股拉回找買點</span>
-      <span class="ds">收盤回到指定均線 ±3%</span></span>
+    <span class="body"><span class="nm" data-i18n="p3.title">飆股拉回找買點</span>
+      <span class="ds" data-i18n="home.c2">收盤回到指定均線 ±3%</span></span>
     <span class="chev">›</span>
   </a>
   <a class="menu-item" href="__TW_URL__" style="text-decoration:none;color:inherit">
     <span class="ic">🇹🇼</span>
-    <span class="body"><span class="nm">台股咖啡館</span>
-      <span class="ds">同一套邏輯的台股版，已上線</span></span>
+    <span class="body"><span class="nm" data-i18n="nav.tw">台股咖啡館</span>
+      <span class="ds" data-i18n="home.c3">同一套邏輯的台股版，已上線</span></span>
     <span class="chev">›</span>
   </a>
 </div>
 
 <!-- ============ 觀察清單策略 ============ -->
 <div class="page" id="p1">
-  <h2 class="ptitle">觀察清單策略</h2>
+  <h2 class="ptitle" data-i18n="p1.title">觀察清單策略</h2>
   <details class="pgintro">
-    <summary>用均線找出「現在正在漲」的股票</summary>
-    <div class="pgintro-b">
+    <summary data-i18n="p1.introT">用均線找出「現在正在漲」的股票</summary>
+    <div class="pgintro-b" data-i18n-html="p1.intro">
       <p>均線是一群人的平均成本。股價站上 50 日線，代表最近這一季買進的人平均在賺錢；
       跌破 150 日線，代表過去大半年的買方普遍套牢。所以均線不預測未來，
       它告訴你市場參與者現在的處境——而處境會影響他們的行為。</p>
@@ -1393,53 +1393,53 @@ PAGE = r"""<!DOCTYPE html>
     </div>
   </details>
 
-  <div class="card"><h2><span class="stepno">01</span>股票範圍</h2>
-    <label class="opt"><input type="radio" name="universe" value="150" checked><span>市值前150大</span></label>
-    <label class="opt"><input type="radio" name="universe" value="300"><span>市值前300大</span></label>
+  <div class="card"><h2><span class="stepno">01</span><span data-i18n="step.universe">股票範圍</span></h2>
+    <label class="opt"><input type="radio" name="universe" value="150" checked><span data-i18n="opt.u150">市值前150大</span></label>
+    <label class="opt"><input type="radio" name="universe" value="300"><span data-i18n="opt.u300">市值前300大</span></label>
   </div>
 
-  <div class="card"><h2><span class="stepno">02</span>篩選日數</h2>
-    <label class="opt"><input type="radio" name="days" value="1" checked><span>近一日</span></label>
-    <label class="opt"><input type="radio" name="days" value="3"><span>近三日</span></label>
+  <div class="card"><h2><span class="stepno">02</span><span data-i18n="step.days">篩選日數</span></h2>
+    <label class="opt"><input type="radio" name="days" value="1" checked><span data-i18n="opt.d1">近一日</span></label>
+    <label class="opt"><input type="radio" name="days" value="3"><span data-i18n="opt.d3">近三日</span></label>
   </div>
 
-  <div class="card" id="modeCard" style="display:none"><h2>符合方式（近三日）</h2>
-    <label class="opt"><input type="radio" name="mode" value="any" checked><span>部分符合（三日內任一日符合）</span></label>
-    <label class="opt"><input type="radio" name="mode" value="all"><span>完全符合（三日每日都符合）</span></label>
+  <div class="card" id="modeCard" style="display:none"><h2 data-i18n="step.mode">符合方式（近三日）</h2>
+    <label class="opt"><input type="radio" name="mode" value="any" checked><span data-i18n="opt.any">部分符合（三日內任一日符合）</span></label>
+    <label class="opt"><input type="radio" name="mode" value="all"><span data-i18n="opt.all">完全符合（三日每日都符合）</span></label>
   </div>
 
-  <div class="card"><h2><span class="stepno">03</span>均線條件</h2>
-    <label class="opt"><input type="radio" name="ma" value="10"><span>10 日線 (10MA)</span></label>
-    <label class="opt"><input type="radio" name="ma" value="20"><span>20 日線 (20MA)</span></label>
-    <label class="opt"><input type="radio" name="ma" value="50" checked><span>50 日線 (50MA)</span></label>
-    <label class="opt"><input type="radio" name="ma" value="150"><span>150 日線 (150MA)</span></label>
+  <div class="card"><h2><span class="stepno">03</span><span data-i18n="step.ma">均線條件</span></h2>
+    <label class="opt"><input type="radio" name="ma" value="10"><span data-i18n="opt.ma10">10 日線 (10MA)</span></label>
+    <label class="opt"><input type="radio" name="ma" value="20"><span data-i18n="opt.ma20">20 日線 (20MA)</span></label>
+    <label class="opt"><input type="radio" name="ma" value="50" checked><span data-i18n="opt.ma50">50 日線 (50MA)</span></label>
+    <label class="opt"><input type="radio" name="ma" value="150"><span data-i18n="opt.ma150">150 日線 (150MA)</span></label>
   </div>
 
-  <div class="card"><h2><span class="stepno">04</span>方向</h2>
-    <label class="opt"><input type="radio" name="direction" value="above" checked><span>站上</span></label>
-    <label class="opt"><input type="radio" name="direction" value="below"><span>跌破</span></label>
+  <div class="card"><h2><span class="stepno">04</span><span data-i18n="step.dir">方向</span></h2>
+    <label class="opt"><input type="radio" name="direction" value="above" checked><span data-i18n="opt.above">站上</span></label>
+    <label class="opt"><input type="radio" name="direction" value="below"><span data-i18n="opt.below">跌破</span></label>
   </div>
 
-  <div class="card"><h2><span class="stepno">05</span>均線排列</h2>
-    <label class="opt"><input type="radio" name="align" value="strict_bull" checked><span>嚴格多頭（10&gt;20&gt;50&gt;150）（用於強勢股）</span></label>
-    <label class="opt"><input type="radio" name="align" value="strict_bear"><span>嚴格空頭（10&lt;20&lt;50&lt;150）（用於長空）</span></label>
-    <label class="opt"><input type="radio" name="align" value="loose_bull"><span>寬鬆多頭（10&gt;20&gt;50）</span></label>
-    <label class="opt"><input type="radio" name="align" value="loose_bear"><span>寬鬆空頭（10&lt;20&lt;50）</span></label>
-    <label class="opt"><input type="radio" name="align" value="squeeze"><span>均線糾結（四線收斂於 5% 內）</span></label>
-    <label class="opt"><input type="radio" name="align" value="none"><span>不限</span></label>
+  <div class="card"><h2><span class="stepno">05</span><span data-i18n="step.align">均線排列</span></h2>
+    <label class="opt"><input type="radio" name="align" value="strict_bull" checked><span data-i18n="opt.sbull1">嚴格多頭（10&gt;20&gt;50&gt;150）（用於強勢股）</span></label>
+    <label class="opt"><input type="radio" name="align" value="strict_bear"><span data-i18n="opt.sbear1">嚴格空頭（10&lt;20&lt;50&lt;150）（用於長空）</span></label>
+    <label class="opt"><input type="radio" name="align" value="loose_bull"><span data-i18n="opt.lbull">寬鬆多頭（10&gt;20&gt;50）</span></label>
+    <label class="opt"><input type="radio" name="align" value="loose_bear"><span data-i18n="opt.lbear">寬鬆空頭（10&lt;20&lt;50）</span></label>
+    <label class="opt"><input type="radio" name="align" value="squeeze"><span data-i18n="opt.squeeze">均線糾結（四線收斂於 5% 內）</span></label>
+    <label class="opt"><input type="radio" name="align" value="none"><span data-i18n="opt.none">不限</span></label>
   </div>
 
-  <button class="gobtn" id="go1">開始篩選</button>
+  <button class="gobtn" id="go1" data-i18n="btn.screen">開始篩選</button>
   <div class="status" id="status1"></div>
   <div id="result1"></div>
 </div>
 
 <!-- ============ 飆股拉回找買點 ============ -->
 <div class="page" id="p3">
-  <h2 class="ptitle">飆股拉回找買點</h2>
+  <h2 class="ptitle" data-i18n="p3.title">飆股拉回找買點</h2>
   <details class="pgintro">
-    <summary>等強勢股回頭，而不是追在最高點</summary>
-    <div class="pgintro-b">
+    <summary data-i18n="p3.introT">等強勢股回頭，而不是追在最高點</summary>
+    <div class="pgintro-b" data-i18n-html="p3.intro">
       <p>強勢股不會天天漲。上漲一段之後會有整理，而整理常常停在某條均線附近
       ——因為那是一群人的平均成本，形成心理上的支撐。</p>
       <p>這個功能找出<b>最近一日收盤價回到你指定均線 ±3% 範圍內</b>的股票。
@@ -1451,26 +1451,26 @@ PAGE = r"""<!DOCTYPE html>
     </div>
   </details>
 
-  <div class="card"><h2><span class="stepno">01</span>股票範圍</h2>
-    <label class="opt"><input type="radio" name="universe3" value="150" checked><span>市值前150大</span></label>
-    <label class="opt"><input type="radio" name="universe3" value="300"><span>市值前300大</span></label>
+  <div class="card"><h2><span class="stepno">01</span><span data-i18n="step.universe">股票範圍</span></h2>
+    <label class="opt"><input type="radio" name="universe3" value="150" checked><span data-i18n="opt.u150">市值前150大</span></label>
+    <label class="opt"><input type="radio" name="universe3" value="300"><span data-i18n="opt.u300">市值前300大</span></label>
   </div>
 
-  <div class="card"><h2><span class="stepno">02</span>回測均線（收盤回到該線 ±3%）</h2>
-    <label class="opt"><input type="radio" name="ma3" value="10"><span>10 日線 (10MA)</span></label>
-    <label class="opt"><input type="radio" name="ma3" value="20"><span>20 日線 (20MA)</span></label>
-    <label class="opt"><input type="radio" name="ma3" value="50" checked><span>50 日線 (50MA)</span></label>
-    <label class="opt"><input type="radio" name="ma3" value="150"><span>150 日線 (150MA)</span></label>
+  <div class="card"><h2><span class="stepno">02</span><span data-i18n="step.ma3">回測均線（收盤回到該線 ±3%）</span></h2>
+    <label class="opt"><input type="radio" name="ma3" value="10"><span data-i18n="opt.ma10">10 日線 (10MA)</span></label>
+    <label class="opt"><input type="radio" name="ma3" value="20"><span data-i18n="opt.ma20">20 日線 (20MA)</span></label>
+    <label class="opt"><input type="radio" name="ma3" value="50" checked><span data-i18n="opt.ma50">50 日線 (50MA)</span></label>
+    <label class="opt"><input type="radio" name="ma3" value="150"><span data-i18n="opt.ma150">150 日線 (150MA)</span></label>
   </div>
 
-  <div class="card"><h2><span class="stepno">03</span>均線排列</h2>
-    <label class="opt"><input type="radio" name="align3" value="strict_bull" checked><span>嚴格多頭（10&gt;20&gt;50&gt;150）</span></label>
-    <label class="opt"><input type="radio" name="align3" value="strict_bear"><span>嚴格空頭（10&lt;20&lt;50&lt;150）</span></label>
-    <label class="opt"><input type="radio" name="align3" value="squeeze"><span>均線糾結（四線收斂於 5% 內）</span></label>
-    <label class="opt"><input type="radio" name="align3" value="none"><span>不限</span></label>
+  <div class="card"><h2><span class="stepno">03</span><span data-i18n="step.align">均線排列</span></h2>
+    <label class="opt"><input type="radio" name="align3" value="strict_bull" checked><span data-i18n="opt.sbull">嚴格多頭（10&gt;20&gt;50&gt;150）</span></label>
+    <label class="opt"><input type="radio" name="align3" value="strict_bear"><span data-i18n="opt.sbear">嚴格空頭（10&lt;20&lt;50&lt;150）</span></label>
+    <label class="opt"><input type="radio" name="align3" value="squeeze"><span data-i18n="opt.squeeze">均線糾結（四線收斂於 5% 內）</span></label>
+    <label class="opt"><input type="radio" name="align3" value="none"><span data-i18n="opt.none">不限</span></label>
   </div>
 
-  <button class="gobtn" id="go3">開始篩選</button>
+  <button class="gobtn" id="go3" data-i18n="btn.screen">開始篩選</button>
   <div class="status" id="status3"></div>
   <div id="result3"></div>
 </div>
@@ -1482,10 +1482,93 @@ const $ = s => document.querySelector(s);
 const APP_TOKEN = "__APP_TOKEN__";
 const START_PAGE = "__START_PAGE__";
 
-/* ---- 顯示語言 ----
-   目前只切換「公司名稱」與「產業」的顯示（後端每筆都同時給了中英兩份）。
-   介面文字的完整 i18n 之後再做，機制可直接搬台股版那一套。 */
+/* ---- 顯示語言（機制與台股版相同）----
+   data-i18n      → 換 textContent（中文原文自動備份在 data-zh，不會遺失）
+   data-i18n-html → 換 innerHTML（保留 <b>/<p> 格式）
+   JS 產生的字串   → 用 t(key, 中文預設)
+   公司名稱與產業則由後端提供中英兩份，用 coName()/coSector() 挑。 */
 let LANG = localStorage.getItem("us_lang") || "zh";
+
+const I18N = { en: {
+  "ui.menu": "Menu",
+  "brew.title": "Brewing, please wait", "brew.wait": "Getting ready…",
+  "brand.name": "US Stock Coffee",
+  "nav.home": "Menu", "nav.screen.sub": "Find leading stocks",
+  "nav.pull.sub": "Close back within ±3% of an MA",
+  "nav.tw": "Taiwan Stock Coffee", "nav.tw.sub": "Stock Coffee · TW screener",
+  "home.about": "About this tool",
+  "home.aboutBody": "The US edition of Stock Coffee. Screen the top 300 US companies by market cap using <b>moving averages</b> \u2014 crossing above or below a chosen MA, or matching a specific MA alignment.<br><br>The MA set follows US convention: <b>10 / 20 / 50 / 150-day</b>. The 50-day line plays the role Taiwan's 60-day line does; the 150-day tracks the intermediate trend.<br><br>Data is daily closing prices, not real-time quotes.",
+  "home.c1": "Screen by moving average and MA alignment",
+  "home.c2": "Close back within ±3% of a chosen MA",
+  "home.c3": "The Taiwan edition — same logic, already live",
+  "p1.title": "Watchlist Screener", "p3.title": "Pullback Entry Finder",
+  "p1.introT": "Find stocks that are moving right now — using moving averages",
+  "p1.intro": "<p>A moving average is the average cost of a group of buyers. Above the 50-day line, the people who bought this quarter are in profit; below the 150-day line, most buyers of the past half-year are underwater. Moving averages don't predict — they tell you where market participants stand, and that shapes what they do next.</p><p>This screener filters the top 150 or 300 US companies by market cap: crossing above or below the 10, 20, 50 or 150-day moving average, or screening directly by <b>MA alignment</b> — strict bullish (10&gt;20&gt;50&gt;150) means later buyers paid more and still bought, which usually marks a trend in progress.</p><p>If the screen returns too many names, the dropdowns above narrow it further. <b>The sector distribution is itself a signal</b> — when twelve of thirty results share an industry, that's where money is going.</p><p><b>Who it's for</b>: swing traders holding days to weeks. This is closing data — not built for day trading.</p>",
+  "p3.introT": "Wait for a strong stock to come back, instead of chasing the high",
+  "p3.intro": "<p>Leading stocks don't rise every day. After a run they consolidate, and that consolidation often stalls near a moving average — because that line is a group's average cost, which becomes psychological support.</p><p>This screen finds stocks whose <b>latest close has returned to within ±3% of the moving average you choose</b>. The point isn't to call the bottom; it's an entry with controlled risk — you're not buying the high, and if you're wrong the stop is obvious (a break of that line).</p><p>Which average to use depends on your holding period — the 20-day for shorter trades, the 50 or 150-day for swings. Combined with the <b>MA alignment</b> filter, you can look only for stocks whose trend is intact and merely resting.</p><p>Results are sorted by <b>how close price is to the line</b> — the top of the list pulled back the most precisely.</p>",
+  "step.universe": "Universe", "step.days": "Days checked",
+  "step.mode": "Match mode (3 days)", "step.ma": "Moving average",
+  "step.dir": "Direction", "step.align": "MA alignment",
+  "step.ma3": "Moving average (close back within ±3%)",
+  "opt.u150": "Top 150 by market cap", "opt.u300": "Top 300 by market cap",
+  "opt.d1": "Latest day", "opt.d3": "Last 3 days",
+  "opt.any": "Partial (any of the 3 days)", "opt.all": "Full (all 3 days)",
+  "opt.ma10": "10-day (10MA)", "opt.ma20": "20-day (20MA)",
+  "opt.ma50": "50-day (50MA)", "opt.ma150": "150-day (150MA)",
+  "opt.above": "Above", "opt.below": "Below",
+  "opt.sbull1": "Strict bullish (10&gt;20&gt;50&gt;150) — for leaders",
+  "opt.sbear1": "Strict bearish (10&lt;20&lt;50&lt;150) — for downtrends",
+  "opt.sbull": "Strict bullish (10&gt;20&gt;50&gt;150)",
+  "opt.sbear": "Strict bearish (10&lt;20&lt;50&lt;150)",
+  "opt.lbull": "Loose bullish (10&gt;20&gt;50)", "opt.lbear": "Loose bearish (10&lt;20&lt;50)",
+  "opt.squeeze": "MA squeeze (within 5%)", "opt.none": "Any",
+  "btn.screen": "Run screen",
+  /* --- JS 產生的字串 --- */
+  "st.asof": "Data as of", "st.quarter": "Fiscal quarter",
+  "st.match": "matches", "st.unit": "",
+  "st.above": "above", "st.below": "below",
+  "st.backto": "close back within",
+  "st.none": "No stocks match these conditions.",
+  "st.send": "Submitting…", "st.nojob": "Could not start the job",
+  "st.failed": "Screen failed: ", "st.conn": "Connection failed: ",
+  "st.lost": "Connection lost: ",
+  "th.rank": "Rank", "th.sym": "Symbol", "th.name": "Company", "th.sector": "Sector",
+  "th.price": "Price", "th.ma": "MA", "th.gap": "Gap%",
+  "th.eps": "Q EPS YoY", "th.rev": "Q Rev YoY", "th.nh": "New high",
+  "th.align": "MA alignment", "th.hit": "Match date", "th.asof": "Data date",
+  "flt.sector": "Sector", "flt.allSector": "All sectors",
+  "flt.eps": "Q EPS YoY", "flt.align": "MA alignment", "flt.nh": "New high",
+  "flt.any": "Any", "flt.hasNH": "Made a new high",
+  "yoy.neg": "Negative", "yoy.lo": "0–20%", "yoy.mid": "20–50%", "yoy.hi": "Over 50%",
+  "nh.3y": "3-year high", "nh.2y": "2-year high", "nh.1y": "1-year high",
+  "nh.6m": "6-month high", "nh.3m": "3-month high",
+  "al.strict_bull": "Strict bullish", "al.loose_bull": "Loose bullish",
+  "al.squeeze": "MA squeeze", "al.loose_bear": "Loose bearish",
+  "al.strict_bear": "Strict bearish", "al.none": "Unordered"
+}};
+
+function t(key, zh){
+  if (LANG === "zh") return zh;
+  const v = (I18N.en || {})[key];
+  return (v === undefined) ? zh : v;
+}
+
+/* 套用語言到所有標記過的元素。
+   中文原文第一次會備份到 data-zh / data-zh-html，切回中文時還原，不會遺失。 */
+function applyLang(){
+  document.querySelectorAll("[data-i18n]").forEach(el => {
+    if (!el.dataset.zh) el.dataset.zh = el.textContent;
+    el.textContent = t(el.dataset.i18n, el.dataset.zh);
+  });
+  document.querySelectorAll("[data-i18n-html]").forEach(el => {
+    if (!el.dataset.zhHtml) el.dataset.zhHtml = el.innerHTML;
+    el.innerHTML = t(el.dataset.i18nHtml, el.dataset.zhHtml);
+  });
+  document.documentElement.lang = (LANG === "zh") ? "zh-Hant-TW" : "en";
+  document.title = (LANG === "zh")
+    ? "美股咖啡館 US Stock Coffee｜美股選股工具・均線篩選"
+    : "US Stock Coffee｜US Stock Screener · Moving-Average Filter";
+}
 function coName(s){ return LANG === "zh" ? (s.name_zh || s.name) : s.name; }
 function coSector(s){ return LANG === "zh" ? (s.sector_zh || s.sector) : s.sector; }
 function sectorKey(s){ return s.sector; }        /* 篩選一律用英文原值當 key，避免對不上 */
@@ -1497,6 +1580,7 @@ if (langBtn){
     LANG = (LANG === "zh") ? "en" : "zh";
     localStorage.setItem("us_lang", LANG);
     langBtn.textContent = (LANG === "zh") ? "EN" : "中";
+    applyLang();
     if (lastRows.length) render({rows:lastRows, as_of:lastMeta.as_of,
         ma_name_zh:lastMeta.ma_name_zh, ma_name:lastMeta.ma_name});
     if (lastRows3.length) render3({rows:lastRows3, as_of:lastMeta3.as_of, band:lastMeta3.band,
@@ -1575,6 +1659,9 @@ const ALIGN_ZH = {
   strict_bull:"嚴格多頭", loose_bull:"寬鬆多頭", squeeze:"均線糾結",
   loose_bear:"寬鬆空頭", strict_bear:"嚴格空頭", none:"無序"
 };
+function alignName(k){ return t("al." + k, ALIGN_ZH[k] || k); }
+function nhName(k){ return t("nh." + k, NH_LABEL[k] || k); }
+function yoyName(k){ return t("yoy." + k, YOY_LABEL[k] || k); }
 let lastRows = [], lastMeta = {};
 
 if ($("#go1")) $("#go1").onclick = () => {
@@ -1589,7 +1676,7 @@ if ($("#go1")) $("#go1").onclick = () => {
   $("#go1").disabled = true;
   $("#result1").innerHTML = "";
   $("#status1").textContent = "";
-  brewOpen("送出篩選條件…");
+  brewOpen(t("st.send","送出篩選條件…"));
   fetch("/api/screen", {
     method:"POST", headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},
     body: JSON.stringify(params)
@@ -1597,10 +1684,10 @@ if ($("#go1")) $("#go1").onclick = () => {
     if (!j.job){
       brewClose(); $("#go1").disabled = false;
       if (retryOnStaleToken(j)) return;
-      $("#status1").textContent = j.error || "無法建立工作"; return; }
+      $("#status1").textContent = j.error || t("st.nojob","無法建立工作"); return; }
     poll(j.job);
   }).catch(e => { brewClose(); $("#go1").disabled = false;
-    $("#status1").textContent = "連線失敗：" + e; });
+    $("#status1").textContent = t("st.conn","連線失敗：") + e; });
 };
 
 function poll(id){
@@ -1613,10 +1700,10 @@ function poll(id){
     brewClose();
     $("#go1").disabled = false;
     sessionStorage.removeItem("tokenRetry");
-    if (j.error){ $("#status1").textContent = "篩選失敗：" + j.error; return; }
+    if (j.error){ $("#status1").textContent = t("st.failed","篩選失敗：") + j.error; return; }
     render(j.result);
   }).catch(e => { brewClose(); $("#go1").disabled = false;
-    $("#status1").textContent = "連線中斷：" + e; });
+    $("#status1").textContent = t("st.lost","連線中斷：") + e; });
 }
 
 function render(res){
@@ -1624,11 +1711,13 @@ function render(res){
   lastMeta = {as_of: res.as_of, ma_name_zh: res.ma_name_zh, ma_name: res.ma_name};
   const showAlign = val("align") === "none";
   const per = lastRows.find(r => r.period);
-  $("#status1").innerHTML = "資料日期 " + (res.as_of || "—")
-    + (per ? "｜財報季 " + per.period : "")
-    + "｜" + res.ma_name_zh + "（" + (val("direction") === "above" ? "站上" : "跌破") + "）"
-    + "｜符合 <span class=\"count\">" + lastRows.length + "</span> 檔";
-  if (!lastRows.length){ $("#result1").innerHTML = "<div class='status'>沒有符合條件的股票。</div>"; return; }
+  $("#status1").innerHTML = t("st.asof","資料日期") + " " + (res.as_of || "—")
+    + (per ? "｜" + t("st.quarter","財報季") + " " + per.period : "")
+    + "｜" + (LANG === "zh" ? res.ma_name_zh : res.ma_name)
+    + "（" + (val("direction") === "above" ? t("st.above","站上") : t("st.below","跌破")) + "）"
+    + "｜" + t("st.match","符合") + " <span class=\"count\">" + lastRows.length + "</span> "
+    + t("st.unit","檔");
+  if (!lastRows.length){ $("#result1").innerHTML = "<div class='status'>" + t("st.none","沒有符合條件的股票。") + "</div>"; return; }
 
   let h = "";
   if (lastRows.length > 15){
@@ -1639,21 +1728,24 @@ function render(res){
       label[k] = coSector(s);
     });
     const names = Object.keys(c).sort((a,b) => c[b] - c[a]);
-    h += "<div class='resfilter'><span class='rflabel'>產業</span><select id='secFilter' onchange='applyFilter()'>"
-       + "<option value=''>全部產業（" + lastRows.length + "）</option>"
+    h += "<div class='resfilter'><span class='rflabel'>" + t("flt.sector","產業") + "</span><select id='secFilter' onchange='applyFilter()'>"
+       + "<option value=''>" + t("flt.allSector","全部產業") + "（" + lastRows.length + "）</option>"
        + names.map(n => "<option value=\"" + n + "\">" + label[n] + "（" + c[n] + "）</option>").join("")
        + "</select>"
-       + bucketSelect("epsFilter", "季EPS年增", lastRows, r => yoyBucket(r.eps_yoy), YOY_LABEL, "applyFilter()")
+       + bucketSelect("epsFilter", t("flt.eps","季EPS年增"), lastRows, r => yoyBucket(r.eps_yoy), YOY_LABEL, "applyFilter()")
        + (showAlign ? alignSelect("alignFilter", lastRows, "applyFilter()") : "")
        + nhSelect("nhFilter", lastRows, "applyFilter()")
        + "</div>";
   }
   h += "<div class='tblwrap res-wide'><table><thead><tr>"
-     + "<th>市值排名</th><th>代號</th><th>公司名稱</th><th>產業</th>"
-     + "<th>現價</th><th>均線</th><th>乖離%</th>"
-     + "<th>季EPS年增</th><th>季營收年增</th><th>創新高</th>"
-     + (showAlign ? "<th>均線排列</th>" : "")
-     + "<th>符合日期</th></tr></thead><tbody id='tb1'>" + rowsHtml(lastRows, showAlign)
+     + "<th>" + t("th.rank","市值排名") + "</th><th>" + t("th.sym","代號")
+     + "</th><th>" + t("th.name","公司名稱") + "</th><th>" + t("th.sector","產業") + "</th>"
+     + "<th>" + t("th.price","現價") + "</th><th>" + t("th.ma","均線")
+     + "</th><th>" + t("th.gap","乖離%") + "</th>"
+     + "<th>" + t("th.eps","季EPS年增") + "</th><th>" + t("th.rev","季營收年增")
+     + "</th><th>" + t("th.nh","創新高") + "</th>"
+     + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
+     + "<th>" + t("th.hit","符合日期") + "</th></tr></thead><tbody id='tb1'>" + rowsHtml(lastRows, showAlign)
      + "</tbody></table></div>";
   $("#result1").innerHTML = h;
 }
@@ -1664,7 +1756,7 @@ const NH_LABEL = {"3y": "3年新高", "2y": "2年新高", "1y": "1年新高",
 const NH_ORDER = ["3y", "2y", "1y", "6m", "3m"];
 function fmtNH(v){
   if (!v) return "—";
-  return "<b style='color:var(--caramel-2)'>" + (NH_LABEL[v] || v) + "</b>";
+  return "<b style='color:var(--caramel-2)'>" + nhName(v) + "</b>";
 }
 
 /* ---- 年增率級距（與後端 yoy_bucket 對應）---- */
@@ -1683,9 +1775,10 @@ function alignSelect(id, rows, handler){
   rows.forEach(r => { c[r.align] = (c[r.align] || 0) + 1; });
   const keys = ALIGN_ORDER.filter(k => c[k]);
   if (keys.length <= 1) return "";          /* 只有一種就不必篩 */
-  return "<span class='rflabel'>均線排列</span><select id='" + id
-       + "' onchange='" + handler + "'><option value=''>不限（" + rows.length + "）</option>"
-       + keys.map(k => "<option value='" + k + "'>" + (ALIGN_ZH[k] || k)
+  return "<span class='rflabel'>" + t("flt.align","均線排列") + "</span><select id='" + id
+       + "' onchange='" + handler + "'><option value=''>" + t("flt.any","不限")
+       + "（" + rows.length + "）</option>"
+       + keys.map(k => "<option value='" + k + "'>" + alignName(k)
                      + "（" + c[k] + "）</option>").join("")
        + "</select>";
 }
@@ -1698,10 +1791,11 @@ function nhSelect(id, rows, handler){
   const keys = NH_ORDER.filter(k => c[k]);
   if (!keys.length) return "";
   const any = keys.reduce((a, k) => a + c[k], 0);
-  return "<span class='rflabel'>創新高</span><select id='" + id
-       + "' onchange='" + handler + "'><option value=''>不限（" + rows.length + "）</option>"
-       + "<option value='any'>有創新高（" + any + "）</option>"
-       + keys.map(k => "<option value='" + k + "'>" + NH_LABEL[k]
+  return "<span class='rflabel'>" + t("flt.nh","創新高") + "</span><select id='" + id
+       + "' onchange='" + handler + "'><option value=''>" + t("flt.any","不限")
+       + "（" + rows.length + "）</option>"
+       + "<option value='any'>" + t("flt.hasNH","有創新高") + "（" + any + "）</option>"
+       + keys.map(k => "<option value='" + k + "'>" + nhName(k)
                      + "（" + c[k] + "）</option>").join("")
        + "</select>";
 }
@@ -1713,8 +1807,8 @@ function bucketSelect(id, label, rows, fn, labels, handler){
   const keys = Object.keys(labels).filter(k => c[k]);
   if (!keys.length) return "";
   return "<span class='rflabel'>" + label + "</span><select id='" + id
-       + "' onchange='" + handler + "'><option value=''>不限</option>"
-       + keys.map(k => "<option value='" + k + "'>" + labels[k] + "（" + c[k] + "）</option>").join("")
+       + "' onchange='" + handler + "'><option value=''>" + t("flt.any","不限") + "</option>"
+       + keys.map(k => "<option value='" + k + "'>" + yoyName(k) + "（" + c[k] + "）</option>").join("")
        + "</select>";
 }
 
@@ -1740,7 +1834,7 @@ function rowsHtml(rows, showAlign){
     + "<td class='" + yoyCls(s.eps_yoy) + "'>" + fmtYoY(s.eps_yoy) + "</td>"
     + "<td class='" + yoyCls(s.rev_yoy) + "'>" + fmtYoY(s.rev_yoy) + "</td>"
     + "<td>" + fmtNH(s.new_high) + "</td>"
-    + (showAlign ? "<td>" + (ALIGN_ZH[s.align] || s.align) + "</td>" : "")
+    + (showAlign ? "<td>" + alignName(s.align) + "</td>" : "")
     + "<td>" + fmtHit(s) + "</td></tr>").join("");
 }
 
@@ -1757,7 +1851,7 @@ if ($("#go3")) $("#go3").onclick = () => {
   $("#go3").disabled = true;
   $("#result3").innerHTML = "";
   $("#status3").textContent = "";
-  brewOpen("送出篩選條件…");
+  brewOpen(t("st.send","送出篩選條件…"));
   fetch("/api/pullback", {
     method:"POST", headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},
     body: JSON.stringify(params)
@@ -1765,10 +1859,10 @@ if ($("#go3")) $("#go3").onclick = () => {
     if (!j.job){
       brewClose(); $("#go3").disabled = false;
       if (retryOnStaleToken(j)) return;
-      $("#status3").textContent = j.error || "無法建立工作"; return; }
+      $("#status3").textContent = j.error || t("st.nojob","無法建立工作"); return; }
     poll3(j.job);
   }).catch(e => { brewClose(); $("#go3").disabled = false;
-    $("#status3").textContent = "連線失敗：" + e; });
+    $("#status3").textContent = t("st.conn","連線失敗：") + e; });
 };
 
 function poll3(id){
@@ -1777,10 +1871,10 @@ function poll3(id){
     brewClose();
     $("#go3").disabled = false;
     sessionStorage.removeItem("tokenRetry");
-    if (j.error){ $("#status3").textContent = "篩選失敗：" + j.error; return; }
+    if (j.error){ $("#status3").textContent = t("st.failed","篩選失敗：") + j.error; return; }
     render3(j.result);
   }).catch(e => { brewClose(); $("#go3").disabled = false;
-    $("#status3").textContent = "連線中斷：" + e; });
+    $("#status3").textContent = t("st.lost","連線中斷：") + e; });
 }
 
 function render3(res){
@@ -1789,12 +1883,14 @@ function render3(res){
                ma_name_zh: res.ma_name_zh, ma_name: res.ma_name};
   const showAlign = val("align3") === "none";
   const per3 = lastRows3.find(r => r.period);
-  $("#status3").innerHTML = "資料日期 " + (res.as_of || "—")
-    + (per3 ? "｜財報季 " + per3.period : "")
-    + "｜收盤回到 " + res.ma_name_zh + " ±" + res.band + "%"
-    + "｜符合 <span class=\"count\">" + lastRows3.length + "</span> 檔";
+  $("#status3").innerHTML = t("st.asof","資料日期") + " " + (res.as_of || "—")
+    + (per3 ? "｜" + t("st.quarter","財報季") + " " + per3.period : "")
+    + "｜" + t("st.backto","收盤回到") + " "
+    + (LANG === "zh" ? res.ma_name_zh : res.ma_name) + " ±" + res.band + "%"
+    + "｜" + t("st.match","符合") + " <span class=\"count\">" + lastRows3.length + "</span> "
+    + t("st.unit","檔");
   if (!lastRows3.length){
-    $("#result3").innerHTML = "<div class='status'>沒有符合條件的股票。</div>"; return; }
+    $("#result3").innerHTML = "<div class='status'>" + t("st.none","沒有符合條件的股票。") + "</div>"; return; }
 
   let h = "";
   if (lastRows3.length > 15){
@@ -1805,21 +1901,24 @@ function render3(res){
       label[k] = coSector(s);
     });
     const names = Object.keys(c).sort((a,b) => c[b] - c[a]);
-    h += "<div class='resfilter'><span class='rflabel'>產業</span><select id='secFilter3' onchange='applyFilter3()'>"
-       + "<option value=''>全部產業（" + lastRows3.length + "）</option>"
+    h += "<div class='resfilter'><span class='rflabel'>" + t("flt.sector","產業") + "</span><select id='secFilter3' onchange='applyFilter3()'>"
+       + "<option value=''>" + t("flt.allSector","全部產業") + "（" + lastRows3.length + "）</option>"
        + names.map(n => "<option value=\"" + n + "\">" + label[n] + "（" + c[n] + "）</option>").join("")
        + "</select>"
-       + bucketSelect("epsFilter3", "季EPS年增", lastRows3, r => yoyBucket(r.eps_yoy), YOY_LABEL, "applyFilter3()")
+       + bucketSelect("epsFilter3", t("flt.eps","季EPS年增"), lastRows3, r => yoyBucket(r.eps_yoy), YOY_LABEL, "applyFilter3()")
        + (showAlign ? alignSelect("alignFilter3", lastRows3, "applyFilter3()") : "")
        + nhSelect("nhFilter3", lastRows3, "applyFilter3()")
        + "</div>";
   }
   h += "<div class='tblwrap res-wide'><table><thead><tr>"
-     + "<th>市值排名</th><th>代號</th><th>公司名稱</th><th>產業</th>"
-     + "<th>現價</th><th>均線</th><th>乖離%</th>"
-     + "<th>季EPS年增</th><th>季營收年增</th><th>創新高</th>"
-     + (showAlign ? "<th>均線排列</th>" : "")
-     + "<th>資料日期</th></tr></thead><tbody id='tb3'>"
+     + "<th>" + t("th.rank","市值排名") + "</th><th>" + t("th.sym","代號")
+     + "</th><th>" + t("th.name","公司名稱") + "</th><th>" + t("th.sector","產業") + "</th>"
+     + "<th>" + t("th.price","現價") + "</th><th>" + t("th.ma","均線")
+     + "</th><th>" + t("th.gap","乖離%") + "</th>"
+     + "<th>" + t("th.eps","季EPS年增") + "</th><th>" + t("th.rev","季營收年增")
+     + "</th><th>" + t("th.nh","創新高") + "</th>"
+     + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
+     + "<th>" + t("th.asof","資料日期") + "</th></tr></thead><tbody id='tb3'>"
      + rowsHtml(lastRows3, showAlign) + "</tbody></table></div>";
   $("#result3").innerHTML = h;
 }

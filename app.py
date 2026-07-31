@@ -593,6 +593,143 @@ def load_fundamentals(symbols, status_cb=None, workers=8):
     return out
 
 
+# ---------------------------------------------------------------- 即時報價
+#
+# 為什麼需要這條獨立的資料路：
+#   美股有盤前盤後交易、又沒有漲跌幅限制，財報後隔夜跳空 10% 很常見
+#   （2026-07-31 實測 AAPL 從 333.43 → 302.50，-9.27%）。
+#   只看收盤價篩選，隔天可能已經是完全不同的價位。
+#
+# ⚠️ **盤中重抓歷史端點是沒用的**（2026-07-31 實測）：
+#   `/quote/{SYM}/historical` 在盤中**不會回傳當日未完成的 bar**，
+#   盤中重抓 300 檔會拿到跟早上一模一樣的資料，白跑 90 秒。
+#   要拿盤中價格只能走 `/quote/{SYM}/info` —— 這是兩條不同的資料路。
+#   （好處是：歷史快取不可能被未完成的 bar 污染。）
+#
+# ⚠️ **現價絕對不可以寫進 hist_ 快取**。均線與創新高必須建立在
+#   「完整收盤價」之上，定義才穩定、結果才可重現。混入盤中價會讓
+#   同一組條件在不同時間篩出不同結果，而且創新高會被盤中衝高誤判。
+#
+# 成本控制：**只對「篩選結果」抓現價，不是全部 300 檔**。
+#   單檔約 2.4 秒，300 檔 / 8 併發要 90 秒，但結果通常只有 10～50 檔 → 5～15 秒。
+
+QUOTE_URL = "https://api.nasdaq.com/api/quote/%s/info?assetclass=stocks"
+QUOTE_TTL_H = 5.0 / 60.0        # 5 分鐘。報價變動快，但也不必每次篩選都重抓
+
+
+def _quote_now(symbol):
+    """抓一次即時報價。回傳 dict；任何失敗都回 {} 而不是拋例外。
+
+    Nasdaq 的回應結構：
+      data.primaryData    盤中報價（marketStatus=Open 時有效）
+      data.secondaryData  盤前／盤後報價（休市時才有內容）
+      data.marketStatus   Open / Closed / Pre-Market / After Hours
+      data.keyStats.fiftyTwoWeekHighLow.value  "201.50 - 344.57"
+
+    ⚠️ 欄位名以實測為準（2026-07-31 盤中），不要照 API 文件猜。
+       secondaryData 盤中是空的，休市時才驗得到 —— 所以這裡對它做防禦性解析。
+    """
+    try:
+        j = _get(QUOTE_URL % symbol.upper(), timeout=20, tries=2).json()
+    except Exception:
+        return {}
+    d = (j or {}).get("data") or {}
+    if not d:
+        return {}
+
+    status = str(d.get("marketStatus") or "").strip()
+    primary = d.get("primaryData") or {}
+    secondary = d.get("secondaryData") or {}
+
+    def take(blk):
+        px = _num((blk or {}).get("lastSalePrice"))
+        if not px:
+            return None
+        return {"price": px,
+                "pct": _num((blk or {}).get("percentageChange")),
+                "ts": ((blk or {}).get("lastTradeTimestamp") or "").strip()}
+
+    # 盤中用 primaryData；休市時 primaryData 是最後收盤，secondaryData 才是盤前／盤後
+    reg, ext = take(primary), take(secondary)
+    is_open = status.lower() == "open"
+    use, kind = (reg, "regular") if is_open else ((ext, "extended") if ext else (reg, "close"))
+    if not use:
+        return {}
+
+    out = {"price": use["price"], "pct": use["pct"], "ts": use["ts"],
+           "kind": kind, "status": status}
+    # 52 週高低是同一個請求免費附贈的，拿來當創新高的即時佐證
+    try:
+        rng = ((d.get("keyStats") or {}).get("fiftyTwoWeekHighLow") or {}).get("value") or ""
+        lo, hi = [_num(x) for x in str(rng).split("-")[:2]]
+        if lo and hi:
+            out["w52_low"], out["w52_high"] = lo, hi
+    except Exception:
+        pass
+    return out
+
+
+def get_quote(symbol):
+    key = "quote_%s.json" % symbol.upper()
+    return _fetch_once(key,
+                       lambda: _cache_quote(symbol, key),
+                       lambda: _load_cache(key, QUOTE_TTL_H)) or {}
+
+
+def _cache_quote(symbol, key):
+    cached = _load_cache(key, QUOTE_TTL_H)
+    if cached is not None:
+        return cached
+    q = _quote_now(symbol)
+    if q:                       # 抓不到就不要寫空的進去蓋掉還堪用的舊值
+        _save_cache(key, q)
+    return q
+
+
+def load_quotes(symbols, workers=8):
+    """並行抓現價。抓不到的整檔略過 —— 現價是加值資訊，不能拖垮篩選。"""
+    out = {}
+    lock = threading.Lock()
+
+    def work(sym):
+        try:
+            q = get_quote(sym)
+        except Exception:
+            q = {}
+        if q:
+            with lock:
+                out[sym] = q
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(work, symbols))
+    return out
+
+
+def attach_quotes(rows):
+    """把現價附加到篩選結果上。就地修改並回傳 (rows, 報價中繼資料)。
+
+    `last_pct` 是**與前一日收盤的差幅**，用我們自己的收盤價算 ——
+    不直接用 API 的 percentageChange，因為那是它自己的基準，
+    跟我們表格上顯示的收盤價未必是同一天（例如我們的資料還沒更新到最新交易日）。
+    """
+    if not rows or os.environ.get("ENABLE_QUOTES", "1") != "1":
+        return rows, {}
+    quotes = load_quotes([r["symbol"] for r in rows])
+    meta = {}
+    for r in rows:
+        q = quotes.get(r["symbol"])
+        if not q:
+            continue
+        r["last"] = q["price"]
+        base = r.get("price")
+        if base:
+            r["last_pct"] = round((q["price"] - base) / base * 100, 2)
+        r["last_ts"] = q.get("ts")
+        if not meta:
+            meta = {"status": q.get("status"), "kind": q.get("kind"), "ts": q.get("ts")}
+    return rows, meta
+
+
 # 年增率級距（給結果太多時的下拉篩選用）
 def yoy_bucket(y):
     if y is None:
@@ -783,7 +920,8 @@ def screen_watchlist(universe_n=150, ma=50, direction="above", days=1,
         })
 
     rows.sort(key=lambda r: r["rank"])
-    return {"rows": rows, "as_of": as_of,
+    rows, qmeta = attach_quotes(rows)      # 只抓結果那幾檔，不是全部 300 檔
+    return {"rows": rows, "as_of": as_of, "quote": qmeta,
             "ma_name": MA_NAMES.get(ma, str(ma)),
             "ma_name_zh": MA_NAMES_ZH.get(ma, str(ma))}
 
@@ -858,7 +996,8 @@ def screen_pullback(universe_n=150, ma=50, band=3.0, align="strict_bull",
 
     # 越貼近均線的排越前面（乖離絕對值小 → 拉回得剛剛好）
     rows.sort(key=lambda r: abs(r["gap"]))
-    return {"rows": rows, "as_of": as_of, "band": band,
+    rows, qmeta = attach_quotes(rows)      # 只抓結果那幾檔，不是全部 300 檔
+    return {"rows": rows, "as_of": as_of, "band": band, "quote": qmeta,
             "ma_name": MA_NAMES.get(ma, str(ma)),
             "ma_name_zh": MA_NAMES_ZH.get(ma, str(ma))}
 
@@ -931,7 +1070,8 @@ def prefetch(universe_n=300):
 #    符合本專案「只用 flask/requests/gunicorn」的相依原則。
 
 UPDATE_HOUR_ET = int(os.environ.get("UPDATE_HOUR_ET", "18"))
-SCHED_STATE = {"enabled": False, "next_run": "—", "last_run": "—", "last_result": "—"}
+SCHED_STATE = {"enabled": False, "next_run": "—", "last_run": "—", "last_result": "—",
+               "loop_error": "", "heartbeat": "—", "heartbeat_ts": 0}
 
 # 上次更新紀錄寫在持久化磁碟，重啟後仍看得到。
 # 只存 last_run / last_result 兩個欄位 —— next_run 每次啟動都會重算，存了反而會誤導。
@@ -1013,27 +1153,61 @@ def _fmt_et(dt):
         (dt - timedelta(hours=off)).strftime("%m-%d %H:%M"))
 
 
+def _beat():
+    """心跳。用來判斷執行緒還活著 —— 只靠 enabled 旗標看不出來，
+    那個旗標設過一次就不會變，執行緒死掉了它還是顯示「是」。"""
+    SCHED_STATE["heartbeat_ts"] = time.time()
+    SCHED_STATE["heartbeat"] = _fmt_et(datetime.utcnow())
+
+
 def _daily_updater():
-    """背景執行緒：每個美東交易日收盤後重跑一次 prefetch。"""
-    _sched_load()
+    """背景執行緒：每個美東交易日收盤後重跑一次 prefetch。
+
+    ⚠️ **整個迴圈骨幹都必須包在 try 裡。**
+    原本只有 prefetch() 有保護，時間計算（`_next_update_utc`／`_fmt_et`）
+    與睡眠迴圈都是裸的。那幾行只要丟一次例外，執行緒就直接死掉 ——
+    **每日更新永遠停止，而且沒有任何跡象**：`enabled` 旗標設過就不會變，
+    診斷頁還是顯示「排程執行中：是」。
+    這種「安靜地不做事」比直接壞掉難查得多，所以寧可無限重試。
+
+    典型的觸發情境：naive 與 aware datetime 混用會丟 `TypeError`
+    （例如日後把 `utcnow()` 換成 `now(timezone.utc)` 只換了一半）。
+    """
+    # 迴圈「之前」的準備動作也要保護 —— 它們在 try 外面的話，
+    # 一樣會讓執行緒還沒進迴圈就死掉，症狀完全一樣（安靜地不更新）。
+    try:
+        _sched_load()
+    except Exception:
+        pass
     SCHED_STATE["enabled"] = True
+    _beat()
     while True:
-        nxt = _next_update_utc()
-        SCHED_STATE["next_run"] = _fmt_et(nxt)
-        # 分段睡眠：一次睡太久遇到系統時間調整會失準
-        while True:
-            remain = (nxt - datetime.utcnow()).total_seconds()
-            if remain <= 0:
-                break
-            time.sleep(min(300.0, remain))
         try:
-            prefetch(300)
-            SCHED_STATE["last_result"] = "成功"
+            nxt = _next_update_utc()
+            SCHED_STATE["next_run"] = _fmt_et(nxt)
+            # 分段睡眠：一次睡太久遇到系統時間調整會失準；順便定期更新心跳
+            while True:
+                remain = (nxt - datetime.utcnow()).total_seconds()
+                if remain <= 0:
+                    break
+                time.sleep(min(300.0, remain))
+                _beat()
+            try:
+                prefetch(300)
+                SCHED_STATE["last_result"] = "成功"
+            except Exception as e:
+                SCHED_STATE["last_result"] = "失敗：%s" % str(e)[:120]
+            SCHED_STATE["last_run"] = _fmt_et(datetime.utcnow())
+            SCHED_STATE["loop_error"] = ""
+            _beat()
+            _sched_save()
+            time.sleep(90)   # 跨過觸發點，避免同一分鐘內重複觸發
         except Exception as e:
-            SCHED_STATE["last_result"] = "失敗：%s" % str(e)[:120]
-        SCHED_STATE["last_run"] = _fmt_et(datetime.utcnow())
-        _sched_save()
-        time.sleep(90)   # 跨過觸發點，避免同一分鐘內重複觸發
+            # 排程骨幹自己出錯。**絕對不能讓執行緒結束** —— 記下來、等一分鐘再試。
+            SCHED_STATE["loop_error"] = "%s: %s" % (type(e).__name__, str(e)[:120])
+            SCHED_STATE["next_run"] = "計算失敗，60 秒後重試"
+            _beat()
+            time.sleep(60)
 
 
 PAGE = r"""<!DOCTYPE html>
@@ -1689,7 +1863,10 @@ const I18N = { en: {
   "st.failed": "Screen failed: ", "st.conn": "Connection failed: ",
   "st.lost": "Connection lost: ",
   "th.rank": "Rank", "th.sym": "Symbol", "th.name": "Company", "th.sector": "Sector",
-  "th.price": "Price", "th.ma": "MA", "th.gap": "Gap%",
+  "th.price": "Price", "th.ma": "MA", "th.gap": "MA Gap%",
+  "th.close": "Close", "th.last": "Last", "th.lastgap": "vs Close%",
+  "q.last": "Last", "q.regular": "market hours",
+  "q.extended": "pre/after-hours", "q.close": "at close",
   "th.eps": "Q EPS YoY", "th.rev": "Q Rev YoY", "th.nh": "New high",
   "th.align": "MA alignment", "th.hit": "Match date", "th.asof": "Data date",
   "flt.sector": "Sector", "flt.allSector": "All sectors",
@@ -1876,7 +2053,7 @@ function render(res){
     + "｜" + (LANG === "zh" ? res.ma_name_zh : res.ma_name)
     + "（" + (val("direction") === "above" ? t("st.above","站上") : t("st.below","跌破")) + "）"
     + "｜" + t("st.match","符合") + " <span class=\"count\">" + lastRows.length + "</span> "
-    + t("st.unit","檔");
+    + t("st.unit","檔") + quoteNote(res.quote);
   if (!lastRows.length){ $("#result1").innerHTML = "<div class='status'>" + t("st.none","沒有符合條件的股票。") + "</div>"; return; }
 
   let h = "";
@@ -1900,8 +2077,9 @@ function render(res){
   h += "<div class='tblwrap res-wide'><table><thead><tr>"
      + "<th>" + t("th.rank","市值排名") + "</th><th>" + t("th.sym","代號")
      + "</th><th>" + t("th.name","公司名稱") + "</th><th>" + t("th.sector","產業") + "</th>"
-     + "<th>" + t("th.price","現價") + "</th><th>" + t("th.ma","均線")
-     + "</th><th>" + t("th.gap","乖離%") + "</th>"
+     + "<th>" + t("th.close","收盤") + "</th>"
+     + "<th>" + t("th.last","現價") + "</th><th>" + t("th.lastgap","與收盤差%") + "</th>"
+     + "<th>" + t("th.gap","均線乖離%") + "</th>"
      + "<th>" + t("th.eps","季EPS年增") + "</th><th>" + t("th.rev","季營收年增")
      + "</th><th>" + t("th.nh","創新高") + "</th>"
      + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
@@ -1973,6 +2151,31 @@ function bucketSelect(id, label, rows, fn, labels, handler){
        + "</select>";
 }
 
+/* ---- 現價 ----
+   資料來自另一個端點（/quote/info），與收盤價是兩條獨立的路。
+   均線與創新高一律用收盤價算，這裡只是把「隔夜跳空」變成看得見的資訊。
+   抓不到現價的個股顯示「—」，不影響其他欄位。 */
+const GAP_WARN = 3.0;                    /* 差幅超過這個百分比就標紅提醒 */
+function fmtLast(s){
+  return (s.last == null) ? "—" : s.last.toFixed(2);
+}
+function fmtLastPct(s){
+  if (s.last_pct == null) return "—";
+  const big = Math.abs(s.last_pct) >= GAP_WARN;
+  return "<span class='" + (s.last_pct >= 0 ? "pos" : "neg") + "'>"
+       + (s.last_pct >= 0 ? "+" : "") + s.last_pct.toFixed(2) + "%"
+       + (big ? " ⚠️" : "") + "</span>";
+}
+/* 報價狀態：讓使用者一眼知道這個價格是什麼時候、哪個時段的。
+   不標「延遲」——實測 isRealTime=True，標錯反而誤導。 */
+function quoteNote(q){
+  if (!q || !q.ts) return "";
+  const kind = {regular:  t("q.regular","盤中"),
+                extended: t("q.extended","盤前／盤後"),
+                close:    t("q.close","已收盤")}[q.kind] || "";
+  return "｜" + t("q.last","現價") + " " + kind + " " + q.ts;
+}
+
 /* 基本面欄位的顯示：抓不到就顯示「—」，不要留空白讓人以為壞掉 */
 function fmtYoY(v){ return (v == null) ? "—" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%"; }
 function yoyCls(v){ return (v == null) ? "" : (v >= 0 ? "pos" : "neg"); }
@@ -1990,7 +2193,8 @@ function rowsHtml(rows, showAlign){
     + "<td>" + s.rank + "</td><td><b>" + s.symbol + "</b></td>"
     + "<td class='coname' title=\"" + s.name + "\">" + coName(s) + "</td>"
     + "<td class='sector' title=\"" + s.sector + "\">" + coSector(s) + "</td>"
-    + "<td>" + s.price.toFixed(2) + "</td><td>" + s.ma.toFixed(2) + "</td>"
+    + "<td>" + s.price.toFixed(2) + "</td>"
+    + "<td>" + fmtLast(s) + "</td><td>" + fmtLastPct(s) + "</td>"
     + "<td class='" + (s.gap >= 0 ? "pos" : "neg") + "'>" + (s.gap >= 0 ? "+" : "") + s.gap.toFixed(2) + "%</td>"
     + "<td class='" + yoyCls(s.eps_yoy) + "'>" + fmtYoY(s.eps_yoy) + "</td>"
     + "<td class='" + yoyCls(s.rev_yoy) + "'>" + fmtYoY(s.rev_yoy) + "</td>"
@@ -2007,13 +2211,15 @@ function rowsHtml(rows, showAlign){
 function cardsHtml(rows, showAlign, lastLabel){
   return "<div class='res-cards'>" + rows.map((s, i) =>
     "<details class='scard' data-i='" + i + "'>"
+    /* 卡片標題列優先顯示現價（手機上只看得到這一行，要放最新的那個數字） */
     + "<summary><span class='sc-l'><b>" + s.symbol + "</b> " + coName(s) + "</span>"
-    + "<span class='sc-r'>" + s.price.toFixed(2) + "</span></summary>"
+    + "<span class='sc-r'>" + (s.last != null ? fmtLast(s) : s.price.toFixed(2)) + "</span></summary>"
     + "<div class='scard-body'>"
+    + "<div class='kv'><span>" + t("th.close","收盤") + "</span><b>" + s.price.toFixed(2) + "</b></div>"
+    + "<div class='kv'><span>" + t("th.lastgap","與收盤差%") + "</span><b>" + fmtLastPct(s) + "</b></div>"
     + "<div class='kv'><span>" + t("th.rank","市值排名") + "</span><b>" + s.rank + "</b></div>"
     + "<div class='kv'><span>" + t("th.sector","產業") + "</span><b>" + coSector(s) + "</b></div>"
-    + "<div class='kv'><span>" + t("th.ma","均線") + "</span><b>" + s.ma.toFixed(2) + "</b></div>"
-    + "<div class='kv'><span>" + t("th.gap","乖離%") + "</span><b class='"
+    + "<div class='kv'><span>" + t("th.gap","均線乖離%") + "</span><b class='"
       + (s.gap >= 0 ? "pos" : "neg") + "'>" + (s.gap >= 0 ? "+" : "") + s.gap.toFixed(2) + "%</b></div>"
     + "<div class='kv'><span>" + t("th.eps","季EPS年增") + "</span><b class='"
       + yoyCls(s.eps_yoy) + "'>" + fmtYoY(s.eps_yoy) + "</b></div>"
@@ -2076,7 +2282,7 @@ function render3(res){
     + "｜" + t("st.backto","收盤回到") + " "
     + (LANG === "zh" ? res.ma_name_zh : res.ma_name) + " ±" + res.band + "%"
     + "｜" + t("st.match","符合") + " <span class=\"count\">" + lastRows3.length + "</span> "
-    + t("st.unit","檔");
+    + t("st.unit","檔") + quoteNote(res.quote);
   if (!lastRows3.length){
     $("#result3").innerHTML = "<div class='status'>" + t("st.none","沒有符合條件的股票。") + "</div>"; return; }
 
@@ -2101,8 +2307,9 @@ function render3(res){
   h += "<div class='tblwrap res-wide'><table><thead><tr>"
      + "<th>" + t("th.rank","市值排名") + "</th><th>" + t("th.sym","代號")
      + "</th><th>" + t("th.name","公司名稱") + "</th><th>" + t("th.sector","產業") + "</th>"
-     + "<th>" + t("th.price","現價") + "</th><th>" + t("th.ma","均線")
-     + "</th><th>" + t("th.gap","乖離%") + "</th>"
+     + "<th>" + t("th.close","收盤") + "</th>"
+     + "<th>" + t("th.last","現價") + "</th><th>" + t("th.lastgap","與收盤差%") + "</th>"
+     + "<th>" + t("th.gap","均線乖離%") + "</th>"
      + "<th>" + t("th.eps","季EPS年增") + "</th><th>" + t("th.rev","季營收年增")
      + "</th><th>" + t("th.nh","創新高") + "</th>"
      + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
@@ -2298,8 +2505,18 @@ def api_diag():
     w("  最近來源        : %s" % LAST_SOURCE)
 
     w("\n【每日自動更新】")
-    w("  排程執行中      : %s" % ("是" if SCHED_STATE["enabled"] else
-                                  "否 ← ENABLE_DAILY_UPDATE=0，資料不會自動變新"))
+    # ⚠️ 不要只看 enabled —— 那個旗標設過一次就不會變，執行緒死了它還是「是」。
+    #    要看心跳：正常情況每 5 分鐘內一定會更新一次。
+    _hb_age = time.time() - (SCHED_STATE.get("heartbeat_ts") or 0)
+    if not SCHED_STATE["enabled"]:
+        _health = "否 ← ENABLE_DAILY_UPDATE=0，資料不會自動變新"
+    elif _hb_age > 600:
+        _health = "⚠️ 有啟動但心跳停了 %.0f 分鐘 ← 執行緒可能卡住" % (_hb_age / 60)
+    else:
+        _health = "是（心跳 %.0f 秒前）" % _hb_age
+    w("  排程執行中      : %s" % _health)
+    if SCHED_STATE.get("loop_error"):
+        w("  ⚠️ 骨幹錯誤     : %s" % SCHED_STATE["loop_error"])
     w("  觸發時間        : 每個美東交易日 %02d:00 ET（收盤後 %d 小時）"
       % (UPDATE_HOUR_ET, UPDATE_HOUR_ET - 16))
     w("  下次更新        : %s" % SCHED_STATE["next_run"])

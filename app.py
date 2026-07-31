@@ -918,8 +918,9 @@ PAGE = r"""<!DOCTYPE html>
 <title>美股咖啡館 US Stock Coffee｜美股選股工具・均線篩選</title>
 <meta name="description" content="免費美股選股工具。用 10/20/50/150 日均線與均線排列篩選市值前 300 大美股，找出強勢股與轉弱股。免註冊、開啟即用。">
 <meta name="theme-color" content="#33241A">
-<link rel="icon" href="/icon.png" type="image/png">
-<link rel="apple-touch-icon" href="/icon.png">
+<link rel="icon" href="/icon.png?v=2" type="image/png" sizes="any">
+<link rel="shortcut icon" href="/icon.png?v=2" type="image/png">
+<link rel="apple-touch-icon" href="/icon.png?v=2">
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -1304,7 +1305,7 @@ PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
 
-<button id="menuBtn">☰ <span data-i18n="ui.menu">菜單</span></button>
+<button id="menuBtn" aria-label="選單" data-i18n-aria="ui.menu"><span></span><span></span><span></span></button>
 <button id="langBtn" title="切換公司與產業的顯示語言">EN</button>
 <div id="overlay"></div>
 
@@ -1559,6 +1560,10 @@ function applyLang(){
   document.querySelectorAll("[data-i18n]").forEach(el => {
     if (!el.dataset.zh) el.dataset.zh = el.textContent;
     el.textContent = t(el.dataset.i18n, el.dataset.zh);
+  });
+  document.querySelectorAll("[data-i18n-aria]").forEach(el => {
+    if (!el.dataset.zhAria) el.dataset.zhAria = el.getAttribute("aria-label") || "";
+    el.setAttribute("aria-label", t(el.dataset.i18nAria, el.dataset.zhAria));
   });
   document.querySelectorAll("[data-i18n-html]").forEach(el => {
     if (!el.dataset.zhHtml) el.dataset.zhHtml = el.innerHTML;
@@ -2143,10 +2148,15 @@ def api_diag():
 def icon():
     """網站圖示。與台股版用同一張（咖啡杯 + 紅K笑臉）—— 同一個品牌家族。"""
     p = os.path.join(BASE_DIR, "icon.png")
-    if os.path.exists(p):
-        from flask import send_file
-        return send_file(p, mimetype="image/png")
-    return "", 404
+    if not os.path.exists(p):
+        return "", 404
+    from flask import send_file
+    resp = send_file(p, mimetype="image/png")
+    # 長快取沒問題 —— 要換圖時把 head 裡的 ?v= 版本號加一即可。
+    # ⚠️ Chrome 的 favicon 快取跟一般 HTTP 快取是分開的，強制重新整理清不掉，
+    #    只有「換一個網址」才會讓它重抓，所以版本號是必要的。
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    return resp
 
 
 @app.route("/manifest.json")
@@ -2164,9 +2174,9 @@ def manifest():
         "background_color": "#F1EAD9",
         "theme_color": "#33241A",
         "icons": [
-            {"src": "/icon.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
-            {"src": "/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-            {"src": "/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+            {"src": "/icon.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/icon.png?v=2", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+            {"src": "/icon.png?v=2", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
         ],
     })
 

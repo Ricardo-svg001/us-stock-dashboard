@@ -933,6 +933,36 @@ def prefetch(universe_n=300):
 UPDATE_HOUR_ET = int(os.environ.get("UPDATE_HOUR_ET", "18"))
 SCHED_STATE = {"enabled": False, "next_run": "—", "last_run": "—", "last_result": "—"}
 
+# 上次更新紀錄寫在持久化磁碟，重啟後仍看得到。
+# 只存 last_run / last_result 兩個欄位 —— next_run 每次啟動都會重算，存了反而會誤導。
+SCHED_FILE = os.path.join(CACHE_DIR, ".sched_state.json")
+
+
+def _sched_load():
+    try:
+        with open(SCHED_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        for k in ("last_run", "last_result"):
+            if d.get(k):
+                SCHED_STATE[k] = d[k]
+    except Exception:
+        pass        # 檔案不存在或壞掉都不影響運作，維持預設的「—」
+
+
+def _sched_save():
+    """⚠️ 沿用專案慣例：uuid 暫存檔 + os.replace 原子寫入。
+
+    不要改成固定的 .tmp 檔名 —— 快取寫入曾因此互相覆蓋，坑踩過（見變更紀錄）。
+    """
+    try:
+        tmp = SCHED_FILE + "." + uuid.uuid4().hex + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"last_run": SCHED_STATE["last_run"],
+                       "last_result": SCHED_STATE["last_result"]}, f, ensure_ascii=False)
+        os.replace(tmp, SCHED_FILE)
+    except Exception:
+        pass        # 寫不進去頂多是紀錄不見，不能因此讓排程掛掉
+
 
 def _nth_weekday_utc(year, month, weekday, n):
     """該月第 n 個 weekday（Monday=0 … Sunday=6）的 00:00。"""
@@ -985,6 +1015,7 @@ def _fmt_et(dt):
 
 def _daily_updater():
     """背景執行緒：每個美東交易日收盤後重跑一次 prefetch。"""
+    _sched_load()
     SCHED_STATE["enabled"] = True
     while True:
         nxt = _next_update_utc()
@@ -1001,6 +1032,7 @@ def _daily_updater():
         except Exception as e:
             SCHED_STATE["last_result"] = "失敗：%s" % str(e)[:120]
         SCHED_STATE["last_run"] = _fmt_et(datetime.utcnow())
+        _sched_save()
         time.sleep(90)   # 跨過觸發點，避免同一分鐘內重複觸發
 
 
@@ -1875,6 +1907,7 @@ function render(res){
      + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
      + "<th>" + t("th.hit","符合日期") + "</th></tr></thead><tbody id='tb1'>" + rowsHtml(lastRows, showAlign)
      + "</tbody></table></div>";
+  h += "<div id='cd1'>" + cardsHtml(lastRows, showAlign, t("th.hit","符合日期")) + "</div>";
   $("#result1").innerHTML = h;
 }
 
@@ -1966,7 +1999,34 @@ function rowsHtml(rows, showAlign){
     + "<td>" + fmtHit(s) + "</td></tr>").join("");
 }
 
-function applyFilter(){ applyAll("tb1", lastRows, "secFilter", "epsFilter", "alignFilter", "nhFilter"); }
+/* ---- 手機版卡片 ----
+   ⚠️ CSS 的 @media(max-width:640px) 會把 .res-wide 整個 display:none、
+   改顯示 .res-cards。**所以每個輸出表格的地方都必須同時輸出卡片**，
+   否則手機上會只剩狀態列、下面一片空白（狀態列還會顯示「符合 N 檔」，
+   看起來像資料抓不到，其實是版面問題）。這個坑踩過，見變更紀錄。 */
+function cardsHtml(rows, showAlign, lastLabel){
+  return "<div class='res-cards'>" + rows.map((s, i) =>
+    "<details class='scard' data-i='" + i + "'>"
+    + "<summary><span class='sc-l'><b>" + s.symbol + "</b> " + coName(s) + "</span>"
+    + "<span class='sc-r'>" + s.price.toFixed(2) + "</span></summary>"
+    + "<div class='scard-body'>"
+    + "<div class='kv'><span>" + t("th.rank","市值排名") + "</span><b>" + s.rank + "</b></div>"
+    + "<div class='kv'><span>" + t("th.sector","產業") + "</span><b>" + coSector(s) + "</b></div>"
+    + "<div class='kv'><span>" + t("th.ma","均線") + "</span><b>" + s.ma.toFixed(2) + "</b></div>"
+    + "<div class='kv'><span>" + t("th.gap","乖離%") + "</span><b class='"
+      + (s.gap >= 0 ? "pos" : "neg") + "'>" + (s.gap >= 0 ? "+" : "") + s.gap.toFixed(2) + "%</b></div>"
+    + "<div class='kv'><span>" + t("th.eps","季EPS年增") + "</span><b class='"
+      + yoyCls(s.eps_yoy) + "'>" + fmtYoY(s.eps_yoy) + "</b></div>"
+    + "<div class='kv'><span>" + t("th.rev","季營收年增") + "</span><b class='"
+      + yoyCls(s.rev_yoy) + "'>" + fmtYoY(s.rev_yoy) + "</b></div>"
+    + "<div class='kv'><span>" + t("th.nh","創新高") + "</span><b>" + fmtNH(s.new_high) + "</b></div>"
+    + (showAlign ? "<div class='kv'><span>" + t("th.align","均線排列")
+                 + "</span><b>" + alignName(s.align) + "</b></div>" : "")
+    + "<div class='kv'><span>" + lastLabel + "</span><b>" + fmtHit(s) + "</b></div>"
+    + "</div></details>").join("") + "</div>";
+}
+
+function applyFilter(){ applyAll("tb1", "cd1", lastRows, "secFilter", "epsFilter", "alignFilter", "nhFilter"); }
 
 /* ---- 飆股拉回找買點 ---- */
 let lastRows3 = [], lastMeta3 = {};
@@ -2048,30 +2108,38 @@ function render3(res){
      + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
      + "<th>" + t("th.asof","資料日期") + "</th></tr></thead><tbody id='tb3'>"
      + rowsHtml(lastRows3, showAlign) + "</tbody></table></div>";
+  h += "<div id='cd3'>" + cardsHtml(lastRows3, showAlign, t("th.asof","資料日期")) + "</div>";
   $("#result3").innerHTML = h;
 }
 
-function applyFilter3(){ applyAll("tb3", lastRows3, "secFilter3", "epsFilter3", "alignFilter3", "nhFilter3"); }
+function applyFilter3(){ applyAll("tb3", "cd3", lastRows3, "secFilter3", "epsFilter3", "alignFilter3", "nhFilter3"); }
 
 /* 三個條件同時成立才顯示（AND）。用列的索引對回原始資料，
-   避免從 DOM 反推數值時被格式化字串（「—」「+12.3%」）搞混。 */
-function applyAll(tbId, rows, secId, epsId, alignId, nhId){
+   避免從 DOM 反推數值時被格式化字串（「—」「+12.3%」）搞混。
+
+   ⚠️ **表格與卡片要一起篩**。只篩表格的話，手機上按下拉選單完全沒反應
+   —— 因為手機看到的是卡片，表格早就被 CSS 隱藏了。 */
+function applyAll(tbId, cdId, rows, secId, epsId, alignId, nhId){
   const sec = $("#" + secId) ? $("#" + secId).value : "";
   const eps = $("#" + epsId) ? $("#" + epsId).value : "";
   const alg = (alignId && $("#" + alignId)) ? $("#" + alignId).value : "";
   const nh  = (nhId && $("#" + nhId)) ? $("#" + nhId).value : "";
-  const trs = document.querySelectorAll("#" + tbId + " tr");
-  trs.forEach((tr, i) => {
-    const r = rows[i];
-    let ok = true;
-    if (r){
-      if (sec && r.sector !== sec) ok = false;
-      if (eps && yoyBucket(r.eps_yoy) !== eps) ok = false;
-      if (alg && r.align !== alg) ok = false;
-      if (nh === "any" && !r.new_high) ok = false;
-      else if (nh && nh !== "any" && r.new_high !== nh) ok = false;
-    }
-    tr.style.display = ok ? "" : "none";
+
+  function pass(r){
+    if (!r) return true;
+    if (sec && r.sector !== sec) return false;
+    if (eps && yoyBucket(r.eps_yoy) !== eps) return false;
+    if (alg && r.align !== alg) return false;
+    if (nh === "any" && !r.new_high) return false;
+    if (nh && nh !== "any" && r.new_high !== nh) return false;
+    return true;
+  }
+
+  document.querySelectorAll("#" + tbId + " tr").forEach((tr, i) => {
+    tr.style.display = pass(rows[i]) ? "" : "none";
+  });
+  document.querySelectorAll("#" + cdId + " .scard").forEach((cd, i) => {
+    cd.style.display = pass(rows[i]) ? "" : "none";
   });
 }
 
@@ -2237,6 +2305,10 @@ def api_diag():
     w("  下次更新        : %s" % SCHED_STATE["next_run"])
     w("  上次更新        : %s" % SCHED_STATE["last_run"])
     w("  上次結果        : %s" % SCHED_STATE["last_result"])
+    w("  紀錄檔          : %s（%s）" % (
+        SCHED_FILE,
+        "已存在，重啟後仍看得到上次更新" if os.path.exists(SCHED_FILE)
+        else "尚未產生 ← 還沒跑過第一次自動更新"))
 
     w("\n【對外連線】—— 這一段最關鍵")
     tests = [

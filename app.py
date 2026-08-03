@@ -2486,11 +2486,24 @@ PAGE_ROUTES = {"screener": "p1", "pullback": "p3"}
 
 @app.after_request
 def _compress(resp):
-    """文字類回應做 gzip（HTML 約 70KB → 20KB）"""
+    """文字類回應做 gzip（HTML 約 70KB → 20KB），並禁止快取動態內容。"""
     try:
         ctype = (resp.headers.get("Content-Type") or "").split(";")[0]
         if ctype not in ("text/html", "application/json", "text/plain"):
             return resp
+
+        # ⚠️⚠️ **HTML 與 JSON 一律不快取。**
+        #   HTML 是伺服器端渲染的，裡面烤著 `APP_TOKEN`，**效期只有 24 小時**。
+        #   分頁被快取過夜 → token 過期 → 所有篩選 403，症狀是「網站突然壞了」。
+        #   ⚠️ `retryOnStaleToken()` 的「重整一次」在這種情況下**救不回來** ——
+        #      重整拿到的還是同一份快取 HTML、同一個過期 token。
+        #   ⚠️ 沒設 Cache-Control ≠ 不會被快取：瀏覽器會用「啟發式快取」自行決定，
+        #      Cloudflare 與 App 內的 WebView 也可能存。一定要明講。
+        #   （台股版 2026-08-04 實際發生過，症狀是首頁名言天天一樣。）
+        if ctype in ("text/html", "application/json"):
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            resp.headers["Pragma"] = "no-cache"
+
         if "gzip" not in (request.headers.get("Accept-Encoding") or "").lower():
             return resp
         if resp.direct_passthrough or resp.headers.get("Content-Encoding"):

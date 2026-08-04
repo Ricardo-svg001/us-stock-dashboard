@@ -1574,8 +1574,9 @@ def _phase_compute():
         if not hit:
             # ⚠️ 兩邊日期完全沒交集：通常是指數來源的交易日曆或格式不同
             _PHASE_WHY.update(
-                why="日期對不上：breadth 最新 %s，指數 50MA 最新 %s"
-                    % (max(bd), max(ma) if ma else "—"), steps=st)
+                # ⚠️ 均線天數要帶常數，不要寫死 —— 改 PHASE_MA 時這行差點沒跟著改。
+                why="日期對不上：breadth 最新 %s，指數 %dMA 最新 %s"
+                    % (max(bd), PHASE_MA, max(ma) if ma else "—"), steps=st)
             return "unknown", "", "", None
         seq = []
         bpos = {d: i for i, d in enumerate(bd)}
@@ -2329,6 +2330,23 @@ PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- 「關於這個工具」放最上面、**預設收合**。
+       ⚠️ 它是給第一次來的人看的，回訪者每天都要滑過去很煩 ——
+          所以位置在最前面（第一次看得到），但收起來（回訪不擋路）。
+          用 <details> 而不是永遠展開的 card，就是這個取捨。 -->
+  <details class="mk-box">
+    <summary><span class="mk-main"><b data-i18n="home.about">關於這個工具</b></span></summary>
+    <div class="mk-body">
+      <div style="font-size:14.5px;color:#555;line-height:1.95" data-i18n-html="home.aboutBody">
+        台股咖啡館的美股版。用<b>均線</b>從市值前 300 大的美股裡，
+        篩出站上或跌破指定均線、以及符合特定均線排列的股票。<br><br>
+        均線採美股習慣的 <b>10 / 20 / 50 / 150 日</b>——
+        50 日線相當於台股季線的地位，150 日線用來看中長期趨勢。<br><br>
+        資料為每日收盤價，非即時報價。
+      </div>
+    </div>
+  </details>
+
   <!-- ============ 今日市場（版面照台股版）============
        結論秒開、細節手動：
          · __PHASE_BAR__ 只讀快取、零成本，一進來就看得到答案
@@ -2345,17 +2363,6 @@ __PHASE_BAR__
       <div id="brBody"></div>
     </div>
   </details>
-
-  <div class="card" style="max-width:560px">
-    <h2 data-i18n="home.about">關於這個工具</h2>
-    <div style="font-size:14.5px;color:#555;line-height:1.95" data-i18n-html="home.aboutBody">
-      台股咖啡館的美股版。用<b>均線</b>從市值前 300 大的美股裡，
-      篩出站上或跌破指定均線、以及符合特定均線排列的股票。<br><br>
-      均線採美股習慣的 <b>10 / 20 / 50 / 150 日</b>——
-      50 日線相當於台股季線的地位，150 日線用來看中長期趨勢。<br><br>
-      資料為每日收盤價，非即時報價。
-    </div>
-  </div>
 
   <a class="menu-item" href="/screener" style="text-decoration:none;color:inherit">
     <span class="ic">📈</span>
@@ -2386,7 +2393,7 @@ __PHASE_BAR__
       <p>篩完如果檔數太多，上方的產業下拉可以繼續縮小範圍。
       <b>產業分布本身就是訊息</b>——如果三十檔裡有十二檔是同一個產業，
       那多半就是當下的主流題材。</p>
-      <p><b>適合誰</b>：持有數天到數週的波段交易者。這裡是收盤資料，做不了當沖。</p>
+      <p><b>適合誰</b>：持有數個月的動量交易者。這裡是收盤資料，做不了當沖。</p>
     </div>
   </details>
 
@@ -2503,7 +2510,7 @@ const I18N = { en: {
   "home.c3": "The Taiwan edition — same logic, already live",
   "p1.title": "Watchlist Screener", "p3.title": "Pullback Entry Finder",
   "p1.introT": "Find stocks that are moving right now — using moving averages",
-  "p1.intro": "<p>A moving average is the average cost of a group of buyers. Above the 50-day line, the people who bought this quarter are in profit; below the 150-day line, most buyers of the past half-year are underwater. Moving averages don't predict — they tell you where market participants stand, and that shapes what they do next.</p><p>This screener filters the top 150 or 300 US companies by market cap: crossing above or below the 10, 20, 50 or 150-day moving average, or screening directly by <b>MA alignment</b> — strict bullish (10&gt;20&gt;50&gt;150) means later buyers paid more and still bought, which usually marks a trend in progress.</p><p>If the screen returns too many names, the dropdowns above narrow it further. <b>The sector distribution is itself a signal</b> — when twelve of thirty results share an industry, that's where money is going.</p><p><b>Who it's for</b>: swing traders holding days to weeks. This is closing data — not built for day trading.</p>",
+  "p1.intro": "<p>A moving average is the average cost of a group of buyers. Above the 50-day line, the people who bought this quarter are in profit; below the 150-day line, most buyers of the past half-year are underwater. Moving averages don't predict — they tell you where market participants stand, and that shapes what they do next.</p><p>This screener filters the top 150 or 300 US companies by market cap: crossing above or below the 10, 20, 50 or 150-day moving average, or screening directly by <b>MA alignment</b> — strict bullish (10&gt;20&gt;50&gt;150) means later buyers paid more and still bought, which usually marks a trend in progress.</p><p>If the screen returns too many names, the dropdowns above narrow it further. <b>The sector distribution is itself a signal</b> — when twelve of thirty results share an industry, that's where money is going.</p><p><b>Who it's for</b>: momentum traders holding for several months. This is closing data — not built for day trading.</p>",
   "p3.introT": "Wait for a strong stock to come back, instead of chasing the high",
   "p3.intro": "<p>Leading stocks don't rise every day. After a run they consolidate, and that consolidation often stalls near a moving average — because that line is a group's average cost, which becomes psychological support.</p><p>This screen finds stocks whose <b>latest close has returned to within ±3% of the moving average you choose</b>. The point isn't to call the bottom; it's an entry with controlled risk — you're not buying the high, and if you're wrong the stop is obvious (a break of that line).</p><p>Which average to use depends on your holding period — the 20-day for shorter trades, the 50 or 150-day for swings. Combined with the <b>MA alignment</b> filter, you can look only for stocks whose trend is intact and merely resting.</p><p>Results are sorted by <b>how close price is to the line</b> — the top of the list pulled back the most precisely.</p>",
   "step.universe": "Universe", "step.days": "Days checked",
@@ -3098,6 +3105,26 @@ function breadthHtml(j){
     ? `% of constituents above their own ${j.breadth_ma}-day average`
     : `成分股站上自己 ${j.breadth_ma} 日均線的比例`;
 
+  /* 指數收盤價。⚠️ 指數與寬度的日期常常差一天（FRED 慢一個交易日），
+     所以**各自標各自的日期**，不要共用一個。 */
+  let idxHtml = "";
+  if (j.idx){
+    const q = j.idx;
+    const dir = q.above
+      ? (LANG === "en" ? "above" : "站上")
+      : (LANG === "en" ? "below" : "跌破");
+    const col = q.above ? "#CB4B3A" : "#4A7C64";
+    idxHtml =
+      `<div style="font-size:12.5px;color:var(--mocha);margin:2px 0 6px">`
+      + (LANG === "en" ? "Nasdaq Composite" : "納斯達克綜合指數")
+      + ` <span style="font-family:var(--font-num)">${q.date}</span></div>`
+      + `<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px">`
+      + `<b style="font-family:var(--font-num);font-size:24px;color:var(--espresso)">`
+      + q.close.toLocaleString() + `</b>`
+      + `<span style="font-size:12.5px;color:${col}">${dir} ${j.phase_ma}MA `
+      + `(${q.ma.toLocaleString()}, ${q.gap > 0 ? "+" : ""}${q.gap}%)</span></div>`;
+  }
+
   /* ⚠️ 分位數要一起顯示。單看「72%」不知道那是高是低。
      ⚠️⚠️ **但一定要把區間講出來。** 這裡的分位數只涵蓋圖上這 ${j.span_years} 年，
         而門檻 85%／30% 是用 **10 年回測**訂的 —— 母體不同。
@@ -3129,7 +3156,8 @@ function breadthHtml(j){
        ⚠️ 上面的分位數只涵蓋圖上這 ${j.span_years} 年；
        ${j.top}%／${j.wash}% 的門檻是用 10 年回測訂的，兩者母體不同。</p>`;
 
-  return `<div style="font-size:12.5px;color:var(--mocha);margin:2px 0 6px">${head}</div>`
+  return idxHtml
+       + `<div style="font-size:12.5px;color:var(--mocha);margin:2px 0 6px">${head}</div>`
        + svg + `<div style="margin-top:10px">${stats}</div>` + note;
 }
 
@@ -3330,7 +3358,30 @@ def api_breadth():
 
     cur = br[days[-1]]
     look = days[-WASH_LOOKBACK:]
+
+    # 納斯達克綜合指數的收盤價與均線。
+    # ⚠️ 一樣**只讀快取**。算 PHASE_MA 均線只是對一串數字做滑動和，很便宜，
+    #    但指數本身絕不在這裡連網補抓 —— 那是預抓流程的事。
+    # ⚠️ 指數與寬度**日期未必對齊**（FRED 常慢一個交易日），
+    #    所以回傳指數自己的日期，前端要照實顯示，不要沿用寬度的日期。
+    idx_out = None
+    try:
+        idx = _load_cache("nasdaq_index.json", 24 * 365) or {}
+        ids = sorted(idx)
+        if len(ids) >= PHASE_MA:
+            px = [idx[d] for d in ids]
+            run = sum(px[-PHASE_MA:])
+            ma_v = run / PHASE_MA
+            d = ids[-1]
+            idx_out = {"date": d, "close": round(idx[d], 2),
+                       "ma": round(ma_v, 2),
+                       "above": idx[d] > ma_v,
+                       "gap": round((idx[d] - ma_v) / ma_v * 100, 2)}
+    except Exception:
+        idx_out = None            # ⚠️ 指數讀不到不能影響寬度那半邊
+
     return jsonify(
+        idx=idx_out,
         ok=True,
         series=[[d, br[d]] for d in days],
         cur=cur, cur_pct=pct_of(cur), date=days[-1],

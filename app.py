@@ -1410,6 +1410,10 @@ def prefetch(universe_n=300):
 #    符合本專案「只用 flask/requests/gunicorn」的相依原則。
 
 UPDATE_HOUR_ET = int(os.environ.get("UPDATE_HOUR_ET", "18"))
+# ⚠️ 行程啟動時刻。診斷要靠它判斷「是不是每次看都剛重啟」——
+#    gunicorn 的 --timeout 太短時 worker 會被反覆砍掉，PID 每次都不同。
+PROCESS_STARTED_TS = time.time()
+
 SCHED_STATE = {"enabled": False, "next_run": "—", "last_run": "—", "last_result": "—",
                "loop_error": "", "heartbeat": "—", "heartbeat_ts": 0}
 
@@ -1504,6 +1508,19 @@ def _beat():
 
 
 def _daily_updater():
+    """外層只做一件事：**確保沒有任何例外能無聲逃走**。
+
+    ⚠️ 執行緒裡的未捕捉例外只會印到 stderr 就消失，
+       診斷頁看到的永遠只是「enabled 還是 False」，查不出原因。
+    """
+    try:
+        _daily_updater_inner()
+    except BaseException as e:      # ⚠️ 連 SystemExit / KeyboardInterrupt 都要留紀錄
+        SCHED_STATE["loop_error"] = "執行緒死亡 %s: %s" % (type(e).__name__, str(e)[:100])
+        raise
+
+
+def _daily_updater_inner():
     """背景執行緒：每個美東交易日收盤後重跑一次 prefetch。
 
     ⚠️ **整個迴圈骨幹都必須包在 try 裡。**
@@ -1518,10 +1535,14 @@ def _daily_updater():
     """
     # 迴圈「之前」的準備動作也要保護 —— 它們在 try 外面的話，
     # 一樣會讓執行緒還沒進迴圈就死掉，症狀完全一樣（安靜地不更新）。
+    # ⚠️ 這三個標記是為了分辨「執行緒沒進來」「進來但 _sched_load 卡住」
+    #    「設好旗標後才死」—— 三種原因症狀都是 enabled=False。
+    SCHED_STATE["entered_at"] = _utcnow().strftime("%H:%M:%S UTC")
     try:
         _sched_load()
-    except Exception:
-        pass
+        SCHED_STATE["loaded_at"] = _utcnow().strftime("%H:%M:%S UTC")
+    except Exception as e:
+        SCHED_STATE["loop_error"] = "_sched_load %s: %s" % (type(e).__name__, str(e)[:80])
     SCHED_STATE["enabled"] = True
     _beat()
     while True:
@@ -2983,6 +3004,13 @@ def api_diag():
     w("  排程執行中      : %s" % _health)
     w("  環境變數原始值   : %s" % ("（未設定，預設開啟）" if _raw is None else repr(_raw)))
     w("  執行緒已建立     : %s" % ("是" if SCHED_STATE.get("thread_started") else "否"))
+    _th = SCHED_STATE.get("thread_obj")
+    w("  執行緒還活著     : %s" % ("是" if (_th is not None and _th.is_alive()) else
+                                  "否 ← 已經死了" if _th is not None else "沒有物件"))
+    w("  進入函式        : %s" % SCHED_STATE.get("entered_at", "❌ 從來沒進去"))
+    w("  讀完紀錄檔      : %s" % SCHED_STATE.get("loaded_at", "❌ 沒讀完"))
+    w("  行程 PID        : %d（啟動至今 %.0f 秒）"
+      % (os.getpid(), time.time() - PROCESS_STARTED_TS))
     if SCHED_STATE.get("loop_error"):
         w("  ⚠️ 骨幹錯誤     : %s" % SCHED_STATE["loop_error"])
     w("  觸發時間        : 每個美東交易日 %02d:00 ET（收盤後 %d 小時）"
@@ -3189,8 +3217,10 @@ SCHED_STATE["env_raw"] = ENV_DAILY_RAW
 SCHED_STATE["thread_started"] = False
 if (ENV_DAILY_RAW or "1") == "1":
     try:
-        threading.Thread(target=_daily_updater, daemon=True).start()
+        _SCHED_THREAD = threading.Thread(target=_daily_updater, daemon=True)
+        _SCHED_THREAD.start()
         SCHED_STATE["thread_started"] = True
+        SCHED_STATE["thread_obj"] = _SCHED_THREAD
     except Exception as _e:
         SCHED_STATE["loop_error"] = "執行緒建立失敗 %s: %s" % (type(_e).__name__, _e)
 

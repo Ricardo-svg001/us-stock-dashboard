@@ -1079,6 +1079,212 @@ def start_job(fn, params):
 PREFETCH_STATE = {"stage": "尚未開始", "done": False}
 
 
+# ---------------------------------------------------------------- 市場階段
+#
+# 台股版用「融資張數 vs 歷史最高」判斷市場位置。美股**沒有對應物**：
+#   FINRA margin debt 是月頻、而且是金額 —— 金額會隨股價膨脹，
+#   正是台股當初刻意避開、改用張數的問題。
+#
+# 改用**市場寬度**：多少比例的個股站上自己的 200MA。
+# 概念一樣（「多數人已在場內」vs「籌碼洗乾淨了」），而且**用現有的 hist_ 快取就能算**。
+#
+# ⚠️⚠️ **關鍵差異：融資是慢變數，寬度是快變數。**
+#   台股的「底部」能佔 23%，是因為融資在價格反彈後還低迷好幾個月。
+#   寬度卻跟價格幾乎同步恢復，所以「低寬度＋站上均線」極少同時發生 ——
+#   直接照搬會讓底部只剩 1.4%（回測實測），整個狀態形同虛設。
+#   解法：底部改看**近 60 日的最低寬度**（「這一季內被洗過」），
+#   這個條件會持續好幾個月，行為才跟融資一致。修正後底部回到 10.7%。
+#
+# 10 年回測（2016-08~2026-07，納斯達克綜合指數 + 前 300 大）：
+#   上升段 49.2%／高點警訊 10.2%／下跌段 29.9%／底部 10.7%
+#   底部出現在 2019-01（2018Q4 急殺後）、2020-04~08（COVID 後）、
+#   2022-07~2023-01（熊市打底）、2025-05~07（關稅急殺後）—— 全部對得上真實事件。
+#
+# ⚠️ 60 日這個數字**沒有最佳化過**，刻意不掃參數找最佳值（那只會過擬合這 10 年）。
+#    60 天≈一季，理由是語意不是數據。
+
+BREADTH_MA = 200            # 個股用幾日均線算寬度
+BREADTH_TOP = 85.0          # 當下寬度 ≥ 這個 → 頂部區（約 P90）
+BREADTH_WASH = 30.0         # 近 N 日最低寬度 ≤ 這個 → 洗過盤
+WASH_LOOKBACK = 60          # 「最近」是幾個交易日
+PHASE_MA = 50               # 指數用幾日均線定方向（對應台股的季線角色）
+PHASE_STICKY = 3            # 連續幾天成立才切換狀態
+
+NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
+
+
+def get_nasdaq_index():
+    """納斯達克**綜合**指數日收盤 {date: close}。
+
+    ⚠️ 用 FRED 不用 Nasdaq API —— IXIC 是指數不是股票，
+       `/quote/{sym}/historical?assetclass=stocks` 抓不到。
+       FRED 免金鑰、歷史回溯到 1971，實測可用。
+    ⚠️ 假日那幾列的值是 '.'，要跳過。
+    """
+    cached = _load_cache("nasdaq_index.json", 12)
+    if cached is not None:
+        return cached
+    out = {}
+    try:
+        r = _get(NASDAQ_FRED, timeout=60, tries=2)
+        for ln in r.text.splitlines()[1:]:
+            p = ln.split(",")
+            if len(p) < 2:
+                continue
+            d, v = p[0].strip(), p[1].strip()
+            if len(d) != 10 or v in (".", "", "NA"):
+                continue
+            try:
+                out[d] = float(v)
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    if out:                      # ⚠️ 抓不到別寫空的蓋掉舊資料
+        _save_cache("nasdaq_index.json", out)
+    return out or (cached or {})
+
+
+def build_breadth():
+    """從 hist_ 快取算市場寬度，存成 breadth.json。
+
+    ⚠️ **只能在預抓流程裡呼叫。** 要讀幾百個快取檔、每檔算 200MA，
+       首頁每個訪客都跑會出事。首頁只讀 breadth.json。
+    """
+    out = {}
+    try:
+        files = [f for f in os.listdir(CACHE_DIR)
+                 if f.startswith("hist_") and f.endswith(".json")]
+        above, total = {}, {}
+        for f in files:
+            try:
+                rows = _load_cache(f, 24 * 365) or []
+            except Exception:
+                continue
+            if len(rows) < BREADTH_MA + 20:
+                continue
+            run = 0.0
+            for i, r in enumerate(rows):
+                if not r or len(r) < 2 or r[1] is None:
+                    continue
+                run += r[1]
+                if i >= BREADTH_MA:
+                    run -= rows[i - BREADTH_MA][1]
+                if i >= BREADTH_MA - 1:
+                    d = r[0]
+                    total[d] = total.get(d, 0) + 1
+                    if r[1] > run / BREADTH_MA:
+                        above[d] = above.get(d, 0) + 1
+        for d, n in total.items():
+            if n >= 60:          # 樣本太少的日子不算，免得比例失真
+                out[d] = round(above.get(d, 0) / n * 100, 1)
+    except Exception:
+        return None
+    if out:
+        # 只留最近 400 天，夠算洗盤回看期就好
+        keep = dict(sorted(out.items())[-400:])
+        _save_cache("breadth.json", keep)
+        return keep
+    return None
+
+
+PHASE_UI = {
+    "bull_up":   {"dot": "🟢", "zh": "順風・上升段", "en": "Tailwind · Uptrend",
+                  "zh_do": "順勢操作，讓獲利跑",
+                  "en_do": "Ride the trend, let winners run"},
+    "bull_top":  {"dot": "🟠", "zh": "順風・高點警訊", "en": "Tailwind · Near a Top",
+                  "zh_do": "多數股票都在高檔，開始想賣點",
+                  "en_do": "Most stocks extended — think about exits"},
+    "bear_down": {"dot": "🔴", "zh": "逆風・下跌段", "en": "Headwind · Declining",
+                  "zh_do": "守紀律，不攤平",
+                  "en_do": "Stay disciplined, never average down"},
+    "bear_low":  {"dot": "🔵", "zh": "逆風・底部", "en": "Headwind · Basing",
+                  "zh_do": "剛被洗過，可以開始留意",
+                  "en_do": "Washed out — start watching"},
+}
+
+
+def _phase_raw(close, ma, breadth, wash_min):
+    """單日的市場階段。**寬度定位置，指數 vs 50MA 定方向。**"""
+    if close is None or ma is None or breadth is None:
+        return None
+    above = close > ma
+    if breadth >= BREADTH_TOP:
+        return "bull_top" if above else "bear_down"
+    if wash_min is not None and wash_min <= BREADTH_WASH:
+        return "bear_low" if above else "bear_down"
+    return "bull_up" if above else "bear_down"
+
+
+def _phase_sticky(seq, n=PHASE_STICKY):
+    """連續 n 天成立才換狀態，消掉一兩天的雜訊。"""
+    if not seq:
+        return None
+    cur, pend, cnt = seq[0], None, 0
+    for x in seq:
+        if x == cur:
+            pend, cnt = None, 0
+            continue
+        cnt = cnt + 1 if x == pend else 1
+        pend = x
+        if cnt >= n:
+            cur, pend, cnt = x, None, 0
+    return cur
+
+
+_PHASE_MEMO = {"at": 0.0, "val": None}
+
+
+def market_phase_cached():
+    """首頁用：**只讀快取、絕不連網**。回傳 (phase, 說明, 資料日期, 寬度)。"""
+    now = time.time()
+    if _PHASE_MEMO["val"] is not None and now - _PHASE_MEMO["at"] < 300:
+        return _PHASE_MEMO["val"]
+    val = _phase_compute()
+    _PHASE_MEMO.update(at=now, val=val)
+    return val
+
+
+def _phase_compute():
+    try:
+        br = _load_cache("breadth.json", 24 * 365) or {}
+        idx = _load_cache("nasdaq_index.json", 24 * 365) or {}
+        if not br or not idx:
+            return "unknown", "", "", None
+        bd = sorted(br)
+        ids = sorted(idx)
+        # 指數的 50MA
+        px = [idx[d] for d in ids]
+        ma = {}
+        run = 0.0
+        for i, d in enumerate(ids):
+            run += px[i]
+            if i >= PHASE_MA:
+                run -= px[i - PHASE_MA]
+            if i >= PHASE_MA - 1:
+                ma[d] = run / PHASE_MA
+        # 最近 30 天逐日判斷，再套黏著（不必存狀態，每次從快取重算）
+        seq = []
+        recent = bd[-30:]
+        for d in recent:
+            if d not in ma:
+                continue
+            i = bd.index(d)
+            window = [br[x] for x in bd[max(0, i - WASH_LOOKBACK + 1):i + 1]]
+            p = _phase_raw(idx.get(d), ma.get(d), br[d],
+                           min(window) if window else None)
+            if p:
+                seq.append(p)
+        phase = _phase_sticky(seq)
+        if not phase:
+            return "unknown", "", "", None
+        last = bd[-1]
+        return (phase, (PHASE_UI.get(phase) or {}).get("zh_do", ""),
+                last, br[last])
+    except Exception:
+        return "unknown", "", "", None
+
+
 def prefetch(universe_n=300):
     """啟動時先把清單與歷史抓好，使用者才不用等。"""
     PREFETCH_STATE.update(stage="取得股票清單", done=False)
@@ -1094,6 +1300,17 @@ def prefetch(universe_n=300):
     def cb2(i, total):
         PREFETCH_STATE["stage"] = "讀取基本面資料 %d / %d" % (i, total)
     load_fundamentals(syms, status_cb=cb2)   # 預抓時不算本益比，篩選時才用當下價格重算
+    # ⚠️ 市場階段要用的兩份資料，都在這裡算好存檔 —— 首頁只讀快取、絕不自己算
+    PREFETCH_STATE["stage"] = "納斯達克綜合指數"
+    try:
+        get_nasdaq_index()
+    except Exception:
+        pass
+    PREFETCH_STATE["stage"] = "計算市場寬度"
+    try:
+        build_breadth()
+    except Exception:
+        pass
     PREFETCH_STATE.update(stage="完成", done=True,
                           finished_at=_utcnow().strftime("%Y-%m-%d %H:%M UTC"))
 
@@ -1603,6 +1820,32 @@ PAGE = r"""<!DOCTYPE html>
            margin:26px auto 14px; font-family:var(--font-head); font-weight:700;
            font-size:13px; color:var(--mocha); letter-spacing:.16em; }
   .qhead::after { content:""; flex:1; height:1px; background:var(--grounds); }
+  /* 今日市場：市場階段（可展開看說明） */
+  .mk-box { max-width:560px; margin:0 auto 16px; background:var(--foam);
+           border:1.5px solid var(--grounds); border-radius:18px; overflow:hidden; }
+  .mk-box > summary { list-style:none; cursor:pointer; display:flex; align-items:center;
+           gap:12px; padding:14px 42px 14px 16px; position:relative; }
+  .mk-box > summary::-webkit-details-marker { display:none; }
+  .mk-box > summary::after { content:"▸"; position:absolute; right:16px; top:50%;
+           transform:translateY(-50%); color:var(--caramel); font-size:17px;
+           transition:transform .18s; }
+  .mk-box[open] > summary::after { transform:translateY(-50%) rotate(90deg); }
+  .mk-box > summary:hover { background:var(--milk); }
+  .mk-dot { font-size:17px; line-height:1; }
+  .mk-main { display:flex; align-items:baseline; gap:10px; flex:1; min-width:0; }
+  .mk-main b { font-family:var(--font-head); font-size:16px; font-weight:700;
+           color:var(--espresso); }
+  .mk-do { font-size:13px; color:var(--mocha); overflow:hidden;
+           text-overflow:ellipsis; white-space:nowrap; }
+  .mk-body { padding:2px 16px 14px; border-top:1px solid var(--grounds);
+           font-size:14px; color:#555; line-height:1.9; }
+  .mk-body b { color:var(--espresso); }
+  .mk-num { font-family:var(--font-num); font-size:12px; color:var(--mocha);
+           flex-shrink:0; }
+  @media(max-width:520px){
+    .mk-main { flex-direction:column; align-items:flex-start; gap:2px; }
+    .mk-num { display:none; }
+  }
   .qcard { max-width:560px; margin:0 auto 16px; background:var(--foam);
            border:1.5px solid var(--grounds); border-radius:20px;
            padding:22px 24px 20px; box-shadow:var(--shadow); position:relative;
@@ -1729,6 +1972,8 @@ PAGE = r"""<!DOCTYPE html>
       <span class="sep">·</span><span id="bdate">—</span>
     </div>
   </div>
+
+__PHASE_BAR__
 
   <div class="card" style="max-width:560px">
     <h2 data-i18n="home.about">關於這個工具</h2>
@@ -2522,10 +2767,52 @@ def _compress(resp):
     return resp
 
 
+
+def _phase_banner_html():
+    """首頁的「今日市場」。**只讀快取**，讀不到就回空字串。
+
+    ⚠️ 寧可少一塊，也不要顯示「無法判斷」—— 那看起來像壞掉。
+    """
+    import html as _h
+    phase, do, date, breadth = market_phase_cached()
+    ui = PHASE_UI.get(phase)
+    if not ui:
+        return ""
+    b = ("%.0f%%" % breadth) if breadth is not None else "—"
+    return (
+        '<details class="mk-box">'
+        '<summary>'
+        '<span class="mk-dot">' + ui["dot"] + '</span>'
+        '<span class="mk-main">'
+        '<b class="q-zh">' + _h.escape(ui["zh"]) + '</b>'
+        '<b class="q-en" style="display:none">' + _h.escape(ui["en"]) + '</b>'
+        '<span class="mk-do q-zh">' + _h.escape(do) + '</span>'
+        '<span class="mk-do q-en" style="display:none">'
+        + _h.escape(ui["en_do"]) + '</span>'
+        '</span>'
+        '<span class="mk-num">' + _h.escape(date) + '</span>'
+        '</summary>'
+        '<div class="mk-body">'
+        '<span class="q-zh">目前 <b>' + b + '</b> 的成分股站在自己的 200 日均線之上，'
+        '納斯達克綜合指數在 50 日均線'
+        + ('<b>之上</b>' if phase.startswith("bull") else '<b>之下</b>') + '。<br><br>'
+        '寬度告訴你<b>市場走到循環的哪個位置</b>，指數與均線告訴你<b>現在往哪走</b>。'
+        '這不預測行情，只描述環境。</span>'
+        '<span class="q-en" style="display:none"><b>' + b + '</b> of constituents are '
+        'above their own 200-day average, and the Nasdaq Composite is '
+        + ('<b>above</b>' if phase.startswith("bull") else '<b>below</b>')
+        + ' its 50-day average.<br><br>'
+        'Breadth tells you <b>where the market sits in the cycle</b>; '
+        'the index versus its average tells you <b>which way it is going</b>. '
+        'This describes the environment — it does not predict it.</span>'
+        '</div></details>')
+
+
 def _render(start_page="home"):
     html = PAGE.replace("__APP_TOKEN__", make_app_token())
     html = html.replace("__START_PAGE__", start_page, 1)
     html = html.replace("__TW_URL__", TW_URL)
+    html = html.replace("__PHASE_BAR__", _phase_banner_html())
     return render_template_string(html)
 
 
@@ -2578,6 +2865,24 @@ def api_diag():
     for k, v in PREFETCH_STATE.items():
         w("  %-14s : %s" % (k, v))
     w("  最近來源        : %s" % LAST_SOURCE)
+
+    w("\n【市場階段】")
+    try:
+        _ph, _do, _d, _b = market_phase_cached()
+        _ui = PHASE_UI.get(_ph)
+        w("  目前階段        : %s" % ("%s %s（%s）" % (_ui["dot"], _ui["zh"], _do)
+                                      if _ui else "unknown ← 缺 breadth 或指數快取"))
+        w("  市場寬度        : %s（%% 成分股站上自身 200MA）"
+          % ("%.1f%%" % _b if _b is not None else "—"))
+        w("  資料日期        : %s" % (_d or "—"))
+        _br = _load_cache("breadth.json", 24 * 365) or {}
+        _ix = _load_cache("nasdaq_index.json", 24 * 365) or {}
+        w("  breadth.json    : %d 天%s" % (len(_br), "" if _br else "  ← 還沒算過"))
+        w("  納斯達克指數     : %d 天%s" % (len(_ix), "" if _ix else "  ← 還沒抓過"))
+        w("  門檻            : 頂部≥%.0f%%　洗盤≤%.0f%%（近 %d 日最低）　方向 %dMA　黏著 %d 天"
+          % (BREADTH_TOP, BREADTH_WASH, WASH_LOOKBACK, PHASE_MA, PHASE_STICKY))
+    except Exception as e:
+        w("  ❌ %s: %s" % (type(e).__name__, str(e)[:80]))
 
     w("\n【每日自動更新】")
     # ⚠️ 不要只看 enabled —— 那個旗標設過一次就不會變，執行緒死了它還是「是」。

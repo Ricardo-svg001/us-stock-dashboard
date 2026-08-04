@@ -1414,6 +1414,15 @@ UPDATE_HOUR_ET = int(os.environ.get("UPDATE_HOUR_ET", "18"))
 #    gunicorn 的 --timeout 太短時 worker 會被反覆砍掉，PID 每次都不同。
 PROCESS_STARTED_TS = time.time()
 
+# ⚠️⚠️ import 當下的 PID。**背景執行緒的存亡全看這一個數字。**
+#    gunicorn 開 --preload 時，master 先 import（背景執行緒在 master 裡起來），
+#    再 fork 出 worker —— 而 **fork 不會複製執行緒**。
+#    worker 繼承了「執行緒跑過」的所有痕跡（enabled=True、心跳、entered_at），
+#    執行緒本身卻留在 master。症狀是：旗標正常、心跳有值、但執行緒早就不在，
+#    預抓永遠停在 fork 當下那一格，而且**不會有任何錯誤訊息**。
+#    IMPORT_PID != os.getpid() 就是鐵證。
+IMPORT_PID = os.getpid()
+
 SCHED_STATE = {"enabled": False, "next_run": "—", "last_run": "—", "last_result": "—",
                "loop_error": "", "heartbeat": "—", "heartbeat_ts": 0}
 
@@ -2961,6 +2970,10 @@ def api_diag():
         w("  %-14s : %s" % (k, v))
     w("  最近來源        : %s" % LAST_SOURCE)
 
+    _pft = PREFETCH_STATE.get("thread_obj")
+    w("  預抓執行緒      : %s" % ("執行中" if (_pft is not None and _pft.is_alive())
+                                 else "已結束／不存在" if _pft is not None else "沒有物件"))
+
     w("\n【市場階段】")
     try:
         _ph, _do, _d, _b = market_phase_cached()
@@ -3009,8 +3022,16 @@ def api_diag():
                                   "否 ← 已經死了" if _th is not None else "沒有物件"))
     w("  進入函式        : %s" % SCHED_STATE.get("entered_at", "❌ 從來沒進去"))
     w("  讀完紀錄檔      : %s" % SCHED_STATE.get("loaded_at", "❌ 沒讀完"))
-    w("  行程 PID        : %d（啟動至今 %.0f 秒）"
-      % (os.getpid(), time.time() - PROCESS_STARTED_TS))
+    _now_pid = os.getpid()
+    w("  import 時 PID   : %d" % IMPORT_PID)
+    w("  現在的 PID      : %d（啟動至今 %.0f 秒）"
+      % (_now_pid, time.time() - PROCESS_STARTED_TS))
+    if _now_pid != IMPORT_PID:
+        w("  ❌❌ PID 不一致 → gunicorn 開了 --preload，import 後才 fork。")
+        w("       fork 不複製執行緒：預抓與每日更新的執行緒都留在 master，")
+        w("       這個 worker 裡它們從來不存在。移除 --preload 即可。")
+    else:
+        w("  ✅ PID 一致（沒有 preload 造成的執行緒遺失）")
     if SCHED_STATE.get("loop_error"):
         w("  ⚠️ 骨幹錯誤     : %s" % SCHED_STATE["loop_error"])
     w("  觸發時間        : 每個美東交易日 %02d:00 ET（收盤後 %d 小時）"
@@ -3205,7 +3226,9 @@ def api_prefetch_status():
 
 
 if os.environ.get("ENABLE_PREFETCH", "1") == "1":
-    threading.Thread(target=lambda: prefetch(300), daemon=True).start()
+    _PF_THREAD = threading.Thread(target=lambda: prefetch(300), daemon=True)
+    _PF_THREAD.start()
+    PREFETCH_STATE["thread_obj"] = _PF_THREAD
 
 # 每日自動更新。設 ENABLE_DAILY_UPDATE=0 可關閉（本機開發時通常會關）。
 # ⚠️ 把「環境變數的原始值」與「執行緒有沒有真的啟動」分開記下來。

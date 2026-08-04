@@ -1172,6 +1172,10 @@ def get_nasdaq_index():
     """
     cached = _load_cache("nasdaq_index.json", 12)
     if cached is not None:
+        # ⚠️ 命中快取要標記，否則診斷會誤報「全部失敗」——
+        #    來源是上一個行程抓的，_INDEX_SRC 是行程內的變數。
+        if not _INDEX_SRC["name"]:
+            _INDEX_SRC.update({"name": "快取（上次成功的來源）", "n": len(cached)})
         return cached
     errs = []
     for name, fn in INDEX_SOURCES:
@@ -1289,43 +1293,69 @@ def market_phase_cached():
     return val
 
 
+# ⚠️ 為什麼是 unknown —— 這個欄位存在的理由：
+#    `_phase_compute()` 整包在 except 裡，任何失敗都長得一模一樣（unknown）。
+#    沒有這個就只能猜，而線上與本機的差異永遠猜不到。
+_PHASE_WHY = {"why": "還沒算過", "steps": []}
+
+
 def _phase_compute():
+    st = []
     try:
         br = _load_cache("breadth.json", 24 * 365) or {}
         idx = _load_cache("nasdaq_index.json", 24 * 365) or {}
+        st.append("breadth %d 天%s｜指數 %d 天%s"
+                  % (len(br), ("（~%s）" % max(br)) if br else "",
+                     len(idx), ("（~%s）" % max(idx)) if idx else ""))
         if not br or not idx:
+            _PHASE_WHY.update(why="缺 breadth.json 或 nasdaq_index.json", steps=st)
             return "unknown", "", "", None
         bd = sorted(br)
         ids = sorted(idx)
-        # 指數的 50MA
         px = [idx[d] for d in ids]
-        ma = {}
-        run = 0.0
+        ma, run = {}, 0.0
         for i, d in enumerate(ids):
             run += px[i]
             if i >= PHASE_MA:
                 run -= px[i - PHASE_MA]
             if i >= PHASE_MA - 1:
                 ma[d] = run / PHASE_MA
-        # 最近 30 天逐日判斷，再套黏著（不必存狀態，每次從快取重算）
-        seq = []
+        st.append("指數 %dMA 可算 %d 天（~%s）"
+                  % (PHASE_MA, len(ma), max(ma) if ma else "—"))
         recent = bd[-30:]
+        hit = [d for d in recent if d in ma]
+        st.append("breadth 最近 30 天有 %d 天對得上指數日期" % len(hit))
+        if not hit:
+            # ⚠️ 兩邊日期完全沒交集：通常是指數來源的交易日曆或格式不同
+            _PHASE_WHY.update(
+                why="日期對不上：breadth 最新 %s，指數 50MA 最新 %s"
+                    % (max(bd), max(ma) if ma else "—"), steps=st)
+            return "unknown", "", "", None
+        seq = []
+        bpos = {d: i for i, d in enumerate(bd)}
         for d in recent:
             if d not in ma:
                 continue
-            i = bd.index(d)
+            i = bpos[d]
             window = [br[x] for x in bd[max(0, i - WASH_LOOKBACK + 1):i + 1]]
             p = _phase_raw(idx.get(d), ma.get(d), br[d],
                            min(window) if window else None)
             if p:
                 seq.append(p)
+        st.append("判定出 %d 天的狀態，最後 5 天：%s"
+                  % (len(seq), " ".join(seq[-5:]) or "—"))
         phase = _phase_sticky(seq)
         if not phase:
+            _PHASE_WHY.update(
+                why="黏著條件不成立：需要連續 %d 天同一狀態，實際只有 %d 天可判"
+                    % (PHASE_STICKY, len(seq)), steps=st)
             return "unknown", "", "", None
         last = bd[-1]
+        _PHASE_WHY.update(why="正常", steps=st)
         return (phase, (PHASE_UI.get(phase) or {}).get("zh_do", ""),
                 last, br[last])
-    except Exception:
+    except Exception as e:
+        _PHASE_WHY.update(why="%s: %s" % (type(e).__name__, str(e)[:100]), steps=st)
         return "unknown", "", "", None
 
 
@@ -2926,6 +2956,9 @@ def api_diag():
         w("  指數來源        : %s" % (_INDEX_SRC["name"] or "全部失敗"))
         for _e in _INDEX_SRC["errs"]:
             w("     ✗ %s" % _e)
+        w("  判定過程        : %s" % _PHASE_WHY["why"])
+        for _st in _PHASE_WHY["steps"]:
+            w("     · %s" % _st)
         w("  門檻            : 頂部≥%.0f%%　洗盤≤%.0f%%（近 %d 日最低）　方向 %dMA　黏著 %d 天"
           % (BREADTH_TOP, BREADTH_WASH, WASH_LOOKBACK, PHASE_MA, PHASE_STICKY))
     except Exception as e:

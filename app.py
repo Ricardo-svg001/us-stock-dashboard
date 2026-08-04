@@ -1113,36 +1113,80 @@ PHASE_STICKY = 3            # 連續幾天成立才切換狀態
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
 
 
+def _idx_from_fred():
+    """FRED NASDAQCOM：納斯達克綜合指數，免金鑰、回溯到 1971。
+    ⚠️ 假日那幾列的值是 '.'，要跳過。"""
+    out = {}
+    r = _get(NASDAQ_FRED, timeout=60, tries=2)
+    for ln in r.text.splitlines()[1:]:
+        p = ln.split(",")
+        if len(p) < 2:
+            continue
+        d, v = p[0].strip(), p[1].strip()
+        if len(d) != 10 or v in (".", "", "NA"):
+            continue
+        try:
+            out[d] = float(v)
+        except ValueError:
+            continue
+    return out
+
+
+def _idx_from_nasdaq(sym, asset):
+    """Nasdaq API。COMP 走 assetclass=index，ONEQ 走 stocks。
+    ⚠️ 只回得到近幾年，但我們只算 50MA，夠用。"""
+    frm = (_utcnow() - timedelta(days=900)).strftime("%Y-%m-%d")
+    to = _utcnow().strftime("%Y-%m-%d")
+    url = ("https://api.nasdaq.com/api/quote/%s/historical"
+           "?assetclass=%s&fromdate=%s&todate=%s&limit=9999" % (sym, asset, frm, to))
+    j = _get(url, timeout=60, tries=2).json()
+    rows = ((j or {}).get("data") or {}).get("tradesTable", {}).get("rows") or []
+    out = {}
+    for r in rows:
+        d, c = (r.get("date") or "").strip(), _num(r.get("close"))
+        if not d or c is None:
+            continue
+        mm, dd, yy = d.split("/")
+        out["%s-%s-%s" % (yy, mm, dd)] = c
+    return out
+
+
+# ⚠️ 診斷用：記下實際用了哪個來源、各來源為什麼失敗。
+#    這個欄位存在的理由：FRED **會擋機房 IP**（Render 上實測 0 筆，本機正常），
+#    跟 stooq / yahoo 是同一類問題，而那在本機測不出來。
+INDEX_SOURCES = [
+    ("FRED NASDAQCOM", lambda: _idx_from_fred()),
+    ("Nasdaq COMP",    lambda: _idx_from_nasdaq("COMP", "index")),
+    ("ONEQ (ETF 代理)", lambda: _idx_from_nasdaq("ONEQ", "stocks")),
+]
+_INDEX_SRC = {"name": None, "n": 0, "errs": []}
+
+
 def get_nasdaq_index():
     """納斯達克**綜合**指數日收盤 {date: close}。
 
-    ⚠️ 用 FRED 不用 Nasdaq API —— IXIC 是指數不是股票，
-       `/quote/{sym}/historical?assetclass=stocks` 抓不到。
-       FRED 免金鑰、歷史回溯到 1971，實測可用。
-    ⚠️ 假日那幾列的值是 '.'，要跳過。
+    ⚠️ 不是 QQQ 的納斯達克 100。
+    ⚠️ IXIC 是指數不是股票，`/historical?assetclass=stocks` 抓不到。
+    ⚠️ **一定要有備援**：FRED 在 Render 上抓不到（機房 IP），
+       本機卻正常 —— 只留單一來源等於線上永遠 unknown。
     """
     cached = _load_cache("nasdaq_index.json", 12)
     if cached is not None:
         return cached
-    out = {}
-    try:
-        r = _get(NASDAQ_FRED, timeout=60, tries=2)
-        for ln in r.text.splitlines()[1:]:
-            p = ln.split(",")
-            if len(p) < 2:
-                continue
-            d, v = p[0].strip(), p[1].strip()
-            if len(d) != 10 or v in (".", "", "NA"):
-                continue
-            try:
-                out[d] = float(v)
-            except ValueError:
-                continue
-    except Exception:
-        pass
-    if out:                      # ⚠️ 抓不到別寫空的蓋掉舊資料
-        _save_cache("nasdaq_index.json", out)
-    return out or (cached or {})
+    errs = []
+    for name, fn in INDEX_SOURCES:
+        try:
+            out = fn()
+        except Exception as e:
+            errs.append("%s: %s" % (name, str(e)[:60]))
+            continue
+        if len(out) >= 300:          # 至少要能算 50MA 還有餘裕
+            _save_cache("nasdaq_index.json", out)
+            _INDEX_SRC.update({"name": name, "n": len(out), "errs": errs})
+            return out
+        errs.append("%s: 只有 %d 筆" % (name, len(out)))
+    _INDEX_SRC.update({"name": None, "n": 0, "errs": errs})
+    return cached or {}       # ⚠️ 抓不到別寫空的蓋掉舊資料
 
 
 def build_breadth():
@@ -2878,7 +2922,10 @@ def api_diag():
         _br = _load_cache("breadth.json", 24 * 365) or {}
         _ix = _load_cache("nasdaq_index.json", 24 * 365) or {}
         w("  breadth.json    : %d 天%s" % (len(_br), "" if _br else "  ← 還沒算過"))
-        w("  納斯達克指數     : %d 天%s" % (len(_ix), "" if _ix else "  ← 還沒抓過"))
+        w("  納斯達克指數     : %d 天%s" % (len(_ix), "" if _ix else "  ← 抓不到"))
+        w("  指數來源        : %s" % (_INDEX_SRC["name"] or "全部失敗"))
+        for _e in _INDEX_SRC["errs"]:
+            w("     ✗ %s" % _e)
         w("  門檻            : 頂部≥%.0f%%　洗盤≤%.0f%%（近 %d 日最低）　方向 %dMA　黏著 %d 天"
           % (BREADTH_TOP, BREADTH_WASH, WASH_LOOKBACK, PHASE_MA, PHASE_STICKY))
     except Exception as e:

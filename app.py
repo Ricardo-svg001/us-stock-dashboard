@@ -2968,13 +2968,21 @@ def api_diag():
     # ⚠️ 不要只看 enabled —— 那個旗標設過一次就不會變，執行緒死了它還是「是」。
     #    要看心跳：正常情況每 5 分鐘內一定會更新一次。
     _hb_age = time.time() - (SCHED_STATE.get("heartbeat_ts") or 0)
+    _raw = SCHED_STATE.get("env_raw")
     if not SCHED_STATE["enabled"]:
-        _health = "否 ← ENABLE_DAILY_UPDATE=0，資料不會自動變新"
+        if not SCHED_STATE.get("thread_started"):
+            _health = ("否 ← 環境變數 ENABLE_DAILY_UPDATE=%r，執行緒沒有啟動" % _raw
+                       if _raw is not None and _raw != "1"
+                       else "否 ← 執行緒建立失敗（看下面骨幹錯誤）")
+        else:
+            _health = "否 ← 執行緒有啟動但還沒設旗標（剛重啟？或啟動時就死了）"
     elif _hb_age > 600:
         _health = "⚠️ 有啟動但心跳停了 %.0f 分鐘 ← 執行緒可能卡住" % (_hb_age / 60)
     else:
         _health = "是（心跳 %.0f 秒前）" % _hb_age
     w("  排程執行中      : %s" % _health)
+    w("  環境變數原始值   : %s" % ("（未設定，預設開啟）" if _raw is None else repr(_raw)))
+    w("  執行緒已建立     : %s" % ("是" if SCHED_STATE.get("thread_started") else "否"))
     if SCHED_STATE.get("loop_error"):
         w("  ⚠️ 骨幹錯誤     : %s" % SCHED_STATE["loop_error"])
     w("  觸發時間        : 每個美東交易日 %02d:00 ET（收盤後 %d 小時）"
@@ -3172,8 +3180,19 @@ if os.environ.get("ENABLE_PREFETCH", "1") == "1":
     threading.Thread(target=lambda: prefetch(300), daemon=True).start()
 
 # 每日自動更新。設 ENABLE_DAILY_UPDATE=0 可關閉（本機開發時通常會關）。
-if os.environ.get("ENABLE_DAILY_UPDATE", "1") == "1":
-    threading.Thread(target=_daily_updater, daemon=True).start()
+# ⚠️ 把「環境變數的原始值」與「執行緒有沒有真的啟動」分開記下來。
+#    以前診斷只看得到 enabled 旗標，就自己推論成「一定是被設成 0」——
+#    但旗標是 False 也可能是執行緒根本沒被建立、或建立了卻在設旗標前就死掉。
+#    三種原因症狀一樣，不記錄就只能猜。
+ENV_DAILY_RAW = os.environ.get("ENABLE_DAILY_UPDATE")
+SCHED_STATE["env_raw"] = ENV_DAILY_RAW
+SCHED_STATE["thread_started"] = False
+if (ENV_DAILY_RAW or "1") == "1":
+    try:
+        threading.Thread(target=_daily_updater, daemon=True).start()
+        SCHED_STATE["thread_started"] = True
+    except Exception as _e:
+        SCHED_STATE["loop_error"] = "執行緒建立失敗 %s: %s" % (type(_e).__name__, _e)
 
 
 if __name__ == "__main__":

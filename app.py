@@ -388,6 +388,62 @@ def _hist_yahoo(symbol, frm_date=None):
 HIST_SOURCES = [("nasdaq", _hist_nasdaq), ("stooq", _hist_stooq), ("yahoo", _hist_yahoo)]
 
 
+def _expected_last_session():
+    """理論上「應該已經有收盤價」的最後一個交易日（YYYY-MM-DD，美東）。
+
+    ⚠️ 收盤後要留緩衝：Nasdaq 的當日 K 線要等官方結算寫入，
+       收盤瞬間去抓常常只回到前一交易日。用跟排程同一個 18:00 ET。
+    ⚠️ **不處理國定假日**（美股假日表會變，寫死會過期）。
+       假日時這個函式會回一個「不存在的交易日」，快取永遠追不上 ——
+       所以呼叫端一定要另外加時間下限，否則會變成每次請求都重抓。
+    """
+    et = _utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))
+    if et.hour < UPDATE_HOUR_ET:      # 今天的收盤還沒寫入，往前一天
+        et -= timedelta(days=1)
+    while et.weekday() >= 5:          # 週六日往前推到週五
+        et -= timedelta(days=1)
+    return et.strftime("%Y-%m-%d")
+
+
+def _hist_is_stale(key):
+    """快取的最後一個交易日是不是落後了？
+
+    ⚠️ **這才是日 K 該用的判斷，不是 mtime。**
+       原本用 12 小時 TTL：`_load_cache` 問「檔案多久沒寫」，
+       而每次預抓都會重寫檔案 —— 只要 12 小時內有任何一次預抓
+       （重啟、部署、本機開一下都算），收盤後的更新就整批命中快取、
+       **一筆都不抓，然後回報成功**。資料因此卡在舊日期不動。
+
+    ⚠️ 回 True 之後呼叫端仍要壓一個「最短重試間隔」：
+       遇到國定假日時 `_expected_last_session()` 會指向一個不存在的交易日，
+       快取永遠追不上，沒有下限就會變成每次請求都去抓。
+    """
+    rows = _load_cache(key, None) or []
+    if not rows:
+        return True
+    return str(rows[-1][0]) < _expected_last_session()
+
+
+HIST_RETRY_MIN_HOURS = 1.0     # 落後時最快多久重試一次（擋掉國定假日的無限重抓）
+
+# ⚠️ 「上次嘗試時間」必須跟「快取檔 mtime」分開記。
+#    用 mtime 當重試基準會連第一次都擋掉：抓回來的資料若沒有新的交易日，
+#    檔案還是會被重寫，mtime 立刻變新 → 永遠不到重試門檻 → 一次都不抓。
+#    放記憶體就好，重啟後重試一次是我們要的行為。
+_STALE_TRY = {}
+_STALE_LOCK = threading.Lock()
+
+
+def _stale_should_try(key):
+    """資料落後時，這一次要不要真的去抓？（壓最短重試間隔）"""
+    now = time.time()
+    with _STALE_LOCK:
+        if now - _STALE_TRY.get(key, 0) < HIST_RETRY_MIN_HOURS * 3600:
+            return False
+        _STALE_TRY[key] = now
+        return True
+
+
 def get_history(symbol, max_age_hours=12, debug=False):
     """單一個股的收盤價序列，回傳 [(YYYY-MM-DD, close), …]，由舊到新。
 
@@ -396,6 +452,10 @@ def get_history(symbol, max_age_hours=12, debug=False):
     debug=True 會把各來源的錯誤印出來（診斷用）。
     """
     key = "hist_%s.json" % symbol.upper()
+    # ⚠️ 資料已經落後最新交易日 → 不管 mtime 多新都要重抓，
+    #    但至少隔 HIST_RETRY_MIN_HOURS，免得國定假日時每次請求都打 API。
+    if max_age_hours and _hist_is_stale(key) and _stale_should_try(key):
+        max_age_hours = 0
     cached = _load_cache(key, max_age_hours)
     if cached is not None:
         return cached
@@ -3062,7 +3122,11 @@ def api_diag():
             _lat[_sy] = _h[-1][0] if _h else "—"
         _fp = os.path.join(CACHE_DIR, "hist_AAPL.json")
         _age = (time.time() - os.path.getmtime(_fp)) / 3600 if os.path.exists(_fp) else -1
-        w("  快取最新交易日   : %s" % "　".join("%s %s" % (k, v) for k, v in _lat.items()))
+        _exp = _expected_last_session()
+        w("  應該要有的交易日 : %s（美東 %02d:00 後才算）" % (_exp, UPDATE_HOUR_ET))
+        w("  快取最新交易日   : %s%s"
+          % ("　".join("%s %s" % (k, v) for k, v in _lat.items()),
+             "" if all(v >= _exp for v in _lat.values()) else "  ← ⚠️ 落後了"))
         w("  hist_AAPL 寫入   : %.1f 小時前%s"
           % (_age, "" if _age < 0 else ("  ← 12h 內，非強制的預抓會直接吃快取"
                                         if _age < 12 else "")))
@@ -3077,7 +3141,22 @@ def api_diag():
     tests = [
         ("Nasdaq 股票清單", lambda: len(_get(NASDAQ_SCREENER, timeout=40, tries=1)
                                         .json().get("data", {}).get("rows", []))),
-        ("Nasdaq 歷史報價 AAPL", lambda: len(_hist_nasdaq("AAPL"))),
+        # ⚠️ 印「最後三天」而不是筆數。筆數是 801 這種數字，看起來很健康，
+        #    卻完全看不出資料停在哪一天 —— 資料卡在舊日期時筆數一樣正常。
+        ("Nasdaq 歷史報價 AAPL（整段）",
+         lambda: "…".join("%s %.2f" % r for r in _hist_nasdaq("AAPL")[-3:])),
+        ("Nasdaq 歷史報價 AAPL（增量，從快取最後一天起）",
+         lambda: (lambda _c: "…".join("%s %.2f" % r for r in
+                                      _hist_nasdaq("AAPL", _c[-1][0])[-3:])
+                  + "　（快取最後一天 %s）" % _c[-1][0]
+                  if _c else "快取是空的")(_load_cache("hist_AAPL.json", None) or [])),
+        # ⚠️ 伺服器是 UTC。UTC 的「今天」在美東還是昨天下午，
+        #    抓資料時 todate 用哪一天會差一個交易日。
+        ("伺服器現在時間",
+         lambda: (lambda _u, _o: "UTC %s ／ 美東 %s（時差 %d 小時）"
+                  % (_u.strftime("%Y-%m-%d %H:%M"),
+                     (_u - timedelta(hours=_o)).strftime("%Y-%m-%d %H:%M"), _o))
+                 (_utcnow(), _et_offset_hours(_utcnow()))),
         ("Nasdaq 季報 AAPL", lambda: str(get_fundamentals("AAPL", max_age_hours=0))[:90]),
     ]
     for name, fn in tests:

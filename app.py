@@ -3161,12 +3161,60 @@ brBox && brBox.addEventListener("toggle", () => {
       if (!j.ok) throw new Error(j.error || "no data");
       $("#brStatus").textContent = "";
       $("#brBody").innerHTML = breadthHtml(j);
+      wireBreadthHover(j);        /* ⚠️ innerHTML 之後才綁，元素這時才存在 */
     })
     .catch(() => {
       /* ⚠️ 讀不到就整塊收掉，**不要顯示「無法判斷」** —— 那看起來像壞掉。 */
       brBox.style.display = "none";
     });
 });
+
+/* 折線圖的游標互動：移到哪一天就顯示那天的日期與寬度。
+   ⚠️ 用 pointer 事件（滑鼠與觸控共用一套），不要分別綁 mouse/touch。
+   ⚠️ SVG 是 width:100% 縮放的，**client 座標不等於 viewBox 座標**，
+      一定要用 getBoundingClientRect() 換算，否則在手機上會整個對不準。 */
+function wireBreadthHover(j){
+  const svg = $("#brSvg"), read = $("#brRead"),
+        guide = $("#brGuide"), dot = $("#brDot");
+  if (!svg || !read) return;
+  const S = j.series || [];
+  if (!S.length) return;
+  const PAD_L = +svg.dataset.padl, PAD_R = +svg.dataset.padr,
+        PAD_T = +svg.dataset.padt, PAD_B = +svg.dataset.padb,
+        W = +svg.dataset.w, H = +svg.dataset.h;
+  const iw = W - PAD_L - PAD_R, ih = H - PAD_T - PAD_B;
+  const xOf = i => PAD_L + (S.length < 2 ? 0 : i / (S.length - 1) * iw);
+  const yOf = v => PAD_T + (100 - v) / 100 * ih;
+
+  const fmt = (d, v) => (LANG === "en")
+    ? `${d} · ${v.toFixed(1)}% above ${j.breadth_ma}MA`
+    : `${d} · ${v.toFixed(1)}% 站上 ${j.breadth_ma} 日均線`;
+  /* 沒在指的時候顯示最新一天，不要留白 */
+  const rest = () => {
+    read.textContent = fmt(S[S.length - 1][0], S[S.length - 1][1]);
+    guide.setAttribute("opacity", "0");
+    dot.setAttribute("opacity", "0");
+  };
+  rest();
+
+  function at(clientX){
+    const r = svg.getBoundingClientRect();
+    const vx = (clientX - r.left) / r.width * W;          // client → viewBox
+    let i = Math.round((vx - PAD_L) / iw * (S.length - 1));
+    i = Math.max(0, Math.min(S.length - 1, i));
+    const [d, v] = S[i];
+    read.textContent = fmt(d, v);
+    const gx = xOf(i).toFixed(1);
+    guide.setAttribute("x1", gx); guide.setAttribute("x2", gx);
+    guide.setAttribute("opacity", ".35");
+    dot.setAttribute("cx", gx); dot.setAttribute("cy", yOf(v).toFixed(1));
+    dot.setAttribute("opacity", "1");
+  }
+  svg.addEventListener("pointermove", e => { e.preventDefault(); at(e.clientX); });
+  svg.addEventListener("pointerdown", e => { e.preventDefault(); at(e.clientX); });
+  svg.addEventListener("pointerleave", rest);
+  svg.addEventListener("pointercancel", rest);
+}
 
 function breadthHtml(j){
   const S = j.series || [];
@@ -3188,7 +3236,14 @@ function breadthHtml(j){
   const first = S[0][0], last = S[S.length - 1][0];
   const cur = S[S.length - 1][1];
 
-  const svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+  /* ⚠️ 幾何參數要交給 hover 用，寫成 data-* 掛在 svg 上，
+     不要在兩處各算一次 —— 那遲早會不一致。 */
+  const svg = `<div id="brRead" style="font-family:var(--font-num);font-size:12px;
+      color:var(--mocha);height:16px;margin-bottom:2px"></div>
+    <svg id="brSvg" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;
+      touch-action:none"
+      data-padl="${PAD_L}" data-padr="${PAD_R}" data-padt="${PAD_T}" data-padb="${PAD_B}"
+      data-w="${W}" data-h="${H}">
     ${yr(0)}${yr(50)}${yr(100)}
     <line x1="${PAD_L}" x2="${W - PAD_R}" y1="${y(50)}" y2="${y(50)}"
       stroke="#ddd" stroke-width="1"/>
@@ -3198,6 +3253,9 @@ function breadthHtml(j){
       stroke-width="1.6" stroke-linejoin="round"/>
     <circle cx="${x(S.length - 1).toFixed(1)}" cy="${y(cur).toFixed(1)}" r="2.8"
       fill="var(--caramel-2)"/>
+    <line id="brGuide" y1="${PAD_T}" y2="${H - PAD_B}" stroke="var(--mocha)"
+      stroke-width="1" opacity="0"/>
+    <circle id="brDot" r="3.2" fill="var(--espresso)" opacity="0"/>
     <text x="${PAD_L}" y="${H - 4}" font-size="9" fill="#aaa"
       font-family="var(--font-num)">${first}</text>
     <text x="${W - PAD_R}" y="${H - 4}" text-anchor="end" font-size="9" fill="#aaa"

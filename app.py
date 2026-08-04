@@ -1419,6 +1419,92 @@ def build_breadth():
     return None
 
 
+# ---------------------------------------------------------------- 本日推薦
+#
+# 首頁的「本日推薦」＝ 市值前 300 大 ＋ 均線嚴格多頭 ＋ 站上 10 日線。
+#
+# ⚠️⚠️ **首頁絕對不能即時跑篩選。**
+#    `screen_watchlist()` 會呼叫 `load_histories()`，遇到落後的股票就**連網去抓**。
+#    首頁每個訪客都跑一次會直接把站打掛，而且會拖垮 Nasdaq 的額度。
+#    所以這裡在**預抓流程裡算好存檔**，首頁只讀 `home_screen.json`。
+#    （台股版踩過同樣的坑，見台股 PROJECT_CONTEXT 4.3-6。）
+#
+# ⚠️ 條件是**寫死的**，不吃使用者參數 —— 首頁要的是「今天有沒有東西可看」，
+#    不是另一個篩選器。想調條件請到 /screener。
+
+HOME_SCREEN_PARAMS = {"universe_n": 300, "ma": 10, "direction": "above",
+                      "days": 1, "match": "any", "align": "strict_bull"}
+HOME_SCREEN_MAX = 6         # 首頁只列前幾檔，其餘請到篩選器看
+
+
+def build_home_screen():
+    """算「本日推薦」並存檔。**只能在預抓流程裡呼叫。**"""
+    res = screen_watchlist(**HOME_SCREEN_PARAMS)
+    rows = res.get("rows") or []
+    _save_cache("home_screen.json", {
+        "n": len(rows),
+        "as_of": res.get("as_of", ""),
+        # ⚠️ 只存顯示要用的欄位。整包 rows 存下來會讓檔案又肥又容易過期，
+        #    而且首頁本來就只需要代號與名稱。
+        "top": [{"symbol": r["symbol"], "name": r.get("name", ""),
+                 "name_zh": r.get("name_zh", "")} for r in rows[:HOME_SCREEN_MAX]],
+    })
+    return rows
+
+
+def _home_screen_html():
+    """首頁「本日推薦」區塊。**只讀快取**，讀不到就回空字串。
+
+    ⚠️ 讀不到時回空字串（整塊不出現），**不要顯示「無法判斷」或「載入失敗」**——
+       那看起來像壞掉。寧可少一塊。
+    """
+    import html as _h
+    d = _load_cache("home_screen.json", 24 * 365) or {}
+    n = d.get("n")
+    if n is None:
+        return ""
+    as_of = _h.escape(str(d.get("as_of") or ""))
+
+    # ⚠️ **掛零是有意義的結論，不是故障。** 空頭市場裡「四線嚴格多頭又站上 10 日線」
+    #    本來就可能一檔都沒有 —— 直接顯示「0 檔」會像壞掉，所以換一句話講清楚。
+    if n == 0:
+        return (
+            '<a class="hs-box" href="/screener">'
+            '<span class="hs-head">'
+            '<b class="q-zh">今天沒有符合條件的股票</b>'
+            '<b class="q-en" style="display:none">Nothing matches today</b>'
+            '</span>'
+            '<span class="hs-list q-zh">'
+            '嚴格多頭排列又站上 10 日線的個股掛零，'
+            '通常出現在跌深或趨勢轉折的時候。</span>'
+            '<span class="hs-list q-en" style="display:none">'
+            'No stock is in a strict bullish alignment and above its 10-day line — '
+            'this usually happens after a sharp drop or at a turning point.</span>'
+            '</a>')
+
+    names_zh = "、".join(_h.escape("%s %s" % (r["symbol"], r.get("name_zh") or ""))
+                         .strip() for r in d.get("top", []))
+    names_en = ", ".join(_h.escape("%s" % r["symbol"]) for r in d.get("top", []))
+    more_zh = " 等" if n > len(d.get("top", [])) else ""
+    return (
+        '<a class="hs-box" href="/screener">'
+        '<span class="hs-head">'
+        '<b class="q-zh">本日推薦</b>'
+        '<b class="q-en" style="display:none">Today\'s picks</b>'
+        '<span class="hs-n">' + str(n) + '</span>'
+        '<span class="hs-unit q-zh">檔</span>'
+        '<span class="hs-unit q-en" style="display:none">stocks</span>'
+        '</span>'
+        '<span class="hs-list q-zh">' + names_zh + more_zh + '</span>'
+        '<span class="hs-list q-en" style="display:none">' + names_en + '</span>'
+        '<span class="hs-sub q-zh">市值前 300 大 · 均線嚴格多頭 · 站上 10 日線'
+        + ('（' + as_of + ' 收盤）' if as_of else '') + '</span>'
+        '<span class="hs-sub q-en" style="display:none">Top 300 by cap · strict bullish '
+        'alignment · above the 10-day line'
+        + ((' (as of ' + as_of + ')') if as_of else '') + '</span>'
+        '</a>')
+
+
 PHASE_UI = {
     "bull_up":   {"dot": "🟢", "zh": "順風・上升段", "en": "Tailwind · Uptrend",
                   "zh_do": "順勢操作，讓獲利跑",
@@ -1638,6 +1724,11 @@ def prefetch(universe_n=300, force=False):
         build_breadth()
     except Exception:
         pass
+    PREFETCH_STATE["stage"] = "本日推薦"
+    try:
+        build_home_screen()
+    except Exception:
+        pass                      # 算不出來就讓首頁少一塊，不能拖垮整個預抓
     PREFETCH_STATE.update(stage="完成", done=True,
                           finished_at=_utcnow().strftime("%Y-%m-%d %H:%M UTC"))
 
@@ -2194,6 +2285,21 @@ PAGE = r"""<!DOCTYPE html>
            color:var(--espresso); }
   .mk-do { font-size:13px; color:var(--mocha); overflow:hidden;
            text-overflow:ellipsis; white-space:nowrap; }
+  /* 本日推薦：沿用市場階段卡片的寬度與圓角，讓兩者看起來是同一組東西 */
+  .hs-box { max-width:560px; margin:0 auto 16px; display:block;
+           background:var(--foam); border:1.5px solid var(--grounds);
+           border-radius:14px; padding:14px 18px; box-shadow:var(--shadow);
+           text-decoration:none; color:var(--espresso);
+           transition:border-color .15s, transform .15s; }
+  .hs-box:hover { border-color:var(--caramel); transform:translateY(-1px); }
+  .hs-head { display:flex; align-items:baseline; gap:8px; }
+  .hs-head b { font-family:var(--font-head); font-size:15px; }
+  .hs-n { font-family:var(--font-num); font-size:26px; color:var(--caramel-2);
+           font-weight:700; margin-left:auto; }
+  .hs-unit { font-size:13px; color:var(--mocha); }
+  .hs-list { display:block; margin-top:8px; font-size:13px; color:var(--mocha);
+           line-height:1.7; }
+  .hs-sub { display:block; margin-top:8px; font-size:11.5px; color:#a99; }
   .mk-body { padding:2px 16px 14px; border-top:1px solid var(--grounds);
            font-size:14px; color:#555; line-height:1.9; }
   .mk-body b { color:var(--espresso); }
@@ -2363,6 +2469,8 @@ __PHASE_BAR__
       <div id="brBody"></div>
     </div>
   </details>
+
+__HOME_SCREEN__
 
   <a class="menu-item" href="/screener" style="text-decoration:none;color:inherit">
     <span class="ic">📈</span>
@@ -3322,6 +3430,7 @@ def _render(start_page="home"):
     html = html.replace("__START_PAGE__", start_page, 1)
     html = html.replace("__TW_URL__", TW_URL)
     html = html.replace("__PHASE_BAR__", _phase_banner_html())
+    html = html.replace("__HOME_SCREEN__", _home_screen_html())
     return render_template_string(html)
 
 

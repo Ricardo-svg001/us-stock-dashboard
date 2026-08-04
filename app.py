@@ -3027,11 +3027,11 @@ def api_diag():
     w("  現在的 PID      : %d（啟動至今 %.0f 秒）"
       % (_now_pid, time.time() - PROCESS_STARTED_TS))
     if _now_pid != IMPORT_PID:
-        w("  ❌❌ PID 不一致 → gunicorn 開了 --preload，import 後才 fork。")
-        w("       fork 不複製執行緒：預抓與每日更新的執行緒都留在 master，")
-        w("       這個 worker 裡它們從來不存在。移除 --preload 即可。")
+        w("  ⚠️ PID 不一致 → import 之後發生過 fork。")
+        w("     這本身沒關係：背景執行緒是在第一個請求時、於本行程啟動的。")
     else:
-        w("  ✅ PID 一致（沒有 preload 造成的執行緒遺失）")
+        w("  ✅ PID 一致（沒有 fork）")
+    w("  背景執行緒行程   : %s" % (_BG_PID if _BG_PID else "❌ 還沒啟動"))
     if SCHED_STATE.get("loop_error"):
         w("  ⚠️ 骨幹錯誤     : %s" % SCHED_STATE["loop_error"])
     w("  觸發時間        : 每個美東交易日 %02d:00 ET（收盤後 %d 小時）"
@@ -3225,27 +3225,78 @@ def api_prefetch_status():
     return jsonify(st)
 
 
-if os.environ.get("ENABLE_PREFETCH", "1") == "1":
-    _PF_THREAD = threading.Thread(target=lambda: prefetch(300), daemon=True)
-    _PF_THREAD.start()
-    PREFETCH_STATE["thread_obj"] = _PF_THREAD
+# ---------------------------------------------------------------- 背景執行緒
+#
+# ⚠️⚠️ **不要在模組載入時直接 start()。**
+#
+# 實測（2026-08-04，Render）：`import 時 PID 40 / 現在的 PID 43`。
+# 也就是 import 之後發生了 fork —— 而 **fork 不會複製執行緒**。
+# 子行程繼承了「執行緒跑過」的所有痕跡（enabled=True、心跳、entered_at），
+# 執行緒本身卻留在父行程。症狀極度誤導：
+#   · 旗標與心跳看起來正常，執行緒早就不在
+#   · 預抓永遠停在 fork 當下那一格，done 永遠 False
+#   · **完全沒有錯誤訊息**，因為沒有任何東西出錯，它只是不存在
+#
+# gunicorn `--preload` 是最常見的原因，但**這個服務沒有開 preload、
+# 也沒有 gunicorn.conf.py**，代表 fork 來自平台包裝或其他我們控制不到的地方。
+# 所以不要去猜是誰 fork 的 —— 改成「**在真正服務請求的行程裡才啟動**」，
+# 不管中間 fork 幾次都不會有事。
+#
+# 用 PID 當鍵而不是布林旗標：布林值會被 fork 一起複製過去，
+# 子行程會以為自己已經啟動過。
+
+_BG_LOCK = threading.Lock()
+_BG_PID = None
+
+
+def _ensure_background():
+    """在當前行程啟動背景執行緒。可重複呼叫，每個行程只會真的做一次。"""
+    global _BG_PID
+    pid = os.getpid()
+    if _BG_PID == pid:
+        return
+    with _BG_LOCK:
+        if _BG_PID == pid:          # 雙重檢查：多執行緒同時進來
+            return
+        _BG_PID = pid
+        if os.environ.get("ENABLE_PREFETCH", "1") == "1":
+            try:
+                t = threading.Thread(target=lambda: prefetch(300), daemon=True)
+                t.start()
+                PREFETCH_STATE["thread_obj"] = t
+            except Exception as e:
+                PREFETCH_STATE["stage"] = "❌ 執行緒建立失敗 %s" % e
+        if (ENV_DAILY_RAW or "1") == "1":
+            try:
+                t2 = threading.Thread(target=_daily_updater, daemon=True)
+                t2.start()
+                SCHED_STATE["thread_started"] = True
+                SCHED_STATE["thread_obj"] = t2
+            except Exception as e:
+                SCHED_STATE["loop_error"] = "執行緒建立失敗 %s: %s" % (type(e).__name__, e)
+
+
+@app.before_request
+def _bg_boot():
+    # ⚠️ 這裡要夠便宜：每個請求都會經過。命中時只是一次整數比較。
+    if _BG_PID != os.getpid():
+        _ensure_background()
+
+
+ENV_DAILY_RAW = os.environ.get("ENABLE_DAILY_UPDATE")
+SCHED_STATE["env_raw"] = ENV_DAILY_RAW
+SCHED_STATE["thread_started"] = False
+
+# 本機直接跑（python app.py）時沒有 fork，立刻啟動比等第一個請求好。
+if __name__ == "__main__":
+    _ensure_background()
 
 # 每日自動更新。設 ENABLE_DAILY_UPDATE=0 可關閉（本機開發時通常會關）。
 # ⚠️ 把「環境變數的原始值」與「執行緒有沒有真的啟動」分開記下來。
 #    以前診斷只看得到 enabled 旗標，就自己推論成「一定是被設成 0」——
 #    但旗標是 False 也可能是執行緒根本沒被建立、或建立了卻在設旗標前就死掉。
 #    三種原因症狀一樣，不記錄就只能猜。
-ENV_DAILY_RAW = os.environ.get("ENABLE_DAILY_UPDATE")
-SCHED_STATE["env_raw"] = ENV_DAILY_RAW
-SCHED_STATE["thread_started"] = False
-if (ENV_DAILY_RAW or "1") == "1":
-    try:
-        _SCHED_THREAD = threading.Thread(target=_daily_updater, daemon=True)
-        _SCHED_THREAD.start()
-        SCHED_STATE["thread_started"] = True
-        SCHED_STATE["thread_obj"] = _SCHED_THREAD
-    except Exception as _e:
-        SCHED_STATE["loop_error"] = "執行緒建立失敗 %s: %s" % (type(_e).__name__, _e)
+
 
 
 if __name__ == "__main__":

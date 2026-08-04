@@ -433,14 +433,29 @@ HIST_RETRY_MIN_HOURS = 1.0     # 落後時最快多久重試一次（擋掉國�
 _STALE_TRY = {}
 _STALE_LOCK = threading.Lock()
 
+# ⚠️ 「抓失敗」與「抓成功但沒有新交易日」要用不同的退避時間。
+#    兩者症狀一樣（快取日期沒前進），但成因完全相反：
+#      · 國定假日 —— API 本來就沒有新資料，一小時後再試很合理
+#      · 抓失敗（限流、逾時）—— 應該幾分鐘後就重試
+#    共用一小時的話，300 檔裡零星失敗的那幾檔會被鎖住整整一小時，
+#    結果就是**篩選結果同時混著新舊兩個日期**。（2026-08-04 實測）
+HIST_RETRY_FAIL_MINUTES = 5.0
+_HIST_FAILED = set()
+
 
 def _stale_should_try(key):
-    """資料落後時，這一次要不要真的去抓？（壓最短重試間隔）"""
+    """資料落後時，這一次要不要真的去抓？（壓最短重試間隔）
+
+    上一次是「抓失敗」的話用短退避，是「抓成功但沒有新交易日」才用長退避。
+    """
     now = time.time()
     with _STALE_LOCK:
-        if now - _STALE_TRY.get(key, 0) < HIST_RETRY_MIN_HOURS * 3600:
+        gap = (HIST_RETRY_FAIL_MINUTES * 60 if key in _HIST_FAILED
+               else HIST_RETRY_MIN_HOURS * 3600)
+        if now - _STALE_TRY.get(key, 0) < gap:
             return False
         _STALE_TRY[key] = now
+        _HIST_FAILED.discard(key)      # 這次的結果會重新決定退避長度
         return True
 
 
@@ -513,6 +528,7 @@ def _get_history_now(symbol, key, debug=False):
             errs.append("%s: %s %s" % (name, type(e).__name__, str(e)[:90]))
 
     if not rows:
+        _HIST_FAILED.add(key)          # ⚠️ 讓退避縮短成幾分鐘，不要跟假日共用一小時
         if old:
             # 抓不到新資料但有舊的 —— 用舊的，總比整個消失好
             LAST_SOURCE["fails"] += 1
@@ -1164,19 +1180,57 @@ PREFETCH_STATE = {"stage": "尚未開始", "done": False}
 #   這個條件會持續好幾個月，行為才跟融資一致。修正後底部回到 10.7%。
 #
 # 10 年回測（2016-08~2026-07，納斯達克綜合指數 + 前 300 大）：
-#   上升段 49.2%／高點警訊 10.2%／下跌段 29.9%／底部 10.7%
-#   底部出現在 2019-01（2018Q4 急殺後）、2020-04~08（COVID 後）、
-#   2022-07~2023-01（熊市打底）、2025-05~07（關稅急殺後）—— 全部對得上真實事件。
-#
-# ⚠️ 60 日這個數字**沒有最佳化過**，刻意不掃參數找最佳值（那只會過擬合這 10 年）。
-#    60 天≈一季，理由是語意不是數據。
+# ⚠️ 這些數字**刻意不做參數最佳化**（那只會過擬合這 10 年）。
+#    選擇的理由是語意與雜訊，不是「哪組回測最好看」。
 
 BREADTH_MA = 200            # 個股用幾日均線算寬度
-BREADTH_TOP = 85.0          # 當下寬度 ≥ 這個 → 頂部區（約 P90）
-BREADTH_WASH = 30.0         # 近 N 日最低寬度 ≤ 這個 → 洗過盤
-WASH_LOOKBACK = 60          # 「最近」是幾個交易日
-PHASE_MA = 50               # 指數用幾日均線定方向（對應台股的季線角色）
+BREADTH_TOP = 85.0          # 當下寬度 ≥ 這個 → 頂部區（≈ P90）
+BREADTH_WASH = 30.0         # 近 N 日最低寬度 ≤ 這個 → 洗過盤（≈ P7）
+WASH_LOOKBACK = 90          # 「最近」是幾個交易日（≈ 半年的交易日數的一半，見下）
+PHASE_MA = 150              # 指數用幾日均線定方向
 PHASE_STICKY = 3            # 連續幾天成立才切換狀態
+
+# 寬度歷史要留幾天（給首頁折線圖）。⚠️ 這是**上限，不是偏好**：
+# `hist_` 只有 HIST_DAYS 天，前 BREADTH_MA 天算不出均線，多留也變不出資料。
+BREADTH_KEEP = HIST_DAYS - BREADTH_MA          # 780 − 200 = 580
+
+# ---- 2026-08-04：PHASE_MA 從 50 改成 150、WASH_LOOKBACK 從 60 改成 90 ----
+#
+# 用**線上真正在跑的規則**（含洗盤回看與黏著）跑 10 年、只換均線的對照：
+#
+#            上升段   高點警訊  下跌段   底部    一年切換
+#   50MA     50.0%   10.7%   28.6%  10.7%   8.7 次
+#   100MA    56.3%   11.0%   25.1%   7.6%   5.3 次
+#   150MA    61.5%   11.4%   20.2%   6.9%   4.3 次   ← 回看仍是 60 日
+#
+# ⚠️ **50MA 一年切換 8.7 次太吵。** 它的 21 段「下跌段」裡有一堆 10~14 天的短段
+#    （2021-03、2021-05、2019-09-30…），那不是趨勢轉折，是雜訊。
+#    150MA 只剩 6 段，而**真實事件一段都沒漏**：
+#    2018Q4、2020 COVID、2022 熊市（兩段共 254 天）、2025 關稅、2026-02。
+#
+# ⚠️⚠️ **改長均線會讓「底部」萎縮，這是機制性的，不是巧合。**
+#    底部 = 「近 N 日被洗過」**且**「站回均線」。
+#    均線愈長，價格站回來愈慢，等站回時那次洗盤早就掉出回看視窗了。
+#    150MA + 回看 60 日 → 底部只剩 6.9%，2022 全年熊市**只給 5 天**。
+#    這正是台股移植過來時踩過的同一個坑（見 USSTOCK 變更紀錄）。
+#    **所以回看期必須跟著均線一起調，不能只改一個。**
+#
+# ⚠️ 掃過回看期（150MA 固定）：60 日→6.9%、90 日→12.0%、120 日→17.0%、250 日→32.6%。
+#    選 90 日的理由是**語意**：「這一季到半年內被洗過」。
+#    ⚠️ 但要知道：**2022 那段怎麼調都是 5 天** —— 因為 2022 全年指數根本沒有
+#    真正站回 150MA，8 月那次是熊市反彈。回看 ≥90 日之後 2023-01-30 才出現底部，
+#    **那才是真正的轉折**。這是這個指標「答對了」，不是漏抓。
+#
+# 【最終組態的 10 年回測】2017-05-19 ~ 2026-07-31，2312 個交易日
+#   上升段 56.4%／高點警訊 11.4%／下跌段 20.2%／底部 12.0%
+#   切換 39 次（每年 4.3 次）
+#   底部出現在：2019-02~05（2018Q4 急殺後）、2020-04~09（COVID 後）、
+#              2023-01~03（熊市真正打底）、2025-05~08（關稅急殺後）
+#
+# ⚠️ **存活者偏誤**：股票池是「今天」的前 300 大，回測早期年份會高估寬度。
+#    門檻請偏保守解讀。
+#
+# 重跑方式：`回測均線比較.command`（不連網，只讀 cache/backtest/）
 
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
 
@@ -1230,6 +1284,63 @@ INDEX_SOURCES = [
 _INDEX_SRC = {"name": None, "n": 0, "errs": []}
 
 
+_IDX_TOPUP = {"at": 0, "note": "—"}
+IDX_TOPUP_MIN_HOURS = 1.0
+IDX_SCALE_TOL = 0.05      # 兩個來源在同一天的價差容忍度
+
+
+def _idx_topup(idx):
+    """FRED 落後時，用 Nasdaq COMP 把最新幾天補上。
+
+    FRED 的 NASDAQCOM 通常慢一個交易日，個股卻已經有當日收盤 ——
+    差一天對 50MA 幾乎沒影響，但會讓「指數日期」和「寬度日期」對不齊，
+    最近 30 天裡少掉一天可判定。
+
+    ⚠️ **合併兩個來源前一定要對帳。** 兩邊都該是納斯達克綜合指數，
+       但只要哪天其中一邊換了口徑（除權、改成報酬指數、單位不同），
+       混進來的值會安靜地扭曲 50MA。所以先比對重疊日期，
+       差距超過 IDX_SCALE_TOL 就整批不採用。
+    """
+    if not idx:
+        return idx
+    last = max(idx)
+    if last >= _expected_last_session():
+        _IDX_TOPUP["note"] = "不需要（FRED 已是最新）"
+        return idx
+    now = time.time()
+    if now - _IDX_TOPUP["at"] < IDX_TOPUP_MIN_HOURS * 3600:
+        return idx
+    _IDX_TOPUP["at"] = now
+    try:
+        comp = _idx_from_nasdaq("COMP", "index")
+    except Exception as e:
+        _IDX_TOPUP["note"] = "COMP 抓取失敗 %s" % type(e).__name__
+        return idx
+    if not comp:
+        _IDX_TOPUP["note"] = "COMP 沒有資料"
+        return idx
+    # 對帳：找重疊日期比價
+    both = [d for d in comp if d in idx]
+    if not both:
+        _IDX_TOPUP["note"] = "❌ 兩個來源沒有重疊日期，不敢合併"
+        return idx
+    ref = max(both)
+    diff = abs(comp[ref] - idx[ref]) / max(idx[ref], 1e-9)
+    if diff > IDX_SCALE_TOL:
+        _IDX_TOPUP["note"] = ("❌ 口徑不符：%s FRED %.1f vs COMP %.1f（差 %.1f%%），不合併"
+                              % (ref, idx[ref], comp[ref], diff * 100))
+        return idx
+    add = {d: v for d, v in comp.items() if d > last}
+    if not add:
+        _IDX_TOPUP["note"] = "COMP 也沒有更新的交易日"
+        return idx
+    idx.update(add)
+    _save_cache("nasdaq_index.json", idx)
+    _IDX_TOPUP["note"] = ("✅ 用 COMP 補了 %d 天（%s → %s，對帳差 %.2f%%）"
+                          % (len(add), last, max(add), diff * 100))
+    return idx
+
+
 def get_nasdaq_index():
     """納斯達克**綜合**指數日收盤 {date: close}。
 
@@ -1244,7 +1355,7 @@ def get_nasdaq_index():
         #    來源是上一個行程抓的，_INDEX_SRC 是行程內的變數。
         if not _INDEX_SRC["name"]:
             _INDEX_SRC.update({"name": "快取（上次成功的來源）", "n": len(cached)})
-        return cached
+        return _idx_topup(cached)
     errs = []
     for name, fn in INDEX_SOURCES:
         try:
@@ -1255,7 +1366,7 @@ def get_nasdaq_index():
         if len(out) >= 300:          # 至少要能算 50MA 還有餘裕
             _save_cache("nasdaq_index.json", out)
             _INDEX_SRC.update({"name": name, "n": len(out), "errs": errs})
-            return out
+            return _idx_topup(out)
         errs.append("%s: 只有 %d 筆" % (name, len(out)))
     _INDEX_SRC.update({"name": None, "n": 0, "errs": errs})
     return cached or {}       # ⚠️ 抓不到別寫空的蓋掉舊資料
@@ -1297,8 +1408,12 @@ def build_breadth():
     except Exception:
         return None
     if out:
-        # 只留最近 400 天，夠算洗盤回看期就好
-        keep = dict(sorted(out.items())[-400:])
+        # ⚠️ 保留長度 = 歷史天數 − 寬度均線的熱身期。
+        #    `hist_` 只有 HIST_DAYS 天，前 BREADTH_MA 天算不出均線，
+        #    所以**能算出來的寬度最多就這麼多**，寫死更大的數字也變不出資料。
+        #    2026-08-04 從 400 拉到這個上限，是為了讓首頁的寬度折線圖看得到
+        #    完整的多空循環（400 天只夠看一年半）。
+        keep = dict(sorted(out.items())[-BREADTH_KEEP:])
         _save_cache("breadth.json", keep)
         return keep
     return None
@@ -1321,7 +1436,7 @@ PHASE_UI = {
 
 
 def _phase_raw(close, ma, breadth, wash_min):
-    """單日的市場階段。**寬度定位置，指數 vs 50MA 定方向。**"""
+    """單日的市場階段。**寬度定位置，指數 vs 150MA 定方向。**"""
     if close is None or ma is None or breadth is None:
         return None
     above = close > ma
@@ -1356,6 +1471,8 @@ def market_phase_cached():
     now = time.time()
     if _PHASE_MEMO["val"] is not None and now - _PHASE_MEMO["at"] < 300:
         return _PHASE_MEMO["val"]
+    _maybe_rebuild_breadth()      # 落後的話在背景補算，這次先用舊的
+    _maybe_topup_index()
     val = _phase_compute()
     _PHASE_MEMO.update(at=now, val=val)
     return val
@@ -1365,6 +1482,67 @@ def market_phase_cached():
 #    `_phase_compute()` 整包在 except 裡，任何失敗都長得一模一樣（unknown）。
 #    沒有這個就只能猜，而線上與本機的差異永遠猜不到。
 _PHASE_WHY = {"why": "還沒算過", "steps": []}
+
+
+# ⚠️ breadth.json 只在預抓流程裡算。但歷史資料是「落後就重抓」、
+#    可能在預抓結束**很久之後**才補上新的交易日 —— 那時沒有任何東西
+#    會回頭通知寬度重算，首頁就會卡在舊日期，而篩選結果卻是新的。
+#    （2026-08-04 實測：篩選 8/3、首頁 7/31。）
+_BREADTH_REBUILD = {"at": 0, "running": False}
+_BREADTH_LOCK = threading.Lock()
+BREADTH_REBUILD_MIN_HOURS = 1.0
+
+
+def _maybe_rebuild_breadth():
+    """寬度落後就在背景重算。**首頁只做一次日期比對，不會被拖慢。**
+
+    ⚠️ 一定要背景執行：build_breadth() 要讀幾百個快取檔算 200MA。
+    ⚠️ 一定要壓最短間隔：國定假日時永遠追不上，否則每次請求都重算一輪。
+    """
+    try:
+        br = _load_cache("breadth.json", 24 * 365) or {}
+        if br and max(br) >= _expected_last_session():
+            return
+        now = time.time()
+        with _BREADTH_LOCK:
+            if (_BREADTH_REBUILD["running"] or
+                    now - _BREADTH_REBUILD["at"] < BREADTH_REBUILD_MIN_HOURS * 3600):
+                return
+            _BREADTH_REBUILD.update(at=now, running=True)
+
+        def job():
+            try:
+                build_breadth()
+                _PHASE_MEMO.update(at=0, val=None)   # 讓下一次讀到新結果
+            except Exception as e:
+                _PHASE_WHY.update(why="背景重算寬度失敗 %s: %s"
+                                      % (type(e).__name__, str(e)[:80]))
+            finally:
+                _BREADTH_REBUILD["running"] = False
+
+        threading.Thread(target=job, daemon=True).start()
+    except Exception:
+        pass
+
+
+def _maybe_topup_index():
+    """指數落後就在背景補最新幾天。首頁只做一次日期比對，不會被拖慢。"""
+    try:
+        idx = _load_cache("nasdaq_index.json", 24 * 365) or {}
+        if not idx or max(idx) >= _expected_last_session():
+            return
+        if time.time() - _IDX_TOPUP["at"] < IDX_TOPUP_MIN_HOURS * 3600:
+            return
+
+        def job():
+            try:
+                _idx_topup(_load_cache("nasdaq_index.json", 24 * 365) or {})
+                _PHASE_MEMO.update(at=0, val=None)
+            except Exception:
+                pass
+        threading.Thread(target=job, daemon=True).start()
+    except Exception:
+        pass
 
 
 def _phase_compute():
@@ -2151,7 +2329,22 @@ PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- ============ 今日市場（版面照台股版）============
+       結論秒開、細節手動：
+         · __PHASE_BAR__ 只讀快取、零成本，一進來就看得到答案
+         · 「大盤詳細數據」要展開才去打 /api/breadth，
+           不讓每個訪客都觸發後端工作（台股版踩過，見台股 5.4） -->
+  <div class="qhead" data-i18n="home.mhead">今日市場 · MARKET</div>
+
 __PHASE_BAR__
+
+  <details class="mk-box" id="brBox">
+    <summary><span class="mk-main"><b data-i18n="br.open">大盤詳細數據</b></span></summary>
+    <div class="mk-body">
+      <div class="status" id="brStatus"></div>
+      <div id="brBody"></div>
+    </div>
+  </details>
 
   <div class="card" style="max-width:560px">
     <h2 data-i18n="home.about">關於這個工具</h2>
@@ -2301,6 +2494,8 @@ const I18N = { en: {
   "nav.pull.sub": "Close back within ±3% of an MA",
   "nav.tw": "Taiwan Stock Coffee", "nav.tw.sub": "Stock Coffee · TW screener",
   "ui.mkt": "TW", "ui.mkt.aria": "Switch to Taiwan Stock Coffee",
+  "home.mhead": "TODAY'S MARKET",
+  "br.open": "Market detail", "br.loading": "Loading…",
   "home.about": "About this tool",
   "home.aboutBody": "The US edition of Stock Coffee. Screen the top 300 US companies by market cap using <b>moving averages</b> \u2014 crossing above or below a chosen MA, or matching a specific MA alignment.<br><br>The MA set follows US convention: <b>10 / 20 / 50 / 150-day</b>. The 50-day line plays the role Taiwan's 60-day line does; the 150-day tracks the intermediate trend.<br><br>Data is daily closing prices, not real-time quotes.",
   "home.c1": "Screen by moving average and MA alignment",
@@ -2835,6 +3030,109 @@ function applyAll(tbId, cdId, rows, secId, epsId, alignId, nhId){
   });
 }
 
+/* ---- 大盤詳細數據：市場寬度的歷史折線圖 ----
+   ⚠️ **展開才抓**，收合再展開不重複請求（照台股版 baro-box 的做法）。
+      首頁每個訪客都會載入，不能一進來就打 API。
+   ⚠️ 折線圖用**內嵌 SVG 自己畫**，不引外部圖表庫 ——
+      這個專案刻意只有 flask/requests/gunicorn，前端也維持零依賴。 */
+const brBox = $("#brBox");
+brBox && brBox.addEventListener("toggle", () => {
+  if (!brBox.open || brBox.dataset.loaded) return;
+  brBox.dataset.loaded = "1";
+  $("#brStatus").textContent = t("br.loading", "載入中…");
+  fetch("/api/breadth", { headers: { "X-App-Token": APP_TOKEN } })
+    .then(r => r.json())
+    .then(j => {
+      if (!j.ok) throw new Error(j.error || "no data");
+      $("#brStatus").textContent = "";
+      $("#brBody").innerHTML = breadthHtml(j);
+    })
+    .catch(() => {
+      /* ⚠️ 讀不到就整塊收掉，**不要顯示「無法判斷」** —— 那看起來像壞掉。 */
+      brBox.style.display = "none";
+    });
+});
+
+function breadthHtml(j){
+  const S = j.series || [];
+  if (!S.length) return "";
+  const W = 560, H = 150, PAD_L = 30, PAD_R = 8, PAD_T = 10, PAD_B = 18;
+  const iw = W - PAD_L - PAD_R, ih = H - PAD_T - PAD_B;
+  const x = i => PAD_L + (S.length < 2 ? 0 : i / (S.length - 1) * iw);
+  const y = v => PAD_T + (100 - v) / 100 * ih;   /* 寬度固定 0~100%，不自動縮放 */
+  const pts = S.map((r, i) => x(i).toFixed(1) + "," + y(r[1]).toFixed(1)).join(" ");
+  /* 頂部／洗盤兩條門檻線：折線圖的重點是「現在離門檻多遠」，不是絕對值 */
+  const line = (v, c, lb) =>
+    `<line x1="${PAD_L}" x2="${W - PAD_R}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"
+       stroke="${c}" stroke-width="1" stroke-dasharray="4 3" opacity=".7"/>
+     <text x="${PAD_L - 4}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end"
+       font-size="9" fill="${c}" font-family="var(--font-num)">${lb}</text>`;
+  const yr = v =>
+    `<text x="${PAD_L - 4}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end"
+       font-size="9" fill="#aaa" font-family="var(--font-num)">${v}</text>`;
+  const first = S[0][0], last = S[S.length - 1][0];
+  const cur = S[S.length - 1][1];
+
+  const svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+    ${yr(0)}${yr(50)}${yr(100)}
+    <line x1="${PAD_L}" x2="${W - PAD_R}" y1="${y(50)}" y2="${y(50)}"
+      stroke="#ddd" stroke-width="1"/>
+    ${line(j.top, "#CB4B3A", j.top + "%")}
+    ${line(j.wash, "#4A7C64", j.wash + "%")}
+    <polyline points="${pts}" fill="none" stroke="var(--caramel-2)"
+      stroke-width="1.6" stroke-linejoin="round"/>
+    <circle cx="${x(S.length - 1).toFixed(1)}" cy="${y(cur).toFixed(1)}" r="2.8"
+      fill="var(--caramel-2)"/>
+    <text x="${PAD_L}" y="${H - 4}" font-size="9" fill="#aaa"
+      font-family="var(--font-num)">${first}</text>
+    <text x="${W - PAD_R}" y="${H - 4}" text-anchor="end" font-size="9" fill="#aaa"
+      font-family="var(--font-num)">${last}</text>
+  </svg>`;
+
+  const kv = (k, v) =>
+    `<div style="display:flex;justify-content:space-between;padding:3px 0;
+       font-size:13px"><span style="color:var(--mocha)">${k}</span>
+       <b style="font-family:var(--font-num)">${v}</b></div>`;
+
+  const head = (LANG === "en")
+    ? `% of constituents above their own ${j.breadth_ma}-day average`
+    : `成分股站上自己 ${j.breadth_ma} 日均線的比例`;
+
+  /* ⚠️ 分位數要一起顯示。單看「72%」不知道那是高是低。
+     ⚠️⚠️ **但一定要把區間講出來。** 這裡的分位數只涵蓋圖上這 ${j.span_years} 年，
+        而門檻 85%／30% 是用 **10 年回測**訂的 —— 母體不同。
+        寫成「歷史中位數」會讓人拿短區間的分位數去比長區間的門檻，結論會錯。 */
+  const span = (LANG === "en") ? `${j.span_years}y` : `近 ${j.span_years} 年`;
+  const stats =
+    kv(LANG === "en" ? "Current" : "目前寬度",
+       j.cur + "%  (P" + j.cur_pct + " / " + span + ")") +
+    kv(LANG === "en" ? `Lowest in ${j.wash_look} days` : `近 ${j.wash_look} 日最低`,
+       j.wash_min + "%") +
+    kv(LANG === "en" ? `Median (${span})` : `${span}中位數`, j.p["50"] + "%") +
+    kv(LANG === "en" ? `P25 / P75 (${span})` : `${span} P25 ／ P75`,
+       j.p["25"] + "% / " + j.p["75"] + "%");
+
+  const note = (LANG === "en")
+    ? `<p style="font-size:12px;color:var(--mocha);line-height:1.8;margin:10px 0 0">
+       The red line is the <b>top threshold (${j.top}%)</b>; the green line is the
+       <b>washout threshold (${j.wash}%)</b>. Breadth sets <b>where</b> the market is
+       in its cycle; the index versus its ${j.phase_ma}-day average sets
+       <b>which way</b> it is going. "Basing" needs a washout within the last
+       ${j.wash_look} trading days <b>and</b> the index back above its average.<br>
+       Percentiles above cover the ${j.span_years} years shown here; the
+       ${j.top}%/${j.wash}% thresholds were set from a 10-year backtest.</p>`
+    : `<p style="font-size:12px;color:var(--mocha);line-height:1.8;margin:10px 0 0">
+       紅線是<b>頂部門檻 ${j.top}%</b>，綠線是<b>洗盤門檻 ${j.wash}%</b>。
+       寬度決定<b>市場走到循環的哪個位置</b>，指數與 ${j.phase_ma} 日均線決定<b>往哪走</b>。
+       「底部」需要<b>近 ${j.wash_look} 個交易日內被洗過</b>，
+       <b>而且</b>指數已經站回均線 —— 兩個條件缺一不可。<br>
+       ⚠️ 上面的分位數只涵蓋圖上這 ${j.span_years} 年；
+       ${j.top}%／${j.wash}% 的門檻是用 10 年回測訂的，兩者母體不同。</p>`;
+
+  return `<div style="font-size:12.5px;color:var(--mocha);margin:2px 0 6px">${head}</div>`
+       + svg + `<div style="margin-top:10px">${stats}</div>` + note;
+}
+
 /* ---- 依網址開對應分頁 ---- */
 if (START_PAGE && $("#" + START_PAGE)){
   document.querySelectorAll(".page").forEach(p => p.classList.remove("show"));
@@ -2971,15 +3269,20 @@ def _phase_banner_html():
         '<span class="mk-num">' + _h.escape(date) + '</span>'
         '</summary>'
         '<div class="mk-body">'
-        '<span class="q-zh">目前 <b>' + b + '</b> 的成分股站在自己的 200 日均線之上，'
-        '納斯達克綜合指數在 50 日均線'
+        # ⚠️ 均線天數一律從常數帶入，不要寫死數字。
+        #    2026-08-04 PHASE_MA 從 50 改成 150 時，這裡的 "50 日均線" 差點沒跟著改，
+        #    那會變成「畫面說 50、實際算 150」—— 比沒有這句話更糟。
+        '<span class="q-zh">目前 <b>' + b + '</b> 的成分股站在自己的 '
+        + str(BREADTH_MA) + ' 日均線之上，'
+        '納斯達克綜合指數在 ' + str(PHASE_MA) + ' 日均線'
         + ('<b>之上</b>' if phase.startswith("bull") else '<b>之下</b>') + '。<br><br>'
         '寬度告訴你<b>市場走到循環的哪個位置</b>，指數與均線告訴你<b>現在往哪走</b>。'
         '這不預測行情，只描述環境。</span>'
         '<span class="q-en" style="display:none"><b>' + b + '</b> of constituents are '
-        'above their own 200-day average, and the Nasdaq Composite is '
+        'above their own ' + str(BREADTH_MA) + '-day average, '
+        'and the Nasdaq Composite is '
         + ('<b>above</b>' if phase.startswith("bull") else '<b>below</b>')
-        + ' its 50-day average.<br><br>'
+        + ' its ' + str(PHASE_MA) + '-day average.<br><br>'
         'Breadth tells you <b>where the market sits in the cycle</b>; '
         'the index versus its average tells you <b>which way it is going</b>. '
         'This describes the environment — it does not predict it.</span>'
@@ -2992,6 +3295,53 @@ def _render(start_page="home"):
     html = html.replace("__TW_URL__", TW_URL)
     html = html.replace("__PHASE_BAR__", _phase_banner_html())
     return render_template_string(html)
+
+
+@app.route("/api/breadth")
+def api_breadth():
+    """市場寬度的歷史序列 ＋ 分位數，給首頁「大盤詳細數據」的折線圖用。
+
+    ⚠️ **只讀 `breadth.json`，絕不連網、也不重算。**
+       重算要讀幾百個快取檔、每檔算 200MA —— 那是預抓流程的工作。
+       這支是使用者展開才呼叫的，必須便宜（台股版 5.4 的同一條原則）。
+
+    ⚠️⚠️ **分位數只涵蓋 `breadth.json` 這段（約 1.6~2.3 年），不是 10 年。**
+       門檻（85／30）是用**10 年回測**訂的，兩者的母體不一樣 ——
+       所以回傳 `span_days` / `span_years`，前端**必須把區間講出來**。
+       寫成「歷史中位數」會讓人以為那是 10 年的數字，
+       然後拿它跟 85% 的門檻比，得到完全錯的結論。
+       （這跟台股版把「現價」標成收盤價是同一類錯誤：數字對，標籤說謊。）
+
+    ⚠️ 這支跟 `/api/screen` 一樣要驗 App token —— 這個專案沒有 `@guard` 裝飾器，
+       慣例是**在函式開頭自己驗**。不要為了這一支引進新寫法。
+    """
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    br = _load_cache("breadth.json", 24 * 365) or {}
+    if not br:
+        return jsonify(ok=False, error="no breadth cache")
+    days = sorted(br)
+    vals = sorted(br[d] for d in days)
+
+    def pct_of(v):
+        """v 在歷史分布中的百分位。"""
+        n = sum(1 for x in vals if x <= v)
+        return round(n / len(vals) * 100)
+
+    cur = br[days[-1]]
+    look = days[-WASH_LOOKBACK:]
+    return jsonify(
+        ok=True,
+        series=[[d, br[d]] for d in days],
+        cur=cur, cur_pct=pct_of(cur), date=days[-1],
+        wash_min=round(min(br[d] for d in look), 1),
+        wash_look=WASH_LOOKBACK,
+        top=BREADTH_TOP, wash=BREADTH_WASH,
+        breadth_ma=BREADTH_MA, phase_ma=PHASE_MA,
+        span_days=len(days), span_years=round(len(days) / 252.0, 1),
+        p={str(p): round(vals[max(0, min(len(vals) - 1, int(len(vals) * p / 100)))], 1)
+           for p in (10, 25, 50, 75, 90)},
+    )
 
 
 @app.route("/")
@@ -3056,12 +3406,20 @@ def api_diag():
                                       if _ui else "unknown ← 缺 breadth 或指數快取"))
         w("  市場寬度        : %s（%% 成分股站上自身 200MA）"
           % ("%.1f%%" % _b if _b is not None else "—"))
-        w("  資料日期        : %s" % (_d or "—"))
+        w("  資料日期        : %s%s"
+          % (_d or "—", "" if (_d or "") >= _expected_last_session()
+             else "  ← ⚠️ 落後（背景重算中或等下次重試）"))
         _br = _load_cache("breadth.json", 24 * 365) or {}
         _ix = _load_cache("nasdaq_index.json", 24 * 365) or {}
         w("  breadth.json    : %d 天%s" % (len(_br), "" if _br else "  ← 還沒算過"))
         w("  納斯達克指數     : %d 天%s" % (len(_ix), "" if _ix else "  ← 抓不到"))
+        _ixd = max(_ix) if _ix else ""
         w("  指數來源        : %s" % (_INDEX_SRC["name"] or "全部失敗"))
+        w("  指數最新日期     : %s%s"
+          % (_ixd or "—",
+             "" if _ixd >= _expected_last_session()
+             else "  ← 落後（FRED 更新有延遲）"))
+        w("  COMP 補資料      : %s" % _IDX_TOPUP["note"])
         for _e in _INDEX_SRC["errs"]:
             w("     ✗ %s" % _e)
         w("  判定過程        : %s" % _PHASE_WHY["why"])
@@ -3124,12 +3482,32 @@ def api_diag():
         _age = (time.time() - os.path.getmtime(_fp)) / 3600 if os.path.exists(_fp) else -1
         _exp = _expected_last_session()
         w("  應該要有的交易日 : %s（美東 %02d:00 後才算）" % (_exp, UPDATE_HOUR_ET))
+        # ⚠️ 只數「現在的股票池」。cache 裡會有以前抓過、現在已經跌出前 300 大的
+        #    殘留檔案，它們永遠不會被更新 —— 一起算進來會虛報成「265 檔落後」。
+        _uni = {u["symbol"].upper() for u in (get_universe(300) or [])}
+        _behind, _orphan = [], 0
+        for _f in os.listdir(CACHE_DIR):
+            if not _f.startswith("hist_"):
+                continue
+            _sym = _f[5:-5]
+            if _sym not in _uni:
+                _orphan += 1
+                continue
+            _r = _load_cache(_f, None) or []
+            if not _r or str(_r[-1][0]) < _exp:
+                _behind.append(_sym)
+        w("  股票池落後      : %d / %d 檔%s"
+          % (len(_behind), len(_uni),
+             ("　例如 " + "、".join(sorted(_behind)[:8])) if _behind else "  ✅ 全部到齊"))
+        w("  池外殘留檔案     : %d 檔（已跌出前 300 大，不會更新也不影響篩選）" % _orphan)
+        w("  等待重試        : %d 檔抓失敗（%.0f 分鐘後重試）"
+          % (len(_HIST_FAILED), HIST_RETRY_FAIL_MINUTES))
         w("  快取最新交易日   : %s%s"
           % ("　".join("%s %s" % (k, v) for k, v in _lat.items()),
              "" if all(v >= _exp for v in _lat.values()) else "  ← ⚠️ 落後了"))
-        w("  hist_AAPL 寫入   : %.1f 小時前%s"
-          % (_age, "" if _age < 0 else ("  ← 12h 內，非強制的預抓會直接吃快取"
-                                        if _age < 12 else "")))
+        # ⚠️ mtime 只是參考。新舊判斷已改成比對「最後一個交易日」，
+        #    mtime 再新，只要日期落後一樣會重抓。
+        w("  hist_AAPL 寫入   : %.1f 小時前（僅供參考，不是新舊判斷依據）" % _age)
     except Exception as _e:
         w("  快取新鮮度      : ❌ %s" % _e)
     w("  紀錄檔          : %s（%s）" % (

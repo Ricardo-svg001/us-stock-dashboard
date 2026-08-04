@@ -469,14 +469,21 @@ def _get_history_now(symbol, key, debug=False):
     return rows
 
 
-def load_histories(symbols, status_cb=None, workers=8):
+def load_histories(symbols, status_cb=None, workers=8, force=False):
     """並行抓多檔歷史。回傳 {symbol: [(date, close), …]}。
-    Stooq 沒有批次端點，只能逐檔抓，所以第一次會比較久（之後吃快取）。"""
+    Stooq 沒有批次端點，只能逐檔抓，所以第一次會比較久（之後吃快取）。
+
+    ⚠️ **force=True 會繞過 12 小時 TTL。收盤後的每日更新一定要用它。**
+       `_load_cache` 是看檔案 mtime，而每一次預抓都會重寫檔案 ——
+       只要 12 小時內有任何一次預抓（重啟、部署都會觸發），
+       收盤後的更新就會全部命中快取、一筆都不抓，而且**回報成功**。
+       這是「安靜地不做事」，比直接失敗難查得多。
+    """
     out, done = {}, [0]
     lock = threading.Lock()
 
     def work(sym):
-        h = get_history(sym)
+        h = get_history(sym, max_age_hours=0 if force else 12)
         with lock:
             if len(h) >= max(MA_SET):
                 out[sym] = h
@@ -592,13 +599,14 @@ def _get_fundamentals_now(symbol, key):
     return out
 
 
-def load_fundamentals(symbols, status_cb=None, workers=8):
-    """並行抓基本面。抓不到的給空值，不影響篩選。"""
+def load_fundamentals(symbols, status_cb=None, workers=8, force=False):
+    """並行抓基本面。抓不到的給空值，不影響篩選。
+    ⚠️ force=True 繞過 24 小時 TTL，理由同 load_histories。"""
     out, done = {}, [0]
     lock = threading.Lock()
 
     def work(sym):
-        f = get_fundamentals(sym)
+        f = get_fundamentals(sym, max_age_hours=0 if force else 24)
         with lock:
             out[sym] = f
             done[0] += 1
@@ -1359,8 +1367,12 @@ def _phase_compute():
         return "unknown", "", "", None
 
 
-def prefetch(universe_n=300):
-    """啟動時先把清單與歷史抓好，使用者才不用等。"""
+def prefetch(universe_n=300, force=False):
+    """啟動時先把清單與歷史抓好，使用者才不用等。
+
+    ⚠️ **force=True 表示「這次一定要真的去抓」**，給收盤後的每日更新用。
+       平常的啟動預抓維持 force=False，才不會每次重啟都重抓 300 檔。
+    """
     PREFETCH_STATE.update(stage="取得股票清單", done=False)
     uni = get_universe(universe_n)
     PREFETCH_STATE["stage"] = "讀取股價資料"
@@ -1368,15 +1380,17 @@ def prefetch(universe_n=300):
     def cb(i, total):
         PREFETCH_STATE["stage"] = "讀取股價資料 %d / %d" % (i, total)
     syms = [u["symbol"] for u in uni]
-    load_histories(syms, status_cb=cb)
+    load_histories(syms, status_cb=cb, force=force)
     PREFETCH_STATE["stage"] = "讀取基本面資料"
 
     def cb2(i, total):
         PREFETCH_STATE["stage"] = "讀取基本面資料 %d / %d" % (i, total)
-    load_fundamentals(syms, status_cb=cb2)   # 預抓時不算本益比，篩選時才用當下價格重算
+    load_fundamentals(syms, status_cb=cb2, force=force)   # 預抓時不算本益比，篩選時才用當下價格重算
     # ⚠️ 市場階段要用的兩份資料，都在這裡算好存檔 —— 首頁只讀快取、絕不自己算
     PREFETCH_STATE["stage"] = "納斯達克綜合指數"
     try:
+        if force:
+            _clear_cache("nasdaq_index.json")   # ⚠️ 12h TTL 同樣會讓收盤後這次變 no-op
         get_nasdaq_index()
     except Exception:
         pass
@@ -1566,7 +1580,7 @@ def _daily_updater_inner():
                 time.sleep(min(300.0, remain))
                 _beat()
             try:
-                prefetch(300)
+                prefetch(300, force=True)   # ⚠️ 收盤後必須繞過 TTL，見 load_histories
                 SCHED_STATE["last_result"] = "成功"
             except Exception as e:
                 SCHED_STATE["last_result"] = "失敗：%s" % str(e)[:120]
@@ -3039,6 +3053,21 @@ def api_diag():
     w("  下次更新        : %s" % SCHED_STATE["next_run"])
     w("  上次更新        : %s" % SCHED_STATE["last_run"])
     w("  上次結果        : %s" % SCHED_STATE["last_result"])
+    # ⚠️ 「成功」只代表沒拋例外，不代表真的抓到新資料 ——
+    #    全部命中 TTL 快取也會回報成功。所以直接印資料本身有多新。
+    try:
+        _lat = {}
+        for _sy in ("AAPL", "MSFT", "NVDA"):
+            _h = _load_cache("hist_%s.json" % _sy, None) or []
+            _lat[_sy] = _h[-1][0] if _h else "—"
+        _fp = os.path.join(CACHE_DIR, "hist_AAPL.json")
+        _age = (time.time() - os.path.getmtime(_fp)) / 3600 if os.path.exists(_fp) else -1
+        w("  快取最新交易日   : %s" % "　".join("%s %s" % (k, v) for k, v in _lat.items()))
+        w("  hist_AAPL 寫入   : %.1f 小時前%s"
+          % (_age, "" if _age < 0 else ("  ← 12h 內，非強制的預抓會直接吃快取"
+                                        if _age < 12 else "")))
+    except Exception as _e:
+        w("  快取新鮮度      : ❌ %s" % _e)
     w("  紀錄檔          : %s（%s）" % (
         SCHED_FILE,
         "已存在，重啟後仍看得到上次更新" if os.path.exists(SCHED_FILE)

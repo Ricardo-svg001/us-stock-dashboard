@@ -28,6 +28,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import requests
 from flask import Flask, jsonify, request, render_template_string
@@ -1169,7 +1170,7 @@ PREFETCH_STATE = {"stage": "尚未開始", "done": False}
 #   FINRA margin debt 是月頻、而且是金額 —— 金額會隨股價膨脹，
 #   正是台股當初刻意避開、改用張數的問題。
 #
-# 改用**市場寬度**：多少比例的個股站上自己的 200MA。
+# 改用**市場寬度**：多少比例的個股站上自己的 150MA。
 # 概念一樣（「多數人已在場內」vs「籌碼洗乾淨了」），而且**用現有的 hist_ 快取就能算**。
 #
 # ⚠️⚠️ **關鍵差異：融資是慢變數，寬度是快變數。**
@@ -1183,16 +1184,18 @@ PREFETCH_STATE = {"stage": "尚未開始", "done": False}
 # ⚠️ 這些數字**刻意不做參數最佳化**（那只會過擬合這 10 年）。
 #    選擇的理由是語意與雜訊，不是「哪組回測最好看」。
 
-BREADTH_MA = 200            # 個股用幾日均線算寬度
+BREADTH_MA = 150            # 個股用幾日均線算寬度
 BREADTH_TOP = 85.0          # 當下寬度 ≥ 這個 → 頂部區（≈ P90）
 BREADTH_WASH = 30.0         # 近 N 日最低寬度 ≤ 這個 → 洗過盤（≈ P7）
 WASH_LOOKBACK = 90          # 「最近」是幾個交易日（≈ 半年的交易日數的一半，見下）
 PHASE_MA = 150              # 指數用幾日均線定方向
 PHASE_STICKY = 3            # 連續幾天成立才切換狀態
 
-# 寬度歷史要留幾天（給首頁折線圖）。⚠️ 這是**上限，不是偏好**：
-# `hist_` 只有 HIST_DAYS 天，前 BREADTH_MA 天算不出均線，多留也變不出資料。
-BREADTH_KEEP = HIST_DAYS - BREADTH_MA          # 780 − 200 = 580
+# 首頁折線圖保留 5 年（約 1,260 個交易日）。日常 `hist_` 仍只留 780 天；
+# 較早的區段由隨程式部署的彙總種子檔提供，之後每日預抓用現行資料覆蓋／追加。
+# ⚠️ 種子檔只有每天一個百分比，不會把 300 檔長歷史帶進正式環境。
+BREADTH_KEEP = 5 * 252
+BREADTH_SEED_FILE = os.path.join(BASE_DIR, "breadth_5y_seed.json")
 
 # ---- 2026-08-04：PHASE_MA 從 50 改成 150、WASH_LOOKBACK 從 60 改成 90 ----
 #
@@ -1273,6 +1276,35 @@ def _idx_from_nasdaq(sym, asset):
     return out
 
 
+def _idx_latest_close():
+    """Nasdaq COMP info：補 historical 尚未發布的最新正式收盤。
+
+    `/historical` 實測可能在收盤翌日仍慢一個交易日，但 `/info` 已有
+    `marketStatus=Closed`、正式日期與收盤值。只接受 Closed 且日期不晚於
+    `_expected_last_session()`，避免把盤中價混進日線。
+    """
+    url = "https://api.nasdaq.com/api/quote/COMP/info?assetclass=index"
+    j = _get(url, timeout=30, tries=2).json()
+    data = (j or {}).get("data") or {}
+    p = data.get("primaryData") or {}
+    if str(data.get("marketStatus") or "").lower() != "closed":
+        return None
+    price = _num(p.get("lastSalePrice"))
+    raw = str(p.get("lastTradeTimestamp") or "").strip()
+    if price is None or not raw:
+        return None
+    d = None
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%m/%d/%Y"):
+        try:
+            d = datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+            break
+        except ValueError:
+            continue
+    if not d or d > _expected_last_session():
+        return None
+    return d, price
+
+
 # ⚠️ 診斷用：記下實際用了哪個來源、各來源為什麼失敗。
 #    這個欄位存在的理由：FRED **會擋機房 IP**（Render 上實測 0 筆，本機正常），
 #    跟 stooq / yahoo 是同一類問題，而那在本機測不出來。
@@ -1331,8 +1363,16 @@ def _idx_topup(idx):
                               % (ref, idx[ref], comp[ref], diff * 100))
         return idx
     add = {d: v for d, v in comp.items() if d > last}
+    # historical 可能仍慢一天；Closed 的 info 已是正式收盤，可安全補入。
+    try:
+        latest = _idx_latest_close()
+        if latest and latest[0] > last:
+            add[latest[0]] = latest[1]
+    except Exception as e:
+        if not add:
+            _IDX_TOPUP["note"] = "COMP info 補抓失敗 %s" % type(e).__name__
     if not add:
-        _IDX_TOPUP["note"] = "COMP 也沒有更新的交易日"
+        _IDX_TOPUP["note"] = "COMP historical / info 都沒有更新的交易日"
         return idx
     idx.update(add)
     _save_cache("nasdaq_index.json", idx)
@@ -1375,7 +1415,7 @@ def get_nasdaq_index():
 def build_breadth():
     """從 hist_ 快取算市場寬度，存成 breadth.json。
 
-    ⚠️ **只能在預抓流程裡呼叫。** 要讀幾百個快取檔、每檔算 200MA，
+    ⚠️ **只能在預抓流程裡呼叫。** 要讀幾百個快取檔、每檔算 BREADTH_MA，
        首頁每個訪客都跑會出事。首頁只讀 breadth.json。
     """
     out = {}
@@ -1408,12 +1448,16 @@ def build_breadth():
     except Exception:
         return None
     if out:
-        # ⚠️ 保留長度 = 歷史天數 − 寬度均線的熱身期。
-        #    `hist_` 只有 HIST_DAYS 天，前 BREADTH_MA 天算不出均線，
-        #    所以**能算出來的寬度最多就這麼多**，寫死更大的數字也變不出資料。
-        #    2026-08-04 從 400 拉到這個上限，是為了讓首頁的寬度折線圖看得到
-        #    完整的多空循環（400 天只夠看一年半）。
-        keep = dict(sorted(out.items())[-BREADTH_KEEP:])
+        # 5 年種子只負責 `hist_` 觸及不到的舊區段；當前 `out` 永遠優先，
+        # 因此成分股或最新價格更新後，重疊日期會被正式環境的現值覆蓋。
+        seed = {}
+        try:
+            with open(BREADTH_SEED_FILE, "r", encoding="utf-8") as f:
+                seed = json.load(f) or {}
+        except Exception:
+            pass                 # 種子缺失時安全降級成現有約 2.3 年
+        seed.update(out)
+        keep = dict(sorted(seed.items())[-BREADTH_KEEP:])
         _save_cache("breadth.json", keep)
         return keep
     return None
@@ -1435,6 +1479,9 @@ def build_breadth():
 HOME_SCREEN_PARAMS = {"universe_n": 300, "ma": 10, "direction": "above",
                       "days": 1, "match": "any", "align": "strict_bull"}
 HOME_SCREEN_MAX = 6         # 首頁只列前幾檔，其餘請到篩選器看
+_HOME_REBUILD = {"at": 0, "running": False, "note": "—"}
+_HOME_REBUILD_LOCK = threading.Lock()
+HOME_REBUILD_MIN_HOURS = 1.0
 
 
 def build_home_screen():
@@ -1452,6 +1499,49 @@ def build_home_screen():
     return rows
 
 
+def _home_screen_target_date():
+    """本日推薦應該追到哪一天：以已算好的市場寬度最新日為準。
+
+    不直接用 `_expected_last_session()`：美股假日沒有寫死日曆，假日會指向
+    不存在的交易日。breadth 是同一批前 300 大個股快取算出的，日期既便宜又可靠。
+    """
+    br = _load_cache("breadth.json", 24 * 365) or {}
+    return max(br) if br else ""
+
+
+def _maybe_rebuild_home_screen():
+    """本日推薦落後就在背景重算；首頁請求本身不連網、不等待篩選。"""
+    try:
+        old = _load_cache("home_screen.json", 24 * 365) or {}
+        have = str(old.get("as_of") or "")
+        target = _home_screen_target_date()
+        if not target or have >= target:
+            return False
+        now = time.time()
+        with _HOME_REBUILD_LOCK:
+            if (_HOME_REBUILD["running"] or
+                    now - _HOME_REBUILD["at"] < HOME_REBUILD_MIN_HOURS * 3600):
+                return False
+            _HOME_REBUILD.update(at=now, running=True,
+                                 note="背景重算中（%s → %s）" % (have or "無", target))
+
+        def job():
+            try:
+                build_home_screen()
+                new = _load_cache("home_screen.json", 24 * 365) or {}
+                _HOME_REBUILD["note"] = "完成（%s）" % (new.get("as_of") or "無日期")
+            except Exception as e:
+                _HOME_REBUILD["note"] = "失敗 %s: %s" % (type(e).__name__, str(e)[:80])
+            finally:
+                _HOME_REBUILD["running"] = False
+
+        threading.Thread(target=job, daemon=True).start()
+        return True
+    except Exception as e:
+        _HOME_REBUILD["note"] = "判斷失敗 %s" % type(e).__name__
+        return False
+
+
 def _home_screen_html():
     """首頁「本日推薦」區塊。**只讀快取**，讀不到就回空字串。
 
@@ -1459,7 +1549,12 @@ def _home_screen_html():
        那看起來像壞掉。寧可少一塊。
     """
     import html as _h
+    _maybe_rebuild_home_screen()
     d = _load_cache("home_screen.json", 24 * 365) or {}
+    target = _home_screen_target_date()
+    # 舊推薦比不顯示更誤導；背景已在上面啟動，下一次重新整理就會出現新結果。
+    if target and str(d.get("as_of") or "") < target:
+        return ""
     n = d.get("n")
     if n is None:
         return ""
@@ -1582,7 +1677,7 @@ BREADTH_REBUILD_MIN_HOURS = 1.0
 def _maybe_rebuild_breadth():
     """寬度落後就在背景重算。**首頁只做一次日期比對，不會被拖慢。**
 
-    ⚠️ 一定要背景執行：build_breadth() 要讀幾百個快取檔算 200MA。
+    ⚠️ 一定要背景執行：build_breadth() 要讀幾百個快取檔算 BREADTH_MA。
     ⚠️ 一定要壓最短間隔：國定假日時永遠追不上，否則每次請求都重算一輪。
     """
     try:
@@ -1698,7 +1793,13 @@ def prefetch(universe_n=300, force=False):
     ⚠️ **force=True 表示「這次一定要真的去抓」**，給收盤後的每日更新用。
        平常的啟動預抓維持 force=False，才不會每次重啟都重抓 300 檔。
     """
-    PREFETCH_STATE.update(stage="取得股票清單", done=False)
+    # 指數放最前面：首頁第一眼就會用到，不能排在 300 檔個股與基本面之後。
+    PREFETCH_STATE.update(stage="納斯達克綜合指數", done=False)
+    try:
+        get_nasdaq_index()          # 內容日期落後時 `_idx_topup` 會補，不看 mtime
+    except Exception:
+        pass
+    PREFETCH_STATE["stage"] = "取得股票清單"
     uni = get_universe(universe_n)
     PREFETCH_STATE["stage"] = "讀取股價資料"
 
@@ -1712,13 +1813,6 @@ def prefetch(universe_n=300, force=False):
         PREFETCH_STATE["stage"] = "讀取基本面資料 %d / %d" % (i, total)
     load_fundamentals(syms, status_cb=cb2, force=force)   # 預抓時不算本益比，篩選時才用當下價格重算
     # ⚠️ 市場階段要用的兩份資料，都在這裡算好存檔 —— 首頁只讀快取、絕不自己算
-    PREFETCH_STATE["stage"] = "納斯達克綜合指數"
-    try:
-        if force:
-            _clear_cache("nasdaq_index.json")   # ⚠️ 12h TTL 同樣會讓收盤後這次變 no-op
-        get_nasdaq_index()
-    except Exception:
-        pass
     PREFETCH_STATE["stage"] = "計算市場寬度"
     try:
         build_breadth()
@@ -2094,6 +2188,19 @@ PAGE = r"""<!DOCTYPE html>
   .artbody ul { margin:0 0 12px; padding-left:20px; }
   .artbody li { font-size:14.5px; color:#555; line-height:1.9; margin-bottom:4px; }
   .artbody b { color:var(--espresso); }
+  .alinks { list-style:none; padding:0; margin:14px 0 0; }
+  .alinks li { margin:0 0 12px; }
+  .alinks a { display:block; padding:14px 16px; border:1.5px solid var(--grounds);
+              border-radius:14px; background:var(--foam); color:inherit; text-decoration:none;
+              transition:border-color .15s,transform .15s; }
+  .alinks a:hover { border-color:var(--caramel); transform:translateY(-1px); }
+  .alinks .atag { display:inline-block; font-family:var(--font-num); font-size:11px;
+                  color:var(--caramel-2); border:1px solid var(--caramel);
+                  border-radius:999px; padding:1px 8px; margin-bottom:7px; }
+  .alinks .atitle { font-family:var(--font-head); font-weight:800; font-size:17px; }
+  .alinks .asum { margin:6px 0 0; color:var(--mocha); font-size:13.5px; line-height:1.8; }
+  .alinks .adate { display:block; margin-top:7px; color:var(--mocha);
+                   font-family:var(--font-num); font-size:11.5px; }
   /* 總體經濟數據 */
   .macro-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
   .mstat { background:var(--milk); border:1px solid var(--grounds); border-radius:12px; padding:12px 14px; }
@@ -2420,6 +2527,7 @@ PAGE = r"""<!DOCTYPE html>
   <a class="navitem active" data-page="home" href="/"><i>☕</i><b data-i18n="nav.home">菜單首頁</b><small>US Stock Coffee</small></a>
   <a class="navitem" data-page="p1" href="/screener"><i>📈</i><b data-i18n="p1.title">觀察清單策略</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
   <a class="navitem" data-page="p3" href="/pullback"><i>🎯</i><b data-i18n="p3.title">飆股拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
+  <a class="navitem" data-page="pm" href="/articles"><i>📚</i><b data-i18n="pm.title">文章區</b><small data-i18n="pm.sub">美股大盤與動量交易教學</small></a>
 </nav>
 
 <div class="wrap">
@@ -2587,6 +2695,18 @@ __HOME_SCREEN__
   <div id="result3"></div>
 </div>
 
+<!-- ============ 文章區 ============ -->
+<div class="page" id="pm">
+  <h2 class="ptitle" data-i18n="pm.title">文章區</h2>
+  <div class="card">
+    <h2 data-i18n="pm.head">美股大盤・入門教學</h2>
+    <div style="font-size:14px;color:var(--mocha);line-height:1.9" data-i18n="pm.note">
+      免費公開，從市場環境開始理解本站的篩選邏輯。
+    </div>
+    <ul class="alinks">__ART_LINKS__</ul>
+  </div>
+</div>
+
 </div><!-- /wrap -->
 
 <script>
@@ -2607,6 +2727,9 @@ const I18N = { en: {
   "brand.name": "US Stock Coffee",
   "nav.home": "Menu", "nav.screen.sub": "Find leading stocks",
   "nav.pull.sub": "Close back within ±3% of an MA",
+  "pm.title": "Articles", "pm.sub": "US market and momentum guides",
+  "pm.head": "US Market · Beginner Guides",
+  "pm.note": "Free to read. Start with the market environment behind this screener.",
   "nav.tw": "Taiwan Stock Coffee", "nav.tw.sub": "Stock Coffee · TW screener",
   "ui.mkt": "TW", "ui.mkt.aria": "Switch to Taiwan Stock Coffee",
   "home.mhead": "TODAY'S MARKET",
@@ -3313,14 +3436,17 @@ function breadthHtml(j){
        <b>which way</b> it is going. "Basing" needs a washout within the last
        ${j.wash_look} trading days <b>and</b> the index back above its average.<br>
        Percentiles above cover the ${j.span_years} years shown here; the
-       ${j.top}%/${j.wash}% thresholds were set from a 10-year backtest.</p>`
+       ${j.top}%/${j.wash}% thresholds were set from a 10-year backtest.<br>
+       Historical breadth is recalculated using today's constituents, so earlier
+       values may be biased upward (survivorship bias).</p>`
     : `<p style="font-size:12px;color:var(--mocha);line-height:1.8;margin:10px 0 0">
        紅線是<b>頂部門檻 ${j.top}%</b>，綠線是<b>洗盤門檻 ${j.wash}%</b>。
        寬度決定<b>市場走到循環的哪個位置</b>，指數與 ${j.phase_ma} 日均線決定<b>往哪走</b>。
        「底部」需要<b>近 ${j.wash_look} 個交易日內被洗過</b>，
        <b>而且</b>指數已經站回均線 —— 兩個條件缺一不可。<br>
        ⚠️ 上面的分位數只涵蓋圖上這 ${j.span_years} 年；
-       ${j.top}%／${j.wash}% 的門檻是用 10 年回測訂的，兩者母體不同。</p>`;
+       ${j.top}%／${j.wash}% 的門檻是用 10 年回測訂的，兩者母體不同。<br>
+       歷史寬度以今日成分股回算，較早數值可能因存活者偏誤而偏高。</p>`;
 
   return idxHtml
        + `<div style="font-size:12.5px;color:var(--mocha);margin:2px 0 6px">${head}</div>`
@@ -3396,7 +3522,153 @@ def _valid_app_token(tok):
 # 要改網址時設環境變數 TW_URL 即可，不必動程式。
 TW_URL = os.environ.get("TW_URL", "https://stock-coffee.com").strip()
 
-PAGE_ROUTES = {"screener": "p1", "pullback": "p3"}
+PAGE_ROUTES = {"screener": "p1", "pullback": "p3", "articles": "pm"}
+
+# ---------------------------------------------------------------- 文章
+
+ARTICLES_DIR = os.path.join(BASE_DIR, "articles")
+SITE_URL = "https://us.stock-coffee.com"
+
+
+def _md_to_html(md):
+    """本站文章需要的輕量 Markdown：標題、粗體、清單、段落與連結。"""
+    import html as _h
+    out, list_kind = [], None
+
+    def close_list():
+        nonlocal list_kind
+        if list_kind:
+            out.append("</%s>" % list_kind)
+            list_kind = None
+
+    def inline(s):
+        s = _h.escape(s)
+        s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+        s = re.sub(r"\[(.+?)\]\((https?://[^\s)]+)\)",
+                   r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
+        s = re.sub(r"\[(.+?)\]\((/[^\s)]*)\)", r'<a href="\2">\1</a>', s)
+        return s
+
+    for raw in md.splitlines():
+        s = raw.rstrip()
+        if s.startswith("### "):
+            close_list(); out.append("<h3>%s</h3>" % inline(s[4:]))
+        elif s.startswith("## "):
+            close_list(); out.append("<h2>%s</h2>" % inline(s[3:]))
+        elif s.startswith("- "):
+            if list_kind != "ul":
+                close_list(); out.append("<ul>"); list_kind = "ul"
+            out.append("<li>%s</li>" % inline(s[2:]))
+        elif re.match(r"^\d+\.\s+", s):
+            if list_kind != "ol":
+                close_list(); out.append("<ol>"); list_kind = "ol"
+            out.append("<li>%s</li>" % inline(re.sub(r"^\d+\.\s+", "", s)))
+        elif not s.strip():
+            close_list()
+        else:
+            close_list(); out.append("<p>%s</p>" % inline(s))
+    close_list()
+    return "\n".join(out)
+
+
+def _load_articles():
+    items = []
+    if not os.path.isdir(ARTICLES_DIR):
+        return items
+    for fn in sorted(os.listdir(ARTICLES_DIR)):
+        if not fn.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(ARTICLES_DIR, fn), "r", encoding="utf-8") as f:
+                raw = f.read()
+        except Exception:
+            continue
+        meta, body = {}, raw
+        if raw.startswith("---"):
+            parts = raw.split("---", 2)
+            if len(parts) == 3:
+                for line in parts[1].strip().splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meta[k.strip()] = v.strip()
+                body = parts[2].strip()
+        aid = fn[:-3]
+        items.append({"id": aid, "slug": meta.get("slug") or aid,
+                      "title": meta.get("title") or aid,
+                      "tag": meta.get("tag") or "文章",
+                      "date": meta.get("date") or "",
+                      "summary": meta.get("summary") or "",
+                      "html": _md_to_html(body)})
+    return items
+
+
+def _art_links_html():
+    import html as _h
+    rows = []
+    for a in _load_articles():
+        rows.append(
+            '<li><a href="/article/%s"><span class="atag">%s</span>'
+            '<div class="atitle">%s</div><p class="asum">%s</p>'
+            '<span class="adate">%s</span></a></li>' %
+            (quote(a["slug"]), _h.escape(a["tag"]), _h.escape(a["title"]),
+             _h.escape(a["summary"]), _h.escape(a["date"])))
+    return "".join(rows)
+
+
+def _find_article(aid):
+    items = _load_articles()
+    for a in items:
+        if aid in (a["id"], a["slug"]):
+            return a, [x for x in items if x["id"] != a["id"]][:5]
+    return None, items[:5]
+
+
+ARTICLE_PAGE = r"""<!doctype html><html lang="zh-Hant-TW"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__｜美股咖啡館 US Stock Coffee</title>
+<meta name="description" content="__DESC__"><link rel="canonical" href="__URL__">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta property="og:type" content="article"><meta property="og:site_name" content="美股咖啡館 US Stock Coffee">
+<meta property="og:title" content="__TITLE__"><meta property="og:description" content="__DESC__">
+<meta property="og:url" content="__URL__"><meta property="og:image" content="__SITE__/icon.png">
+<script type="application/ld+json">__JSONLD__</script>
+<style>
+:root{--milk:#f1ead9;--foam:#fbf6ec;--grounds:#e4d7c1;--espresso:#33241a;--mocha:#6b5540;--caramel:#c68a3e;--caramel2:#a56c24}
+*{box-sizing:border-box}body{margin:0;background:var(--milk);color:var(--espresso);font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",sans-serif;line-height:1.95}
+.top{background:var(--espresso);padding:12px 18px;display:flex;justify-content:space-between}.top a{color:var(--foam);text-decoration:none;font-weight:800}.top .go{color:#f0c88a}
+main{max-width:760px;margin:auto;padding:24px 18px 60px}.crumb{font-size:13px;color:var(--mocha)}.crumb a{color:var(--caramel2);text-decoration:none}.tag{display:inline-block;margin-top:18px;background:var(--caramel);color:white;border-radius:999px;padding:2px 11px;font-size:12px;font-weight:700}
+h1{font-size:28px;line-height:1.45;margin:12px 0 5px}.meta{font-size:12px;color:var(--mocha)}.summary{margin:18px 0 28px;background:var(--foam);border:1px solid var(--grounds);border-left:4px solid var(--caramel);border-radius:0 12px 12px 0;padding:12px 16px;color:var(--mocha)}
+article{font-size:16.5px}article h2{font-size:20px;margin:34px 0 10px;border-left:4px solid var(--caramel);padding-left:10px}article h3{font-size:17px;color:var(--caramel2);margin:26px 0 8px}article p{margin:12px 0}article li{margin:7px 0}article strong{color:var(--espresso)}
+.cta{display:block;margin-top:36px;padding:13px;text-align:center;background:var(--caramel);color:white;border-radius:999px;text-decoration:none;font-weight:800}.more{margin-top:35px;border-top:1px solid var(--grounds);padding-top:18px}.more a{color:var(--caramel2);text-decoration:none}
+</style></head><body><div class="top"><a href="/">☕ 美股咖啡館</a><a class="go" href="/">開啟選股工具</a></div>
+<main><nav class="crumb"><a href="/">首頁</a> › <a href="/articles">文章區</a> › __TITLE__</nav>
+<span class="tag">__TAG__</span><h1>__TITLE__</h1><div class="meta">__DATE__</div>
+<div class="summary">__DESC__</div><article>__BODY__</article>
+<a class="cta" href="/">免費使用美股選股工具，免註冊 →</a><div class="more"><b>其他文章</b><ul>__MORE__</ul></div></main></body></html>"""
+
+
+@app.route("/article/<path:aid>")
+def article_page(aid):
+    import html as _h
+    a, others = _find_article(aid)
+    if not a:
+        return _render("pm"), 404
+    url = SITE_URL + "/article/" + quote(a["slug"])
+    ld = {"@context": "https://schema.org", "@type": "Article",
+          "headline": a["title"], "description": a["summary"], "url": url,
+          "datePublished": a["date"], "dateModified": a["date"],
+          "inLanguage": "zh-Hant-TW", "isAccessibleForFree": True,
+          "author": {"@type": "Organization", "name": "美股咖啡館 US Stock Coffee"}}
+    more = "".join('<li><a href="/article/%s">%s</a></li>' %
+                   (quote(x["slug"]), _h.escape(x["title"])) for x in others)
+    out = ARTICLE_PAGE
+    vals = {"__TITLE__": _h.escape(a["title"]), "__DESC__": _h.escape(a["summary"]),
+            "__TAG__": _h.escape(a["tag"]), "__DATE__": _h.escape(a["date"]),
+            "__BODY__": a["html"], "__MORE__": more, "__URL__": url,
+            "__SITE__": SITE_URL, "__JSONLD__": json.dumps(ld, ensure_ascii=False)}
+    for k, v in vals.items():
+        out = out.replace(k, v)
+    return out
 
 
 @app.after_request
@@ -3489,6 +3761,7 @@ def _render(start_page="home"):
     html = html.replace("__TW_URL__", TW_URL)
     html = html.replace("__PHASE_BAR__", _phase_banner_html())
     html = html.replace("__HOME_SCREEN__", _home_screen_html())
+    html = html.replace("__ART_LINKS__", _art_links_html())
     return render_template_string(html)
 
 
@@ -3497,10 +3770,10 @@ def api_breadth():
     """市場寬度的歷史序列 ＋ 分位數，給首頁「大盤詳細數據」的折線圖用。
 
     ⚠️ **只讀 `breadth.json`，絕不連網、也不重算。**
-       重算要讀幾百個快取檔、每檔算 200MA —— 那是預抓流程的工作。
+       重算要讀幾百個快取檔、每檔算 BREADTH_MA —— 那是預抓流程的工作。
        這支是使用者展開才呼叫的，必須便宜（台股版 5.4 的同一條原則）。
 
-    ⚠️⚠️ **分位數只涵蓋 `breadth.json` 這段（約 1.6~2.3 年），不是 10 年。**
+    ⚠️⚠️ **分位數只涵蓋 `breadth.json` 這段（約 5 年），不是 10 年。**
        門檻（85／30）是用**10 年回測**訂的，兩者的母體不一樣 ——
        所以回傳 `span_days` / `span_years`，前端**必須把區間講出來**。
        寫成「歷史中位數」會讓人以為那是 10 年的數字，
@@ -3622,14 +3895,20 @@ def api_diag():
         _ui = PHASE_UI.get(_ph)
         w("  目前階段        : %s" % ("%s %s（%s）" % (_ui["dot"], _ui["zh"], _do)
                                       if _ui else "unknown ← 缺 breadth 或指數快取"))
-        w("  市場寬度        : %s（%% 成分股站上自身 200MA）"
-          % ("%.1f%%" % _b if _b is not None else "—"))
+        w("  市場寬度        : %s（%% 成分股站上自身 %dMA）"
+          % (("%.1f%%" % _b if _b is not None else "—"), BREADTH_MA))
         w("  資料日期        : %s%s"
           % (_d or "—", "" if (_d or "") >= _expected_last_session()
              else "  ← ⚠️ 落後（背景重算中或等下次重試）"))
         _br = _load_cache("breadth.json", 24 * 365) or {}
         _ix = _load_cache("nasdaq_index.json", 24 * 365) or {}
         w("  breadth.json    : %d 天%s" % (len(_br), "" if _br else "  ← 還沒算過"))
+        _hs = _load_cache("home_screen.json", 24 * 365) or {}
+        _hst = max(_br) if _br else ""
+        _hsd = str(_hs.get("as_of") or "")
+        w("  本日推薦        : %s%s" %
+          (_hsd or "—", "" if not _hst or _hsd >= _hst else "  ← 落後，背景重算中"))
+        w("  推薦重算        : %s" % _HOME_REBUILD["note"])
         w("  納斯達克指數     : %d 天%s" % (len(_ix), "" if _ix else "  ← 抓不到"))
         _ixd = max(_ix) if _ix else ""
         w("  指數來源        : %s" % (_INDEX_SRC["name"] or "全部失敗"))

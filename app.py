@@ -4196,6 +4196,17 @@ $("#alAdd") && ($("#alAdd").onclick = async () => {
 
 if ($("#alList")) loadAlerts();
 
+/* 使用者已打開 App，代表已看到通知：清掉 iPhone 主畫面 badge
+   與 service worker 裡的未讀計數，下一則推播再從 1 開始。 */
+async function clearUsPushBadge(){
+  if (navigator.clearAppBadge){ try { await navigator.clearAppBadge(); } catch(_){} }
+  if ("caches" in window){
+    try { const c = await caches.open("us-push-state"); await c.delete("/__us_badge"); }
+    catch(_){}
+  }
+}
+clearUsPushBadge();
+
 /* ---- 依網址開對應分頁 ---- */
 if (START_PAGE && $("#" + START_PAGE)){
   document.querySelectorAll(".page").forEach(p => p.classList.remove("show"));
@@ -4891,9 +4902,24 @@ async function pushHandler(e){
   try { d = e.data.json(); }
   catch(_){ d = {title:'US Stock Coffee', body: e.data ? e.data.text() : ''}; }
   await self.registration.showNotification(d.title || 'US Stock Coffee',
-    {body: d.body || '', icon: '/icon.png', badge: '/icon.png'});
+    {body: d.body || '', icon: '/icon.png', badge: '/icon.png',
+     tag: 'us-alert-' + Date.now()});
+  // iOS/iPadOS 主畫面 Web App badge：每收到一則就累加未讀數。
+  // 使用者打開 App 時，前端 clearUsPushBadge() 會清為 0。
+  try {
+    const cache = await caches.open('us-push-state');
+    const prev = await cache.match('/__us_badge');
+    let count = prev ? parseInt(await prev.text(), 10) || 0 : 0;
+    count += 1;
+    await cache.put('/__us_badge', new Response(String(count)));
+    if (self.navigator && self.navigator.setAppBadge){
+      try { await self.navigator.setAppBadge(count); } catch(_){}
+    }
+  } catch(_){}
 }
 self.addEventListener('push', e => e.waitUntil(pushHandler(e)));
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 self.addEventListener('notificationclick', e => {
   e.notification.close();
   e.waitUntil(clients.openWindow('/alerts'));
@@ -5191,6 +5217,7 @@ def manifest():
         "short_name": "美股咖啡館",
         "description": "美股選股工具：用 10/20/50/150 日均線與均線排列篩選市值前 300 大美股。",
         "start_url": "/",
+        "id": "/",
         "scope": "/",
         "display": "standalone",
         "orientation": "portrait",

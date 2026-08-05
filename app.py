@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import os
 import re
 import threading
@@ -1968,7 +1969,7 @@ PROCESS_STARTED_TS = time.time()
 IMPORT_PID = os.getpid()
 
 SCHED_STATE = {"enabled": False, "next_run": "—", "last_run": "—", "last_result": "—",
-               "loop_error": "", "heartbeat": "—", "heartbeat_ts": 0}
+               "alerts_result": "—", "loop_error": "", "heartbeat": "—", "heartbeat_ts": 0}
 
 # 上次更新紀錄寫在持久化磁碟，重啟後仍看得到。
 # 只存 last_run / last_result 兩個欄位 —— next_run 每次啟動都會重算，存了反而會誤導。
@@ -2112,6 +2113,15 @@ def _daily_updater_inner():
             try:
                 prefetch(300, force=True)   # ⚠️ 收盤後必須繞過 TTL，見 load_histories
                 SCHED_STATE["last_result"] = "成功"
+                # 價格快取已更新完才檢查提醒，避免用舊收盤價發通知。
+                # 推播失敗不反過來把整個每日預抓標成失敗。
+                try:
+                    ar = _run_alert_checks()
+                    SCHED_STATE["alerts_result"] = (
+                        "檢查 %(checked)s／送出 %(sent)s／過期 %(expired)s／舊資料 %(skipped_stale)s"
+                        % ar)
+                except Exception as alert_error:
+                    SCHED_STATE["alerts_result"] = "失敗：%s" % str(alert_error)[:100]
             except Exception as e:
                 SCHED_STATE["last_result"] = "失敗：%s" % str(e)[:120]
             SCHED_STATE["last_run"] = _fmt_et(_utcnow())
@@ -2485,6 +2495,25 @@ PAGE = r"""<!DOCTYPE html>
            font-size:13px; color:var(--mocha); letter-spacing:.16em; }
   .qhead::after { content:""; flex:1; height:1px; background:var(--grounds); }
   /* 今日市場：市場階段（可展開看說明） */
+  /* 到價提醒的股票選擇器（自台股版移植） */
+  .stockpick { position:relative; }
+  .stockpick input { width:100%; padding:11px; font-size:15px; border:1.5px solid var(--grounds);
+            border-radius:10px; background:#fff; box-sizing:border-box; font-family:inherit; }
+  .stockpick input:focus { outline:none; border-color:var(--caramel); }
+  .suggest { display:none; position:absolute; z-index:30; left:0; right:0; top:100%;
+            margin-top:4px; max-height:240px; overflow-y:auto; background:#fff;
+            border:1.5px solid var(--grounds); border-radius:10px; box-shadow:var(--shadow); }
+  .suggest.show { display:block; }
+  .suggest div { padding:10px 12px; cursor:pointer; font-size:14.5px; color:var(--espresso);
+            border-bottom:1px solid var(--milk); }
+  .suggest div:last-child { border-bottom:none; }
+  .suggest div:hover, .suggest div.on { background:var(--milk); }
+  .suggest div b { font-family:var(--font-num); margin-right:8px; color:var(--caramel-2); }
+  .suggest .empty { color:var(--mocha); cursor:default; }
+  .picked { margin-top:8px; padding:9px 12px; background:var(--milk); border-radius:10px;
+            font-size:14.5px; color:var(--espresso); display:flex; justify-content:space-between;
+            align-items:center; }
+  .picked .clr { color:var(--caramel-2); cursor:pointer; font-size:13px; }
   .mk-box { max-width:560px; margin:0 auto 16px; background:var(--foam);
            border:1.5px solid var(--grounds); border-radius:18px; overflow:hidden; }
   .mk-box > summary { list-style:none; cursor:pointer; display:flex; align-items:center;
@@ -2880,12 +2909,45 @@ __HOME_SCREEN__
 <!-- ============ 我的自選股：推播通知 ============ -->
 <div class="page" id="p4">
   <h2 class="ptitle" data-i18n="p4.title">推播通知</h2>
-  <div class="card" style="text-align:center;padding:30px 22px">
-    <div style="font-size:42px;margin-bottom:10px">🔔</div>
-    <h2 data-i18n="alert.preparing">美股收盤到價提醒準備中</h2>
-    <div style="font-size:14px;color:#666;line-height:1.9" data-i18n="alert.preparingNote">
-      預計依美股正式收盤價檢查目標價，並以裝置推播通知。推播金鑰、訂閱保存與美股收盤排程完成後開放。
+
+  <div class="card" style="background:#fff8e6;border:1px solid #f0d98a">
+    <div style="font-size:14px;color:#8a6d00;line-height:1.8">
+      <span data-i18n-html="alert.note">⚠️ 本功能尚在測試中。每天美股收盤後以<b>收盤價</b>檢查一次，不是盤中即時服務。可從市值前 300 大裡選最多 3 檔，收盤價落在你設定價位的 ±2% 時發送通知，期限一個月。</span>
     </div>
+  </div>
+
+  <div class="card">
+    <h2 data-i18n="alert.add">新增提醒</h2>
+    <div style="margin-bottom:10px">
+      <div style="font-size:13px;color:#666;margin-bottom:4px" data-i18n="alert.pick">選擇股票（市值前 300 大）</div>
+      <div class="stockpick">
+        <input id="alSearch" type="text" autocomplete="off" placeholder="輸入代號或名稱，例如 AAPL 或 蘋果" data-i18n-ph="alert.ph">
+        <div id="alSuggest" class="suggest"></div>
+        <div id="alPicked" class="picked" style="display:none"></div>
+      </div>
+      <input type="hidden" id="alStock" value="">
+    </div>
+    <div style="margin-bottom:10px">
+      <div style="font-size:13px;color:#666;margin-bottom:4px" data-i18n="alert.target">目標價位（收盤價落在此價 ±2% 時通知）</div>
+      <input id="alPrice" type="number" step="0.01" placeholder="150.5"
+        style="width:100%;padding:11px;font-size:15px;border:1px solid #ddd;border-radius:10px;box-sizing:border-box">
+    </div>
+  </div>
+  <button class="gobtn" id="alAdd" data-i18n="alert.btn">開啟通知並新增提醒</button>
+  <div class="status" id="status4"></div>
+
+  <div class="card" style="margin-top:16px">
+    <h2 data-i18n="alert.test">推播測試</h2>
+    <div style="font-size:13px;color:#666;margin-bottom:10px">
+      <span data-i18n="alert.testNote">按下後立即發送一則測試通知到本裝置，用來確認伺服器金鑰與通知權限是否正常。</span>
+    </div>
+    <button class="gobtn" id="alTest" style="background:#6B5540" data-i18n="alert.testBtn">發送測試推播</button>
+    <div class="status" id="statusTest"></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h2 data-i18n="alert.list">已設定的提醒</h2>
+    <div id="alList" style="font-size:14px;color:#999" data-i18n="alert.none">尚無提醒</div>
   </div>
 </div>
 
@@ -2985,6 +3047,29 @@ const I18N = { en: {
   "pm.note": "Free to read. Start with the market environment behind this screener.",
   "nav.tw": "Taiwan Stock Coffee", "nav.tw.sub": "Stock Coffee · TW screener",
   "ui.mkt": "TW", "ui.mkt.aria": "Switch to Taiwan Stock Coffee",
+  "alert.note": "⚠️ This feature is in beta. Alerts are checked once a day after the US close, using the <b>closing price</b> — it is not an intraday service. Pick up to 3 stocks from the top 300 by market cap; when the close lands within ±2% of your target, you get a notification. Alerts expire after one month.",
+  "alert.add": "Add an alert", "alert.pick": "Choose a stock (top 300 by market cap)",
+  "alert.ph": "Ticker or name, e.g. AAPL or Apple",
+  "alert.target": "Target price (notify when the close is within ±2%)",
+  "alert.btn": "Enable notifications and add alert",
+  "alert.test": "Push test",
+  "alert.testNote": "Sends a test notification to this device right now, to confirm the server keys and your notification permission are working.",
+  "alert.testBtn": "Send test push",
+  "alert.list": "Your alerts", "alert.none": "No alerts yet",
+  "alert.picked": "Selected", "alert.repick": "Change ✕",
+  "alert.notFound": "No match (top 300 by market cap only)",
+  "alert.loadFail": "Could not load the stock list — please refresh",
+  "alert.needStock": "Please pick a stock first",
+  "alert.needPrice": "Please enter a valid price",
+  "alert.added": "Alert added", "alert.tgt": "target", "alert.exp": "expires",
+  "alert.asking": "Requesting notification permission…",
+  "alert.sending": "Sending test push…",
+  "alert.sentOk": "Sent — your device should show a notification shortly",
+  "alert.sentNo": "Server did not send it",
+  "alert.eNoSupport": "This browser does not support push (on iPhone, add to Home Screen first and open from the icon)",
+  "alert.eNoKey": "Push keys (VAPID) are not configured on the server",
+  "alert.ePerm": "Notifications are blocked — allow them in your system/browser settings",
+  "alert.eSub": "Subscription failed: ",
   "home.mhead": "TODAY'S MARKET",
   "br.open": "Market detail", "br.loading": "Loading…",
   "home.about": "About this tool",
@@ -3909,6 +3994,208 @@ if ($("#twCalc")) $("#twCalc").onclick = () => {
     </div>`;
 };
 
+/* ================= 到價提醒（推播）=================
+   自台股版移植。⚠️ 沒有帳號：用 localStorage 的 cid 認人，
+   訂閱資訊存在伺服器（因為推播必須由伺服器發起）。 */
+const VAPID_PUBLIC_KEY = "__VAPID_PUBLIC__";
+
+function clientId(){
+  let id = localStorage.getItem("us_push_cid");
+  if (!id){ id = "c" + Date.now() + Math.random().toString(36).slice(2, 8);
+            localStorage.setItem("us_push_cid", id); }
+  return id;
+}
+function urlB64ToUint8(b64){
+  const pad = "=".repeat((4 - b64.length % 4) % 4);
+  const s = (b64 + pad).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(s);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+let alStocksLoaded = false, alStockList = [], alSugIdx = -1;
+async function loadAlertStocks(){
+  if (alStocksLoaded) return;
+  try {
+    const r = await fetch("/api/stocklist", {headers: {"X-App-Token": APP_TOKEN}});
+    if (!r.ok) throw new Error("stock list " + r.status);
+    alStockList = await r.json();
+    alStocksLoaded = true;
+  } catch(e){
+    $("#alSearch").placeholder = t("alert.loadFail", "股票清單載入失敗，請重新整理");
+  }
+}
+function alRender(items){
+  const box = $("#alSuggest");
+  alSugIdx = -1;
+  if (!items.length){
+    box.innerHTML = '<div class="empty">'
+      + t("alert.notFound", "找不到符合的股票（僅限市值前 300 大）") + "</div>";
+    box.classList.add("show"); return;
+  }
+  box.innerHTML = items.map((s, i) => {
+    const nm = (LANG === "en") ? s.name : (s.name_zh || s.name);
+    return '<div data-i="' + i + '" onclick="alPick(\'' + s.code + "','"
+      + String(nm).replace(/'/g, "") + '\')"><b>' + s.code + "</b>" + nm + "</div>";
+  }).join("");
+  box.classList.add("show");
+}
+async function alSearch(){
+  await loadAlertStocks();
+  const kw = ($("#alSearch").value || "").trim().toUpperCase();
+  if (!kw){ alRender(alStockList.slice(0, 30)); return; }
+  const hit = alStockList.filter(s =>
+    s.code.indexOf(kw) === 0
+    || (s.name || "").toUpperCase().indexOf(kw) >= 0
+    || (s.name_zh || "").indexOf($("#alSearch").value.trim()) >= 0).slice(0, 30);
+  alRender(hit);
+}
+function alPick(code, name){
+  $("#alStock").value = code + "|" + name;
+  $("#alSearch").value = "";
+  $("#alSuggest").classList.remove("show");
+  const p = $("#alPicked");
+  p.innerHTML = "<span>" + t("alert.picked", "已選擇") + "：<b>" + code + " " + name
+    + '</b></span><span class="clr" onclick="alClear()">'
+    + t("alert.repick", "重新選擇 ✕") + "</span>";
+  p.style.display = "flex";
+}
+function alClear(){
+  $("#alStock").value = "";
+  $("#alPicked").style.display = "none";
+  $("#alSearch").value = "";
+  $("#alSearch").focus();
+}
+function alKey(e){
+  const box = $("#alSuggest");
+  if (!box.classList.contains("show")) return;
+  const rows = box.querySelectorAll("div[data-i]");
+  if (!rows.length) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp"){
+    e.preventDefault();
+    alSugIdx += (e.key === "ArrowDown") ? 1 : -1;
+    if (alSugIdx < 0) alSugIdx = rows.length - 1;
+    if (alSugIdx >= rows.length) alSugIdx = 0;
+    rows.forEach(r => r.classList.remove("on"));
+    rows[alSugIdx].classList.add("on");
+    rows[alSugIdx].scrollIntoView({block: "nearest"});
+  } else if (e.key === "Enter"){
+    e.preventDefault();
+    (rows[alSugIdx >= 0 ? alSugIdx : 0]).click();
+  } else if (e.key === "Escape"){
+    box.classList.remove("show");
+  }
+}
+
+async function loadAlerts(){
+  try {
+    const list = await (await fetch("/api/alerts?cid=" + clientId(),
+      { headers: { "X-App-Token": APP_TOKEN } })).json();
+    const box = $("#alList");
+    if (!list.length || !list.map){
+      box.innerHTML = '<span style="color:#999">'
+        + t("alert.none", "尚無提醒") + "</span>"; return;
+    }
+    box.innerHTML = list.map(a => `
+      <div style="display:flex;justify-content:space-between;align-items:center;
+        padding:10px 4px;border-bottom:1px solid #eee">
+        <div><b>${a.code} ${a.name}</b> ${t("alert.tgt","目標")} ${a.price}（±2%）<br>
+          <span style="font-size:12px;color:#999">${t("alert.exp","到期")} ${a.expires}</span></div>
+        <button onclick="delAlert('${a.id}')" title="delete"
+          style="background:#c0392b;border:none;color:#fff;width:32px;height:32px;
+          border-radius:8px;cursor:pointer;font-size:16px">🗑</button>
+      </div>`).join("");
+  } catch(e){}
+}
+async function delAlert(id){
+  await fetch("/api/alerts/" + id + "?cid=" + clientId(),
+    { method: "DELETE", headers: { "X-App-Token": APP_TOKEN } });
+  loadAlerts();
+}
+
+/* 取得本裝置的推播訂閱（會要求通知權限）。
+   ⚠️ 失敗時要回**具體原因**，不要只說「失敗」——
+      iPhone 沒加到主畫面、權限沒開、伺服器沒設金鑰，處理方式完全不同。 */
+async function getSubscription(){
+  if (!("serviceWorker" in navigator) || !("PushManager" in window))
+    return {sub: null, err: t("alert.eNoSupport",
+      "此瀏覽器不支援推播（iPhone 請先「加入主畫面」再從桌面圖示開啟）")};
+  if (!VAPID_PUBLIC_KEY || VAPID_PUBLIC_KEY.startsWith("__"))
+    return {sub: null, err: t("alert.eNoKey", "伺服器尚未設定推播金鑰（VAPID）")};
+  try {
+    const reg = await navigator.serviceWorker.register("/sw.js");
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted")
+      return {sub: null, err: t("alert.ePerm",
+        "通知權限未開啟（請到系統／瀏覽器設定允許通知）")};
+    const old = await reg.pushManager.getSubscription();
+    const sub = old || await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlB64ToUint8(VAPID_PUBLIC_KEY)
+      });
+    return {sub, err: null};
+  } catch(e){
+    return {sub: null, err: t("alert.eSub", "訂閱失敗：") + (e && e.message || e)};
+  }
+}
+
+$("#alTest") && ($("#alTest").onclick = async () => {
+  $("#alTest").disabled = true;
+  $("#statusTest").textContent = t("alert.asking", "要求通知權限中…");
+  const {sub, err} = await getSubscription();
+  if (!sub){ $("#statusTest").textContent = "✗ " + err;
+             $("#alTest").disabled = false; return; }
+  $("#statusTest").textContent = t("alert.sending", "傳送測試推播中…");
+  try {
+    const r = await fetch("/api/test-push", { method: "POST",
+      headers: {"Content-Type": "application/json", "X-App-Token": APP_TOKEN},
+      body: JSON.stringify({subscription: sub, lang: LANG})});
+    const j = await r.json();
+    $("#statusTest").textContent = j.sent
+      ? "✓ " + t("alert.sentOk", "已送出，稍候裝置應跳出通知")
+      : "✗ " + (j.error || t("alert.sentNo", "伺服器未送出"));
+  } catch(e){ $("#statusTest").textContent = "✗ " + t("msg.netFail", "連線失敗"); }
+  $("#alTest").disabled = false;
+});
+
+if ($("#alSearch")){
+  $("#alSearch").oninput = alSearch;
+  $("#alSearch").onfocus = alSearch;
+  $("#alSearch").onkeydown = alKey;
+}
+document.addEventListener("click", e => {
+  const p = $(".stockpick"), sug = $("#alSuggest");
+  if (p && sug && !p.contains(e.target)) sug.classList.remove("show");
+});
+
+$("#alAdd") && ($("#alAdd").onclick = async () => {
+  const v = $("#alStock").value, price = parseFloat($("#alPrice").value);
+  if (!v){ $("#status4").textContent = t("alert.needStock", "請先輸入並選擇股票"); return; }
+  if (!price || price <= 0){
+    $("#status4").textContent = t("alert.needPrice", "請輸入正確價位"); return; }
+  const [code, name] = v.split("|");
+  $("#alAdd").disabled = true;
+  $("#status4").textContent = t("alert.asking", "要求通知權限中…");
+  const {sub, err} = await getSubscription();
+  if (!sub){ $("#status4").textContent = "✗ " + err;
+             $("#alAdd").disabled = false; return; }
+  try {
+    const r = await fetch("/api/alerts", { method: "POST",
+      headers: {"Content-Type": "application/json", "X-App-Token": APP_TOKEN},
+      /* ⚠️ 把當下的介面語言一起送出：推播是伺服器發的，
+            那時不可能知道使用者用什麼語言看網站。 */
+      body: JSON.stringify({cid: clientId(), code, name, price,
+                            lang: LANG, subscription: sub})});
+    const j = await r.json();
+    if (j.ok){
+      $("#status4").textContent = "✓ " + t("alert.added", "已新增提醒");
+      $("#alPrice").value = ""; alClear(); loadAlerts();
+    } else $("#status4").textContent = "✗ " + (j.error || "");
+  } catch(e){ $("#status4").textContent = "✗ " + t("msg.netFail", "連線失敗"); }
+  $("#alAdd").disabled = false;
+});
+
+if ($("#alList")) loadAlerts();
+
 /* ---- 依網址開對應分頁 ---- */
 if (START_PAGE && $("#" + START_PAGE)){
   document.querySelectorAll(".page").forEach(p => p.classList.remove("show"));
@@ -4237,6 +4524,8 @@ def _render(start_page="home"):
     html = html.replace("__TW_URL__", TW_URL)
     html = html.replace("__PHASE_BAR__", _phase_banner_html())
     html = html.replace("__HOME_SCREEN__", _home_screen_html())
+    # ⚠️ 只放**公開**金鑰。VAPID_PRIVATE 絕對不能出現在頁面上。
+    html = html.replace("__VAPID_PUBLIC__", VAPID_PUBLIC)
     html = html.replace("__ART_LINKS__", _art_links_html())
     return render_template_string(html)
 
@@ -4309,6 +4598,310 @@ def api_breadth():
         p={str(p): round(vals[max(0, min(len(vals) - 1, int(len(vals) * p / 100)))], 1)
            for p in (10, 25, 50, 75, 90)},
     )
+
+
+# ---------------------------------------------------------------- 推播通知（到價提醒）
+#
+# 從台股版移植（2026-08-05）。結構刻意保持一致，方便兩邊互相對照。
+#
+# ⚠️⚠️ **金鑰與台股版各自獨立，不要共用。**
+#    VAPID 金鑰識別的是「應用伺服器」，技術上兩站可以共用同一組 ——
+#    但**換金鑰會讓所有既有訂閱作廢**，共用等於把這個風險加倍：
+#    哪天要輪替其中一站，另一站的訂閱會一起死。
+#    所以美股用自己 `vapid --gen` 產的一組，填在**美股那個 Render 服務**的環境變數。
+#    產生步驟見台股版的 `推播金鑰_重生成指令.txt`。
+#
+# ⚠️ `VAPID_PRIVATE` 只放環境變數，**絕不進 git**。
+#
+# 沒設金鑰時整個功能會安靜降級：前端顯示「伺服器尚未設定推播金鑰」，
+# 不會拋例外、也不會擋住網站其他部分。
+
+VAPID_PUBLIC = os.environ.get("VAPID_PUBLIC", "")
+VAPID_PRIVATE = os.environ.get("VAPID_PRIVATE", "")
+VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "seer51000@gmail.com")
+
+ALERTS_FILE = "us_alerts.json"
+ALERTS_DB_KEY = "us_alerts_v1"
+_ALERTS_LOCK = threading.RLock()
+MAX_ALERTS_PER_USER = 3
+ALERT_BAND = 0.02          # 收盤價落在目標價 ±2% 內就通知（與台股版一致）
+ALERT_DAYS = 30            # 提醒保留天數
+
+# 設了 DATABASE_URL 就用 PostgreSQL 永久保存，否則退回本機快取檔。
+# ⚠️ 線上建議一定要設：快取目錄雖有持久化磁碟，但訂閱資料放 DB 比較穩，
+#    而且「可安全刪除 cache/」這個慣例會不小心把訂閱一起刪掉。
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+
+def _db_conn():
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL)
+
+
+def _db_init():
+    with _db_conn() as c:
+        with c.cursor() as cur:
+            cur.execute("CREATE TABLE IF NOT EXISTS kv (k text PRIMARY KEY, v text)")
+        c.commit()
+
+
+def _load_alerts():
+    if DATABASE_URL:
+        try:
+            _db_init()
+            with _db_conn() as c:
+                with c.cursor() as cur:
+                    cur.execute("SELECT v FROM kv WHERE k=%s", (ALERTS_DB_KEY,))
+                    row = cur.fetchone()
+            return json.loads(row[0]) if row and row[0] else []
+        except Exception:
+            pass          # DB 連線失敗就退回本機檔案，不要讓功能整個死掉
+    return _load_cache(ALERTS_FILE, None) or []
+
+
+def _save_alerts(alerts):
+    if DATABASE_URL:
+        try:
+            _db_init()
+            with _db_conn() as c:
+                with c.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO kv (k, v) VALUES (%s, %s) "
+                        "ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
+                        (ALERTS_DB_KEY, json.dumps(alerts, ensure_ascii=False)))
+                c.commit()
+            return
+        except Exception:
+            pass
+    _save_cache(ALERTS_FILE, alerts)
+
+
+def _send_push(subscription, title, body):
+    """送一則推播，回傳 ``(ok, reason)``。reason=gone 表示訂閱已失效。"""
+    if not subscription or not VAPID_PUBLIC or not VAPID_PRIVATE:
+        return False, "not_configured"
+    try:
+        from pywebpush import webpush, WebPushException
+        webpush(
+            subscription_info=subscription,
+            data=json.dumps({"title": title, "body": body}),
+            vapid_private_key=VAPID_PRIVATE,
+            vapid_claims={"sub": "mailto:%s" % VAPID_EMAIL},
+        )
+        return True, ""
+    except WebPushException as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        return False, "gone" if status in (404, 410) else "push_failed"
+    except Exception:
+        return False, "push_failed"
+
+
+@app.route("/api/stocklist")
+def api_stocklist():
+    """給到價提醒的下拉選單用：市值前 300 大的代號與名稱。
+
+    ⚠️ **只讀快取，不連網。** `get_universe()` 會打 Nasdaq，
+       這支是使用者一進頁面就會呼叫的，不能讓它觸發外部請求。
+       讀不到就回空陣列，前端會顯示「清單載入失敗」。
+    """
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    uni = _load_cache("universe.json", None) or []
+    return jsonify([{"code": u.get("symbol", ""),
+                     "name": u.get("name", ""),
+                     "name_zh": zh_company(u.get("symbol", ""), u.get("name", ""))}
+                    for u in uni[:300] if u.get("symbol")])
+
+
+@app.route("/api/alerts", methods=["GET", "POST"])
+def api_alerts():
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    cid = str(request.args.get("cid", ""))[:120]
+    if request.method == "GET":
+        alerts = _load_alerts()
+        mine = [{"id": a["id"], "code": a["code"], "name": a["name"],
+                 "price": a["price"], "expires": a["expires"]}
+                for a in alerts if a.get("cid") == cid]
+        return jsonify(mine)
+
+    d = request.get_json(silent=True) or {}
+    cid = str(d.get("cid", ""))[:120]
+    # ⚠️ 用 `is None` 判斷 price，不要用 falsy —— 0 也是 falsy，
+    #    會被歸類成「資料不完整」，使用者看到的錯誤訊息就對不上實際問題。
+    if not cid or not d.get("code") or d.get("price") is None:
+        return jsonify(ok=False, error="資料不完整"), 400
+    code = str(d.get("code", "")).strip().upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", code):
+        return jsonify(ok=False, error="股票代號格式不正確"), 400
+    universe = _load_cache("universe.json", None) or []
+    allowed = {str(u.get("symbol", "")).upper() for u in universe[:300]}
+    if code not in allowed:
+        return jsonify(ok=False, error="僅能設定市值前 300 大股票"), 400
+    sub = d.get("subscription")
+    if not isinstance(sub, dict) or not sub.get("endpoint") or not isinstance(sub.get("keys"), dict):
+        return jsonify(ok=False, error="裝置推播訂閱無效，請重新允許通知"), 400
+    try:
+        price = round(float(d["price"]), 2)
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="價位格式不正確"), 400
+    if not math.isfinite(price) or price <= 0:
+        return jsonify(ok=False, error="價位要大於 0"), 400
+
+    now = _utcnow()
+    with _ALERTS_LOCK:
+        alerts = _load_alerts()
+        if sum(1 for a in alerts if a.get("cid") == cid) >= MAX_ALERTS_PER_USER:
+            return jsonify(ok=False,
+                           error="每人最多設定 %d 檔提醒" % MAX_ALERTS_PER_USER), 400
+        alerts.append({
+        # ⚠️ 用 uuid，不要用毫秒時戳。台股版是 `str(int(time.time()*1000))`，
+        #    **同一毫秒內新增兩筆就會撞號** —— 實測會發生（連續兩次 POST）。
+        #    撞號的後果是刪一筆會把同號的另一筆一起刪掉。
+        "id": uuid.uuid4().hex[:12],
+        "cid": cid,
+        "code": code,
+        "name": str(d.get("name") or code)[:120],
+        "price": price,
+        # ⚠️ 存下設定當下的介面語言。美股版是雙語站，而推播送出時
+        #    伺服器不可能知道使用者的語言 —— 只能在這裡記下來。
+        "lang": "en" if d.get("lang") == "en" else "zh",
+        "created": now.strftime("%Y-%m-%d"),
+        "expires": (now + timedelta(days=ALERT_DAYS)).strftime("%Y-%m-%d"),
+        "subscription": sub,
+        })
+        _save_alerts(alerts)
+    return jsonify(ok=True)
+
+
+@app.route("/api/alerts/<alert_id>", methods=["DELETE"])
+def api_alerts_delete(alert_id):
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    cid = request.args.get("cid", "")
+    with _ALERTS_LOCK:
+        alerts = [a for a in _load_alerts()
+                  if not (a["id"] == alert_id and a.get("cid") == cid)]
+        _save_alerts(alerts)
+    return jsonify(ok=True)
+
+
+@app.route("/api/test-push", methods=["POST"])
+def api_test_push():
+    """立刻對本裝置送一則測試推播。**錯誤訊息要具體**，不要只說「失敗」。"""
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    d = request.get_json(silent=True) or {}
+    sub = d.get("subscription")
+    if not sub:
+        return jsonify(sent=False, error="沒有收到裝置的推播訂閱")
+    if not VAPID_PUBLIC or not VAPID_PRIVATE:
+        return jsonify(sent=False,
+                       error="伺服器未設定 VAPID_PUBLIC / VAPID_PRIVATE"
+                             "（請到 Render 設定並重新部署）")
+    if d.get("lang") == "en":
+        title, body = "US Stock Coffee", "Push test succeeded"
+    else:
+        title, body = "美股咖啡館", "推播測試成功"
+    ok, _reason = _send_push(sub, title, body)
+    return jsonify(sent=ok,
+                   error="" if ok else "pywebpush 送出失敗（金鑰不正確或訂閱已失效）")
+
+
+def _run_alert_checks():
+    """只讀日 K 快取檢查全部提醒；供內部 18:00 ET 排程與手動 API 共用。"""
+    with _ALERTS_LOCK:
+        alerts = _load_alerts()
+        want = _expected_last_session()
+        today = _utcnow().strftime("%Y-%m-%d")
+        result = {"ok": True, "expected_session": want, "checked": 0, "sent": 0,
+                  "skipped_stale": 0, "expired": 0, "duplicate": 0,
+                  "removed_gone": 0}
+        kept = []
+        for a in alerts:
+            if a.get("expires", "9999") < today:
+                result["expired"] += 1
+                continue
+            rows = _load_cache("hist_%s.json" % str(a.get("code", "")).upper(), None) or []
+            if not rows or str(rows[-1][0]) != want:
+                result["skipped_stale"] += 1
+                kept.append(a)
+                continue
+            result["checked"] += 1
+            last_d, last_c = str(rows[-1][0]), float(rows[-1][1])
+            target = float(a.get("price") or 0)
+            if not target or abs(last_c - target) / target > ALERT_BAND:
+                kept.append(a)
+                continue
+            if a.get("last_sent_session") == want:
+                result["duplicate"] += 1
+                kept.append(a)
+                continue
+            if a.get("lang") == "en":
+                title = "US Stock Coffee · Price alert"
+                body = ("%s closed at %s on %s — within %.0f%% of your target %s"
+                        % (a["code"], last_c, last_d, ALERT_BAND * 100, target))
+            else:
+                title = "美股咖啡館 · 到價提醒"
+                body = ("%s %s 收盤 %s，已進入目標價 %s 的 ±%.0f%% 範圍"
+                        % (last_d, a["code"], last_c, target, ALERT_BAND * 100))
+            ok, reason = _send_push(a.get("subscription"), title, body)
+            if ok:
+                a["last_sent_session"] = want
+                result["sent"] += 1
+                kept.append(a)
+            elif reason == "gone":
+                result["removed_gone"] += 1
+            else:
+                kept.append(a)
+        _save_alerts(kept)
+        return result
+
+
+@app.route("/api/run-alerts", methods=["GET", "POST"])
+def api_run_alerts():
+    """由**外部排程**於美股收盤後呼叫，以當日收盤價檢查提醒並推播。
+
+    可設 `CRON_TOKEN` 環境變數，呼叫時帶 `?token=` 驗證。
+
+    ⚠️ **只讀 `hist_` 快取，不主動抓價。** 這支應該排在每日更新之後跑；
+       自己再抓一次不但慢，還可能拿到跟網站不一致的價格。
+       快取還沒更新到最新交易日時**寧可不送**，並在回應裡講清楚 ——
+       送出一則基於舊收盤價的提醒，比沒送更糟。
+    """
+    token = os.environ.get("CRON_TOKEN", "")
+    if not token:
+        return jsonify(ok=False, error="CRON_TOKEN is not configured"), 503
+    if request.args.get("token") != token:
+        return jsonify(ok=False, error="unauthorized"), 401
+    return jsonify(_run_alert_checks())
+
+
+@app.route("/sw.js")
+def service_worker():
+    """Service worker：瀏覽器靠它在背景收推播。
+
+    ⚠️ 必須從**網站根目錄**提供（`/sw.js`），放子路徑會讓作用範圍不足。
+    ⚠️ 回 `application/javascript`，而且**不要快取** ——
+       改了推播行為卻被舊的 sw 擋住，是很難查的問題。
+    """
+    js = """
+async function pushHandler(e){
+  let d = {};
+  try { d = e.data.json(); }
+  catch(_){ d = {title:'US Stock Coffee', body: e.data ? e.data.text() : ''}; }
+  await self.registration.showNotification(d.title || 'US Stock Coffee',
+    {body: d.body || '', icon: '/icon.png', badge: '/icon.png'});
+}
+self.addEventListener('push', e => e.waitUntil(pushHandler(e)));
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(clients.openWindow('/alerts'));
+});
+"""
+    resp = app.response_class(js, mimetype="application/javascript")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""美股咖啡館 US Stock Coffee — 觀察清單策略（資料層＋篩選邏輯）
+"""美股咖啡館 US Stock Coffee — 強勢股與拉回選股（資料層＋篩選邏輯）
 
 架構刻意與台股版對齊，方便日後兩邊互相移植：
   · 單一 Flask 檔 + 內嵌前端（前端稍後補）
@@ -1136,6 +1136,128 @@ def screen_pullback(universe_n=150, ma=50, band=3.0, align="strict_bull",
             "ma_name_zh": MA_NAMES_ZH.get(ma, str(ma))}
 
 
+# ---------------------------------------------------------------- 專業版試作：創新高／RS
+
+RS_PERIODS = (20, 60, 120, 250)
+RS_CACHE_FILE = "rs_scores_v1.json"
+
+
+def _percentile_scores(values):
+    """把 {symbol: return} 換成 1～99 的市場百分位；同報酬者使用平均名次。"""
+    ordered = sorted(values.items(), key=lambda x: x[1])
+    n, out, i = len(ordered), {}, 0
+    if n == 1:
+        return {ordered[0][0]: 99}
+    while i < n:
+        j = i + 1
+        while j < n and ordered[j][1] == ordered[i][1]:
+            j += 1
+        avg_rank = ((i + 1) + j) / 2.0
+        score = int(round(1 + (avg_rank - 1) / (n - 1) * 98))
+        for k in range(i, j):
+            out[ordered[k][0]] = max(1, min(99, score))
+        i = j
+    return out
+
+
+def build_rs_cache(universe=None, histories=None):
+    """用已預抓的 hist 快取計算四種 RS，頁面查詢時不重跑 250 日。"""
+    universe = universe or get_universe(300)
+    if histories is None:
+        histories = {}
+        for u in universe:
+            sym = u["symbol"]
+            h = _load_cache("hist_%s.json" % sym, None) or []
+            if h:
+                histories[sym] = h
+    latest = [h[-1][0] for h in histories.values() if h]
+    if not latest:
+        raise RuntimeError("尚無股價快取可建立 RS")
+    as_of = max(set(latest), key=latest.count)
+    periods = {}
+    for period in RS_PERIODS:
+        returns, detail = {}, {}
+        for sym, h in histories.items():
+            closes = [float(x[1]) for x in h if x and len(x) >= 2 and x[1] is not None]
+            if len(closes) < period + 1 or closes[-period - 1] <= 0:
+                continue
+            gain = (closes[-1] / closes[-period - 1] - 1) * 100
+            returns[sym] = gain
+            detail[sym] = {"gain": round(gain, 2), "close": round(closes[-1], 2),
+                           "date": h[-1][0]}
+        scores = _percentile_scores(returns) if returns else {}
+        for sym, score in scores.items():
+            detail[sym]["rs"] = score
+        periods[str(period)] = detail
+    out = {"as_of": as_of, "universe": len(universe), "periods": periods,
+           "updated_at": _utcnow().strftime("%Y-%m-%d %H:%M UTC")}
+    _save_cache(RS_CACHE_FILE, out)
+    return out
+
+
+def screen_pro_rs(period=60, threshold=90, status_cb=None):
+    """市值前 300 大指定期間價格報酬的 1～99 市場百分位。"""
+    period, threshold = int(period), int(threshold)
+    if period not in RS_PERIODS:
+        raise ValueError("RS 期間只支援 20、60、120 或 250 日")
+    if threshold not in (80, 90, 95):
+        raise ValueError("RS 門檻只支援 80、90 或 95")
+    universe = get_universe(300)
+    cache = _load_cache(RS_CACHE_FILE, None) or {}
+    target = _home_screen_target_date()
+    if not cache.get("periods") or (target and cache.get("as_of") != target):
+        # 只讀本機 hist 快取重建，不呼叫 300 次外部 API；正常每日預抓已完成這步。
+        cache = build_rs_cache(universe=universe)
+    data = (cache.get("periods") or {}).get(str(period)) or {}
+    rows = []
+    for rank, u in enumerate(universe, 1):
+        sym, d = u["symbol"], data.get(u["symbol"])
+        if not d or int(d.get("rs") or 0) < threshold:
+            continue
+        rows.append({"rank": rank, "symbol": sym, "name": u["name"],
+                     "name_zh": zh_company(sym, u["name"]), "sector": u["sector"],
+                     "sector_zh": zh_sector(u["sector"]), "close": d["close"],
+                     "gain": d["gain"], "rs": d["rs"]})
+    rows.sort(key=lambda r: (-r["rs"], -r["gain"], r["rank"]))
+    return {"rows": rows, "results": rows, "scanned": len(data), "period": period,
+            "threshold": threshold, "as_of": cache.get("as_of")}
+
+
+def screen_pro_new_high(days=1, status_cb=None):
+    """市值前 300 大，最近 1／3／5 日任一天符合既有創新高級距。"""
+    days = int(days)
+    if days not in (1, 3, 5):
+        raise ValueError("篩選日數只支援近一日、近三日或近五日")
+    universe = get_universe(300)
+    histories = load_histories([u["symbol"] for u in universe], status_cb=status_cb)
+    strength = {k: len(NH_ORDER) - i for i, k in enumerate(NH_ORDER)}
+    rows, latest = [], []
+    for rank, u in enumerate(universe, 1):
+        h = histories.get(u["symbol"]) or []
+        if h:
+            latest.append(h[-1][0])
+        best = None
+        for offset in range(min(days, len(h))):
+            segment = h[:len(h) - offset]
+            label = new_high_label([x[1] for x in segment])
+            if not label:
+                continue
+            event = {"label": label, "date": segment[-1][0]}
+            if (best is None or strength.get(label, 0) > strength.get(best["label"], 0)
+                    or (label == best["label"] and event["date"] > best["date"])):
+                best = event
+        if best:
+            sym = u["symbol"]
+            rows.append({"rank": rank, "symbol": sym, "name": u["name"],
+                         "name_zh": zh_company(sym, u["name"]), "sector": u["sector"],
+                         "sector_zh": zh_sector(u["sector"]), "new_high": best["label"],
+                         "hit_date": best["date"]})
+    rows.sort(key=lambda r: (-strength.get(r["new_high"], 0), r["rank"]))
+    as_of = max(set(latest), key=latest.count) if latest else None
+    return {"rows": rows, "results": rows, "scanned": len(histories),
+            "days": days, "as_of": as_of}
+
+
 # ---------------------------------------------------------------- 背景工作
 
 JOBS = {}
@@ -1783,7 +1905,14 @@ def prefetch(universe_n=300, force=False):
     def cb(i, total):
         PREFETCH_STATE["stage"] = "讀取股價資料 %d / %d" % (i, total)
     syms = [u["symbol"] for u in uni]
-    load_histories(syms, status_cb=cb, force=force)
+    histories = load_histories(syms, status_cb=cb, force=force)
+    # RS 最長需要 251 個收盤；hist 本來就保留 780 日。這裡一次算好四種
+    # 百分位並寫快取，使用者開 RS 頁時不必再掃 300 檔 × 250 日。
+    PREFETCH_STATE["stage"] = "計算 RS 排名"
+    try:
+        build_rs_cache(universe=uni, histories=histories)
+    except Exception:
+        pass
     PREFETCH_STATE["stage"] = "讀取基本面資料"
 
     def cb2(i, total):
@@ -2293,6 +2422,9 @@ PAGE = r"""<!DOCTYPE html>
   /* 行情紅綠：僅用於數字 */
   .pos { color:var(--up); font-family:var(--font-num); }
   .neg { color:var(--down); font-family:var(--font-num); }
+  .rs-score { display:inline-flex; min-width:40px; justify-content:center; padding:3px 8px;
+             border-radius:999px; background:var(--caramel); color:#fff; font-weight:800;
+             font-family:var(--font-num); }
 
   /* ---- 側邊選單 ---- */
   #menuBtn { position:fixed; top:16px; left:16px; z-index:100; width:46px; height:46px;
@@ -2502,9 +2634,23 @@ PAGE = r"""<!DOCTYPE html>
 <nav id="sidebar">
   <div class="sbTitle">☕ <span data-i18n="brand.name">美股咖啡館</span></div>
   <a class="navitem active" data-page="home" href="/"><i>☕</i><b data-i18n="nav.home">菜單首頁</b><small>US Stock Coffee</small></a>
-  <a class="navitem" data-page="p1" href="/screener"><i>📈</i><b data-i18n="p1.title">觀察清單策略</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
-  <a class="navitem" data-page="p3" href="/pullback"><i>🎯</i><b data-i18n="p3.title">飆股拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
+  <details class="navgroup">
+    <summary><i>📋</i><b data-i18n="nav.group">選股菜單</b><small data-i18n="nav.group.sub">強勢股・拉回買點・績效</small></summary>
+    <a class="navitem sub" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
+    <a class="navitem sub" data-page="p3" href="/pullback"><i>⭐</i><b data-i18n="p3.title">拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
+    <a class="navitem sub" data-page="p7" href="/twr"><i>📈</i><b data-i18n="p7.title">我的績效</b><small data-i18n="nav.twr.sub">TWR 報酬率試算</small></a>
+  </details>
+  <details class="navgroup">
+    <summary><i>⭐</i><b data-i18n="nav.mine">我的自選股</b><small data-i18n="nav.mine.sub">風控管理・到價提醒</small></summary>
+    <a class="navitem sub" data-page="p8" href="/risk"><i>🛡️</i><b data-i18n="p8.title">風控管理</b><small data-i18n="nav.risk.sub">ATR・波動率・趨勢・Beta</small></a>
+    <a class="navitem sub" data-page="p4" href="/alerts"><i>🔔</i><b data-i18n="p4.title">推播通知</b><small data-i18n="nav.alert.sub">收盤到價提醒（測試中）</small></a>
+  </details>
   <a class="navitem" data-page="pm" href="/articles"><i>📚</i><b data-i18n="pm.title">文章區</b><small data-i18n="pm.sub">美股大盤與動量交易教學</small></a>
+  <details class="navgroup">
+    <summary><i>☕</i><b data-i18n="nav.pro">升級專業版</b><small data-i18n="nav.pro.sub">創新高・RS 指數</small></summary>
+    <a class="navitem sub" data-page="p5" href="/pro"><i>🚀</i><b data-i18n="nav.proHigh">創新高</b><small data-i18n="nav.proHigh.sub">近期強勢突破股票</small></a>
+    <a class="navitem sub" data-page="p9" href="/pro/rs"><i>🏆</i><b data-i18n="nav.proRs">RS 指數</b><small data-i18n="nav.proRs.sub">市場相對強弱排名</small></a>
+  </details>
 </nav>
 
 <div class="wrap">
@@ -2559,21 +2705,21 @@ __HOME_SCREEN__
 
   <a class="menu-item" href="/screener" style="text-decoration:none;color:inherit">
     <span class="ic">📈</span>
-    <span class="body"><span class="nm" data-i18n="p1.title">觀察清單策略</span>
+    <span class="body"><span class="nm" data-i18n="p1.title">找強勢股</span>
       <span class="ds" data-i18n="home.c1">依均線與均線排列篩選個股</span></span>
     <span class="chev">›</span>
   </a>
   <a class="menu-item" href="/pullback" style="text-decoration:none;color:inherit">
     <span class="ic">🎯</span>
-    <span class="body"><span class="nm" data-i18n="p3.title">飆股拉回找買點</span>
+    <span class="body"><span class="nm" data-i18n="p3.title">拉回找買點</span>
       <span class="ds" data-i18n="home.c2">收盤回到指定均線 ±3%</span></span>
     <span class="chev">›</span>
   </a>
 </div>
 
-<!-- ============ 觀察清單策略 ============ -->
+<!-- ============ 找強勢股 ============ -->
 <div class="page" id="p1">
-  <h2 class="ptitle" data-i18n="p1.title">觀察清單策略</h2>
+  <h2 class="ptitle" data-i18n="p1.title">找強勢股</h2>
   <details class="pgintro">
     <summary data-i18n="p1.introT">用均線找出「現在正在漲」的股票</summary>
     <div class="pgintro-b" data-i18n-html="p1.intro">
@@ -2631,9 +2777,9 @@ __HOME_SCREEN__
   <div id="result1"></div>
 </div>
 
-<!-- ============ 飆股拉回找買點 ============ -->
+<!-- ============ 拉回找買點 ============ -->
 <div class="page" id="p3">
-  <h2 class="ptitle" data-i18n="p3.title">飆股拉回找買點</h2>
+  <h2 class="ptitle" data-i18n="p3.title">拉回找買點</h2>
   <details class="pgintro">
     <summary data-i18n="p3.introT">等強勢股回頭，而不是追在最高點</summary>
     <div class="pgintro-b" data-i18n-html="p3.intro">
@@ -2672,6 +2818,127 @@ __HOME_SCREEN__
   <div id="result3"></div>
 </div>
 
+<!-- ============ 我的績效（TWR）============ -->
+<div class="page" id="p7">
+  <h2 class="ptitle" data-i18n="p7.title">我的績效</h2>
+
+  <div class="card" style="background:#eef4fc">
+    <div style="font-size:14px;color:#333;line-height:1.9" data-i18n="twr.intro">
+      使用時間加權報酬率（TWR），扣除中途存入或提出資金的影響，較能反映你的操作績效。逐月填入淨存入與月底總資產即可，資料只會儲存在這台裝置的瀏覽器。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 data-i18n="twr.basic">基本設定</h2>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <div style="flex:1;min-width:120px">
+        <div style="font-size:13px;color:#666;margin-bottom:4px" data-i18n="twr.year">年度</div>
+        <input id="twYear" type="number" value="2026"
+          style="width:100%;padding:11px;font-size:15px;border:1px solid #ddd;border-radius:10px;box-sizing:border-box">
+      </div>
+      <div style="flex:2;min-width:180px">
+        <div style="font-size:13px;color:#666;margin-bottom:4px" data-i18n="twr.start">期初總資產（現金＋持股市值）</div>
+        <input id="twStart" type="number" step="0.01" placeholder="例如 100000"
+          style="width:100%;padding:11px;font-size:15px;border:1px solid #ddd;border-radius:10px;box-sizing:border-box">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 data-i18n="twr.monthly">逐月填寫</h2>
+    <div style="font-size:12px;color:#888;line-height:1.7;margin-bottom:8px" data-i18n="twr.note">
+      當月淨存入＝存入－提出（提出請填負數）；月底總資產＝現金加所有持股市值。尚未到的月份留白即可。
+    </div>
+    <div style="overflow-x:auto">
+      <table id="twTable" style="font-size:13px">
+        <tr><th data-i18n="twr.col.m">月份</th><th data-i18n="twr.col.in">當月淨存入</th><th data-i18n="twr.col.tot">月底總資產</th><th data-i18n="twr.col.ret">當月報酬</th><th data-i18n="twr.col.cum">累積報酬</th></tr>
+      </table>
+    </div>
+  </div>
+
+  <button class="gobtn" id="twCalc" data-i18n="twr.calc">計算績效</button>
+  <div style="text-align:center;margin-top:10px">
+    <span id="twSaved" style="font-size:12px;color:#A56C24"></span>
+    <a id="twClear" style="font-size:13px;color:#c0392b;cursor:pointer;margin-left:12px;text-decoration:underline" data-i18n="twr.clear">清空所有資料</a>
+  </div>
+  <div class="status" id="statusTw"></div>
+  <div id="twResult"></div>
+</div>
+
+<!-- ============ 我的自選股：風控管理 ============ -->
+<div class="page" id="p8">
+  <h2 class="ptitle" data-i18n="p8.title">風控管理</h2>
+  <div class="card" style="text-align:center;padding:30px 22px">
+    <div style="font-size:42px;margin-bottom:10px">🛡️</div>
+    <h2 data-i18n="risk.preparing">美股風控資料準備中</h2>
+    <div style="font-size:14px;color:#666;line-height:1.9" data-i18n="risk.preparingNote">
+      將提供自選股 ATR、波動率、均線趨勢與 Beta，並搭配進場價計算初始停損與移動停損。美股 OHLC 資料口徑確認後開放。
+    </div>
+  </div>
+</div>
+
+<!-- ============ 我的自選股：推播通知 ============ -->
+<div class="page" id="p4">
+  <h2 class="ptitle" data-i18n="p4.title">推播通知</h2>
+  <div class="card" style="text-align:center;padding:30px 22px">
+    <div style="font-size:42px;margin-bottom:10px">🔔</div>
+    <h2 data-i18n="alert.preparing">美股收盤到價提醒準備中</h2>
+    <div style="font-size:14px;color:#666;line-height:1.9" data-i18n="alert.preparingNote">
+      預計依美股正式收盤價檢查目標價，並以裝置推播通知。推播金鑰、訂閱保存與美股收盤排程完成後開放。
+    </div>
+  </div>
+</div>
+
+<!-- ============ 升級專業版：創新高 ============ -->
+<div class="page" id="p5">
+  <h2 class="ptitle" data-i18n="p5.title">專業版｜創新高</h2>
+  <div class="card">
+    <div style="display:flex;align-items:center;gap:9px;margin-bottom:8px">
+      <h2 style="margin:0" data-i18n="pro.nhTitle">創新高股票篩選</h2>
+      <span class="badge" data-i18n="pro.beta">功能試作</span>
+    </div>
+    <div style="font-size:14px;color:#666;line-height:1.8;margin-bottom:14px" data-i18n-html="pro.nhBody">
+      從市值前 300 大美股中，找出最近指定期間任一天符合<b>3 個月、半年、1 年、2 年或3 年新高</b>的股票。創新高採 2% 容差，避免只差一點就漏掉正在測試前高的股票。
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px">
+      <label class="opt" style="margin:0"><input type="radio" name="proHighDays" value="1" checked><span data-i18n="pro.nh1">近一日</span></label>
+      <label class="opt" style="margin:0"><input type="radio" name="proHighDays" value="3"><span data-i18n="pro.nh3">近三日</span></label>
+      <label class="opt" style="margin:0"><input type="radio" name="proHighDays" value="5"><span data-i18n="pro.nh5">近五日</span></label>
+    </div>
+    <button class="gobtn" id="proHighBtn" data-i18n="pro.nhBtn">篩選創新高</button>
+    <div class="status" id="proHighStatus"></div><div id="proHighResult"></div>
+  </div>
+</div>
+
+<!-- ============ 升級專業版：RS 指數 ============ -->
+<div class="page" id="p9">
+  <h2 class="ptitle" data-i18n="p9.title">專業版｜RS 指數</h2>
+  <div class="card">
+    <div style="display:flex;align-items:center;gap:9px;margin-bottom:8px">
+      <h2 style="margin:0" data-i18n="rs.title">RS 相對強弱排名</h2>
+      <span class="badge" data-i18n="pro.beta">功能試作</span>
+    </div>
+    <div style="font-size:14px;color:#666;line-height:1.85;margin-bottom:14px" data-i18n-html="rs.body">
+      <b>RS 不是 RSI。</b>這裡比較市值前 300 大美股在指定期間的價格漲幅，換算為 1～99 分市場百分位。RS 90 代表表現約勝過九成可計算股票；這是本站價格百分位，不是 IBD 官方 RS Rating。
+    </div>
+    <div style="font-size:13px;color:var(--mocha);font-weight:700;margin-bottom:6px" data-i18n="rs.period">比較期間</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px">
+      <label class="opt" style="margin:0"><input type="radio" name="proRsPeriod" value="20"><span data-i18n="rs.p20">20 日（短線）</span></label>
+      <label class="opt" style="margin:0"><input type="radio" name="proRsPeriod" value="60" checked><span data-i18n="rs.p60">60 日（波段）</span></label>
+      <label class="opt" style="margin:0"><input type="radio" name="proRsPeriod" value="120"><span data-i18n="rs.p120">120 日（中期）</span></label>
+      <label class="opt" style="margin:0"><input type="radio" name="proRsPeriod" value="250"><span data-i18n="rs.p250">250 日（長期）</span></label>
+    </div>
+    <div style="font-size:13px;color:var(--mocha);font-weight:700;margin-bottom:6px" data-i18n="rs.threshold">最低 RS</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px">
+      <label class="opt" style="margin:0"><input type="radio" name="proRsThreshold" value="80"><span>RS ≥ 80</span></label>
+      <label class="opt" style="margin:0"><input type="radio" name="proRsThreshold" value="90" checked><span>RS ≥ 90</span></label>
+      <label class="opt" style="margin:0"><input type="radio" name="proRsThreshold" value="95"><span>RS ≥ 95</span></label>
+    </div>
+    <button class="gobtn" id="proRsBtn" data-i18n="rs.btn">顯示 RS 排名</button>
+    <div class="status" id="proRsStatus"></div><div id="proRsResult"></div>
+  </div>
+</div>
+
 <!-- ============ 文章區 ============ -->
 <div class="page" id="pm">
   <h2 class="ptitle" data-i18n="pm.title">文章區</h2>
@@ -2702,8 +2969,17 @@ const I18N = { en: {
   "ui.menu": "Menu",
   "brew.title": "Brewing, please wait", "brew.wait": "Getting ready…",
   "brand.name": "US Stock Coffee",
-  "nav.home": "Menu", "nav.screen.sub": "Find leading stocks",
+  "nav.home": "Menu", "nav.group": "Stock Screeners",
+  "nav.group.sub": "Leaders · Pullbacks · Performance",
+  "nav.screen.sub": "Find leading stocks",
   "nav.pull.sub": "Close back within ±3% of an MA",
+  "nav.twr.sub": "TWR performance calculator",
+  "nav.mine": "My Watchlist", "nav.mine.sub": "Risk & price alerts",
+  "nav.risk.sub": "ATR · Volatility · Trend · Beta",
+  "nav.alert.sub": "Close-price alerts (beta)",
+  "nav.pro": "Upgrade to Pro", "nav.pro.sub": "New highs · RS ranking",
+  "nav.proHigh": "New Highs", "nav.proHigh.sub": "Recent breakout leaders",
+  "nav.proRs": "RS Ranking", "nav.proRs.sub": "Market relative-strength percentile",
   "pm.title": "Articles", "pm.sub": "US market and momentum guides",
   "pm.head": "US Market · Beginner Guides",
   "pm.note": "Free to read. Start with the market environment behind this screener.",
@@ -2716,11 +2992,36 @@ const I18N = { en: {
   "home.c1": "Screen by moving average and MA alignment",
   "home.c2": "Close back within ±3% of a chosen MA",
   "home.c3": "The Taiwan edition — same logic, already live",
-  "p1.title": "Watchlist Screener", "p3.title": "Pullback Entry Finder",
+  "p1.title": "Find Strong Stocks", "p3.title": "Find Pullback Entries",
+  "p7.title": "My Performance",
+  "p8.title": "Risk Dashboard", "p4.title": "Price Alerts",
+  "risk.preparing": "US risk data is being prepared",
+  "risk.preparingNote": "This page will provide ATR, volatility, moving-average trend and Beta for your watchlist, plus initial and trailing stops based on your entry price. It will open after the US OHLC data definition is verified.",
+  "alert.preparing": "US close-price alerts are being prepared",
+  "alert.preparingNote": "Alerts will check official US closing prices against your targets and notify this device. The feature will open after push keys, subscription storage and the US close schedule are ready.",
+  "p5.title": "Pro｜New Highs", "p9.title": "Pro｜RS Ranking",
+  "pro.beta": "Beta", "pro.nhTitle": "New-high stock screener",
+  "pro.nhBody": "Find top-300 US stocks that reached a <b>3-month, 6-month, 1-year, 2-year or 3-year high</b> on any day in the selected window. A 2% tolerance avoids missing stocks that are effectively retesting a prior high.",
+  "pro.nh1": "Last day", "pro.nh3": "Last 3 days", "pro.nh5": "Last 5 days",
+  "pro.nhBtn": "Screen new highs",
+  "rs.title": "RS relative-strength ranking",
+  "rs.body": "<b>RS is not RSI.</b> It compares price gains among the top 300 US stocks over the selected period and converts them to a 1–99 market percentile. RS 90 means the stock outperformed roughly 90% of calculable peers. This is Stock Coffee's price percentile, not IBD's proprietary RS Rating.",
+  "rs.period": "Comparison period", "rs.p20": "20 days (short term)",
+  "rs.p60": "60 days (swing)", "rs.p120": "120 days (intermediate)",
+  "rs.p250": "250 days (long term)", "rs.threshold": "Minimum RS",
+  "rs.btn": "Show RS ranking",
   "p1.introT": "Find stocks that are moving right now — using moving averages",
   "p1.intro": "<p>A moving average is the average cost of a group of buyers. Above the 50-day line, the people who bought this quarter are in profit; below the 150-day line, most buyers of the past half-year are underwater. Moving averages don't predict — they tell you where market participants stand, and that shapes what they do next.</p><p>This screener filters the top 150 or 300 US companies by market cap: crossing above or below the 10, 20, 50 or 150-day moving average, or screening directly by <b>MA alignment</b> — strict bullish (10&gt;20&gt;50&gt;150) means later buyers paid more and still bought, which usually marks a trend in progress.</p><p>If the screen returns too many names, the dropdowns above narrow it further. <b>The sector distribution is itself a signal</b> — when twelve of thirty results share an industry, that's where money is going.</p><p><b>Who it's for</b>: momentum traders holding for several months. This is closing data — not built for day trading.</p>",
   "p3.introT": "Wait for a strong stock to come back, instead of chasing the high",
   "p3.intro": "<p>Leading stocks don't rise every day. After a run they consolidate, and that consolidation often stalls near a moving average — because that line is a group's average cost, which becomes psychological support.</p><p>This screen finds stocks whose <b>latest close has returned to within ±3% of the moving average you choose</b>. The point isn't to call the bottom; it's an entry with controlled risk — you're not buying the high, and if you're wrong the stop is obvious (a break of that line).</p><p>Which average to use depends on your holding period — the 20-day for shorter trades, the 50 or 150-day for swings. Combined with the <b>MA alignment</b> filter, you can look only for stocks whose trend is intact and merely resting.</p><p>Results are sorted by <b>how close price is to the line</b> — the top of the list pulled back the most precisely.</p>",
+  "twr.intro": "Time-weighted return (TWR) removes the effect of deposits and withdrawals, giving a clearer view of your investing performance. Enter each month's net cash flow and ending portfolio value. Data stays in this browser on this device.",
+  "twr.basic": "Basic settings", "twr.year": "Year",
+  "twr.start": "Starting portfolio value (cash + holdings)",
+  "twr.monthly": "Monthly entries",
+  "twr.note": "Net deposit = deposits minus withdrawals (enter withdrawals as negative). Ending value = cash plus all holdings. Leave future months blank.",
+  "twr.col.m": "Month", "twr.col.in": "Net deposit", "twr.col.tot": "Ending value",
+  "twr.col.ret": "Monthly return", "twr.col.cum": "Cumulative return",
+  "twr.calc": "Calculate performance", "twr.clear": "Clear all data",
   "step.universe": "Universe", "step.days": "Days checked",
   "step.mode": "Match mode (3 days)", "step.ma": "Moving average",
   "step.dir": "Direction", "step.align": "MA alignment",
@@ -2804,10 +3105,15 @@ if (langBtn){
     localStorage.setItem("us_lang", LANG);
     langBtn.textContent = (LANG === "zh") ? "EN" : "中";
     applyLang();
+    document.querySelectorAll(".tw-month").forEach(el => {
+      el.textContent = twMonth(parseInt(el.dataset.month, 10));
+    });
     if (lastRows.length) render({rows:lastRows, as_of:lastMeta.as_of,
         ma_name_zh:lastMeta.ma_name_zh, ma_name:lastMeta.ma_name});
     if (lastRows3.length) render3({rows:lastRows3, as_of:lastMeta3.as_of, band:lastMeta3.band,
         ma_name_zh:lastMeta3.ma_name_zh, ma_name:lastMeta3.ma_name});
+    if (lastProHigh) renderProHigh(lastProHigh);
+    if (lastProRs) renderProRs(lastProRs);
   };
 }
 
@@ -3427,13 +3733,193 @@ function breadthHtml(j){
        + svg + `<div style="margin-top:10px">${stats}</div>` + note;
 }
 
+/* ---- 升級專業版：創新高／RS ---- */
+let lastProHigh = null, lastProRs = null;
+const proPct = v => `<span class="${Number(v) >= 0 ? 'pos' : 'neg'}">${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(2)}%</span>`;
+const proKv = (k, v) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`;
+
+function runProJob(url, params, button, status, done){
+  button.disabled = true; status.textContent = "";
+  brewOpen(t("st.send","送出篩選條件…"));
+  fetch(url, {method:"POST", headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},
+    body:JSON.stringify(params)}).then(r => r.json()).then(j => {
+      if (!j.job){ brewClose(); button.disabled=false; if (retryOnStaleToken(j)) return;
+        status.textContent=j.error||t("st.nojob","無法建立工作"); return; }
+      const pollPro = () => fetch("/api/job/"+j.job).then(r=>r.json()).then(x => {
+        if (!x.done){ brewProgress(x.progress,x.status); setTimeout(pollPro,500); return; }
+        brewClose(); button.disabled=false;
+        if (x.error){ status.textContent=t("st.failed","篩選失敗：")+x.error; return; }
+        done(x.result);
+      }).catch(e=>{ brewClose(); button.disabled=false; status.textContent=t("st.conn","連線失敗：")+e; });
+      pollPro();
+  }).catch(e=>{ brewClose(); button.disabled=false; status.textContent=t("st.conn","連線失敗：")+e; });
+}
+
+function proHighFilter(){
+  const box=$("#proHighResult"); if(!box) return;
+  const sec=box.querySelector('[data-pro-filter="sector"]')?.value||"";
+  const high=box.querySelector('[data-pro-filter="high"]')?.value||"";
+  let shown=0;
+  box.querySelectorAll("[data-pro-row]").forEach(el=>{
+    const ok=(!sec||el.dataset.sector===sec)&&(!high||el.dataset.high===high);
+    el.style.display=ok?"":"none"; if(ok&&el.tagName==="TR") shown++;
+  });
+  const count=box.querySelector("[data-pro-count]"); if(count) count.textContent=(LANG==="en"?"Filtered: ":"篩選後：")+shown;
+}
+
+function renderProHigh(j){
+  lastProHigh=j; const rows=j.rows||[];
+  $("#proHighStatus").innerHTML=(LANG==="en"
+    ? `Top ${j.scanned}, any of last ${j.days} day(s): <span class="count">${rows.length}</span> new-high stocks`
+    : `掃描市值前 ${j.scanned} 大（近 ${j.days} 日任一天）：<span class="count">${rows.length}</span> 檔創新高`) + ` · ${j.as_of||"—"}`;
+  if(!rows.length){ $("#proHighResult").innerHTML=`<div class="concl gray">${LANG==="en"?"No stocks match.":"目前沒有股票符合創新高條件。"}</div>`; return; }
+  const sectors={}, highs={}; rows.forEach(s=>{sectors[s.sector]=(sectors[s.sector]||0)+1;highs[s.new_high]=(highs[s.new_high]||0)+1;});
+  let so=`<option value="">${LANG==="en"?"All sectors":"全部產業"}（${rows.length}）</option>`;
+  Object.keys(sectors).sort((a,b)=>sectors[b]-sectors[a]).forEach(k=>so+=`<option value="${k}">${LANG==="en"?k:zhSectorFromRows(rows,k)}（${sectors[k]}）</option>`);
+  let ho=`<option value="">${LANG==="en"?"All high levels":"全部新高程度"}（${rows.length}）</option>`;
+  ["3y","2y","1y","6m","3m"].filter(k=>highs[k]).forEach(k=>ho+=`<option value="${k}">${nhName(k)}（${highs[k]}）</option>`);
+  const filters=`<div class="resfilter"><span class="rflabel">${t("flt.sector","產業")}</span><select data-pro-filter="sector" onchange="proHighFilter()">${so}</select>`
+    + `<span class="rflabel">${t("flt.nh","新高程度")}</span><select data-pro-filter="high" onchange="proHighFilter()">${ho}</select><span class="rflabel" data-pro-count>${LANG==="en"?"Filtered: ":"篩選後："}${rows.length}</span></div>`;
+  let trs="", cards=""; rows.forEach(s=>{const name=coName(s),sector=coSector(s),high=nhName(s.new_high);
+    trs+=`<tr data-pro-row data-sector="${s.sector}" data-high="${s.new_high}"><td>${s.rank}</td><td><b>${s.symbol}</b></td><td>${name}</td><td>${sector}</td><td><b>${high}</b></td><td>${s.hit_date}</td></tr>`;
+    cards+=`<details class="scard" data-pro-row data-sector="${s.sector}" data-high="${s.new_high}"><summary><span class="sc-l"><b>${s.symbol}</b> ${name}</span><span class="sc-r">${high}</span></summary><div class="scard-body">${proKv(t("th.rank","市值排名"),s.rank)}${proKv(t("th.sector","產業"),sector)}${proKv(t("th.nh","創新高"),high)}${proKv(LANG==="en"?"Matched on":"符合日期",s.hit_date)}</div></details>`;
+  });
+  $("#proHighResult").innerHTML=filters+`<div class="res-wide"><table><tr><th>${t("th.rank","排名")}</th><th>${t("th.sym","代號")}</th><th>${t("th.name","公司")}</th><th>${t("th.sector","產業")}</th><th>${t("th.nh","創新高")}</th><th>${LANG==="en"?"Matched on":"符合日期"}</th></tr>${trs}</table></div><div class="res-cards">${cards}</div>`;
+}
+function zhSectorFromRows(rows,key){ const x=rows.find(r=>r.sector===key); return x?(x.sector_zh||key):key; }
+
+function renderProRs(j){
+  lastProRs=j; const rows=j.rows||[];
+  $("#proRsStatus").innerHTML=(LANG==="en"?`Compared ${j.scanned} stocks over ${j.period} days: `:`比較 ${j.scanned} 檔股票近 ${j.period} 日：`)+`<span class="count">${rows.length}</span> ${LANG==="en"?`scored RS ${j.threshold}+`:`檔 RS ≥ ${j.threshold}`} · ${j.as_of||"—"}`;
+  if(!rows.length){$("#proRsResult").innerHTML=`<div class="concl gray">${LANG==="en"?"No stocks match.":"目前沒有股票符合這個 RS 門檻。"}</div>`;return;}
+  const sectors={};rows.forEach(s=>sectors[s.sector]=(sectors[s.sector]||0)+1);
+  let opts=`<option value="">${LANG==="en"?"All sectors":"全部產業"}（${rows.length}）</option>`;
+  Object.keys(sectors).sort((a,b)=>sectors[b]-sectors[a]).forEach(k=>opts+=`<option value="${k}">${LANG==="en"?k:zhSectorFromRows(rows,k)}（${sectors[k]}）</option>`);
+  let trs="",cards="";rows.forEach(s=>{const name=coName(s),sector=coSector(s),gain=proPct(s.gain);
+    trs+=`<tr data-rs-row data-sector="${s.sector}"><td>${s.rank}</td><td><b>${s.symbol}</b></td><td>${name}</td><td>${sector}</td><td>${s.close}</td><td>${gain}</td><td><span class="rs-score">${s.rs}</span></td></tr>`;
+    cards+=`<details class="scard" data-rs-row data-sector="${s.sector}"><summary><span class="sc-l"><b>${s.symbol}</b> ${name}</span><span class="sc-r"><span class="rs-score">${s.rs}</span></span></summary><div class="scard-body">${proKv(t("th.rank","市值排名"),s.rank)}${proKv(t("th.sector","產業"),sector)}${proKv(t("th.close","收盤"),s.close)}${proKv(`${j.period}${LANG==="en"?"-day gain":" 日漲幅"}`,gain)}${proKv("RS",s.rs)}</div></details>`;
+  });
+  $("#proRsResult").innerHTML=`<div class="resfilter"><span class="rflabel">${t("flt.sector","產業")}</span><select onchange="filterProRs(this.value)">${opts}</select></div><div class="res-wide"><table><tr><th>${t("th.rank","排名")}</th><th>${t("th.sym","代號")}</th><th>${t("th.name","公司")}</th><th>${t("th.sector","產業")}</th><th>${t("th.close","收盤")}</th><th>${j.period}${LANG==="en"?"-day gain":" 日漲幅"}</th><th>RS</th></tr>${trs}</table></div><div class="res-cards">${cards}</div>`;
+}
+function filterProRs(sector){$("#proRsResult").querySelectorAll("[data-rs-row]").forEach(el=>el.style.display=(!sector||el.dataset.sector===sector)?"":"none");}
+if($("#proHighBtn")) $("#proHighBtn").onclick=()=>{ $("#proHighResult").innerHTML=""; runProJob("/api/pro/new-high",{days:Number(val("proHighDays")||1)},$("#proHighBtn"),$("#proHighStatus"),renderProHigh); };
+if($("#proRsBtn")) $("#proRsBtn").onclick=()=>{ $("#proRsResult").innerHTML=""; runProJob("/api/pro/rs",{period:Number(val("proRsPeriod")||60),threshold:Number(val("proRsThreshold")||90)},$("#proRsBtn"),$("#proRsStatus"),renderProRs); };
+
+/* ---- 我的績效：時間加權報酬率（TWR）---- */
+let twBuilt = false;
+const US_TWR_KEY = "us_twr_data";
+const twPct = v => `<span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${v.toFixed(2)}%</span>`;
+const twMonth = i => LANG === "en"
+  ? ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][i]
+  : `${i + 1}月`;
+
+function twSave(){
+  if (!twBuilt) return;
+  const d = {year: $("#twYear").value, start: $("#twStart").value, cf:[], ev:[]};
+  for (let i=0;i<12;i++){
+    d.cf[i] = $("#cf"+i).value;
+    d.ev[i] = $("#ev"+i).value;
+  }
+  try { localStorage.setItem(US_TWR_KEY, JSON.stringify(d)); } catch(e){}
+  const saved = $("#twSaved");
+  saved.textContent = LANG === "en" ? "✓ Saved on this device" : "✓ 已自動儲存於本裝置";
+  clearTimeout(window._usTwrSaved);
+  window._usTwrSaved = setTimeout(() => { saved.textContent = ""; }, 2000);
+}
+
+function buildTwTable(){
+  if (twBuilt || !$("#twTable")) return;
+  const table = $("#twTable");
+  for (let i=0;i<12;i++){
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="tw-month" data-month="${i}" style="text-align:left">${twMonth(i)}</td>
+      <td><input id="cf${i}" type="number" step="0.01" placeholder="0" style="width:100px;padding:6px;border:1px solid #ddd;border-radius:6px"></td>
+      <td><input id="ev${i}" type="number" step="0.01" placeholder="—" style="width:110px;padding:6px;border:1px solid #ddd;border-radius:6px"></td>
+      <td id="mr${i}" style="text-align:right">—</td><td id="cr${i}" style="text-align:right">—</td>`;
+    table.appendChild(tr);
+  }
+  twBuilt = true;
+  $("#twYear").value = String(new Date().getFullYear());
+  try {
+    const d = JSON.parse(localStorage.getItem(US_TWR_KEY) || "null");
+    if (d){
+      if (d.year) $("#twYear").value = d.year;
+      if (d.start) $("#twStart").value = d.start;
+      for (let i=0;i<12;i++){
+        if (d.cf && d.cf[i] != null) $("#cf"+i).value = d.cf[i];
+        if (d.ev && d.ev[i] != null) $("#ev"+i).value = d.ev[i];
+      }
+    }
+  } catch(e){}
+  ["twYear","twStart"].forEach(id => $("#"+id).addEventListener("input", twSave));
+  for (let i=0;i<12;i++){
+    $("#cf"+i).addEventListener("input", twSave);
+    $("#ev"+i).addEventListener("input", twSave);
+  }
+  $("#twClear").onclick = () => {
+    const msg = LANG === "en" ? "Clear all saved performance data? This cannot be undone." : "確定清空所有已輸入的績效資料？此動作無法復原。";
+    if (!confirm(msg)) return;
+    try { localStorage.removeItem(US_TWR_KEY); } catch(e){}
+    $("#twYear").value = String(new Date().getFullYear());
+    $("#twStart").value = "";
+    for (let i=0;i<12;i++){
+      $("#cf"+i).value = ""; $("#ev"+i).value = "";
+      $("#mr"+i).textContent = "—"; $("#cr"+i).textContent = "—";
+    }
+    $("#twResult").innerHTML = ""; $("#statusTw").textContent = "";
+    $("#twSaved").textContent = LANG === "en" ? "Cleared" : "已清空";
+  };
+}
+
+if ($("#twCalc")) $("#twCalc").onclick = () => {
+  const start = parseFloat($("#twStart").value);
+  if (!start || start <= 0){
+    $("#statusTw").textContent = LANG === "en" ? "Enter a starting portfolio value first." : "請先填入期初總資產";
+    return;
+  }
+  let beginning = start, product = 1, filled = 0;
+  for (let i=0;i<12;i++){
+    $("#mr"+i).textContent = "—"; $("#cr"+i).textContent = "—";
+    const ending = parseFloat($("#ev"+i).value);
+    if (isNaN(ending)) continue;
+    const cashFlow = parseFloat($("#cf"+i).value) || 0;
+    if (beginning <= 0){
+      $("#statusTw").textContent = LANG === "en" ? `Month ${i+1} has no valid beginning value.` : `第 ${i+1} 月的期初資產為 0，無法計算`;
+      return;
+    }
+    const monthly = (ending - cashFlow) / beginning - 1;
+    product *= 1 + monthly; filled++; beginning = ending;
+    $("#mr"+i).innerHTML = twPct(monthly * 100);
+    $("#cr"+i).innerHTML = twPct((product - 1) * 100);
+  }
+  if (!filled){
+    $("#statusTw").textContent = LANG === "en" ? "Enter at least one month-end portfolio value." : "請至少填入一個月的月底總資產";
+    return;
+  }
+  const cumulative = product - 1;
+  const annualized = Math.pow(1 + cumulative, 12 / filled) - 1;
+  $("#statusTw").textContent = LANG === "en" ? `${filled} month(s) calculated` : `已統計 ${filled} 個月`;
+  const estimated = filled < 12 ? (LANG === "en" ? " (estimated)" : "（依已填月份推估）") : "";
+  $("#twResult").innerHTML = `<div class="card">
+    <div class="baro-row"><span>${LANG === "en" ? "Cumulative TWR" : "累積報酬率（TWR）"}</span><b style="font-size:20px">${twPct(cumulative*100)}</b></div>
+    <div class="baro-row"><span>${LANG === "en" ? "Annualized return" : "年化報酬率"}${estimated}</span><b style="font-size:24px">${twPct(annualized*100)}</b></div>
+    <div style="font-size:12px;color:#888;margin-top:8px;line-height:1.7">${LANG === "en"
+      ? "Monthly return = (ending value − net deposit) ÷ prior ending value − 1. Returns are geometrically linked; annualized results based on fewer than 12 months are estimates."
+      : "每月報酬＝（月底總資產－當月淨存入）÷ 上月底總資產－1；各月以連乘串接。未滿 12 個月的年化數字為推估值。"}</div>
+    </div>`;
+};
+
 /* ---- 依網址開對應分頁 ---- */
 if (START_PAGE && $("#" + START_PAGE)){
   document.querySelectorAll(".page").forEach(p => p.classList.remove("show"));
   $("#" + START_PAGE).classList.add("show");
   document.querySelectorAll(".navitem").forEach(i =>
     i.classList.toggle("active", i.dataset.page === START_PAGE));
+  const activeNav = document.querySelector(`.navitem[data-page="${START_PAGE}"]`);
+  if (activeNav && activeNav.closest("details")) activeNav.closest("details").open = true;
 }
+if (START_PAGE === "p7") buildTwTable();
+applyLang();
 </script>
 </body>
 </html>
@@ -3496,7 +3982,11 @@ def _valid_app_token(tok):
 # 要改網址時設環境變數 TW_URL 即可，不必動程式。
 TW_URL = os.environ.get("TW_URL", "https://stock-coffee.com").strip()
 
-PAGE_ROUTES = {"screener": "p1", "pullback": "p3", "articles": "pm"}
+PAGE_ROUTES = {
+    "screener": "p1", "pullback": "p3", "twr": "p7",
+    "risk": "p8", "alerts": "p4", "articles": "pm",
+    "pro": "p5", "pro/rs": "p9",
+}
 
 # ---------------------------------------------------------------- 文章
 
@@ -4163,6 +4653,36 @@ def api_pullback():
     if params["align"] not in ALIGN_NAMES:
         return jsonify(error="均線排列條件不支援"), 400
     return jsonify(job=start_job(screen_pullback, params))
+
+
+@app.route("/api/pro/new-high", methods=["POST"])
+def api_pro_new_high():
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    p = request.get_json(silent=True) or {}
+    try:
+        days = int(p.get("days") or 1)
+    except (TypeError, ValueError):
+        return jsonify(error="篩選日數格式錯誤"), 400
+    if days not in (1, 3, 5):
+        return jsonify(error="篩選日數只支援近一日、近三日或近五日"), 400
+    return jsonify(job=start_job(screen_pro_new_high, {"days": days}))
+
+
+@app.route("/api/pro/rs", methods=["POST"])
+def api_pro_rs():
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    p = request.get_json(silent=True) or {}
+    try:
+        period, threshold = int(p.get("period") or 60), int(p.get("threshold") or 90)
+    except (TypeError, ValueError):
+        return jsonify(error="RS 參數格式錯誤"), 400
+    if period not in RS_PERIODS:
+        return jsonify(error="RS 期間只支援 20、60、120 或 250 日"), 400
+    if threshold not in (80, 90, 95):
+        return jsonify(error="RS 門檻只支援 80、90 或 95"), 400
+    return jsonify(job=start_job(screen_pro_rs, {"period": period, "threshold": threshold}))
 
 
 @app.route("/api/job/<job_id>")

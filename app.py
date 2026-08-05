@@ -1173,22 +1173,17 @@ PREFETCH_STATE = {"stage": "尚未開始", "done": False}
 # 改用**市場寬度**：多少比例的個股站上自己的 150MA。
 # 概念一樣（「多數人已在場內」vs「籌碼洗乾淨了」），而且**用現有的 hist_ 快取就能算**。
 #
-# ⚠️⚠️ **關鍵差異：融資是慢變數，寬度是快變數。**
-#   台股的「底部」能佔 23%，是因為融資在價格反彈後還低迷好幾個月。
-#   寬度卻跟價格幾乎同步恢復，所以「低寬度＋站上均線」極少同時發生 ——
-#   直接照搬會讓底部只剩 1.4%（回測實測），整個狀態形同虛設。
-#   解法：底部改看**近 60 日的最低寬度**（「這一季內被洗過」），
-#   這個條件會持續好幾個月，行為才跟融資一致。修正後底部回到 10.7%。
-#
-# 10 年回測（2016-08~2026-07，納斯達克綜合指數 + 前 300 大）：
-# ⚠️ 這些數字**刻意不做參數最佳化**（那只會過擬合這 10 年）。
-#    選擇的理由是語意與雜訊，不是「哪組回測最好看」。
+# 2026-08-05 改成三者分工：50MA 看順風／正常回檔，100MA 看真正逆風，
+# 150MA 寬度只看市場是否被充分洗過。10 年納斯達克回測中，跌破 100MA 後
+# 未來 20 日跌逾 10% 的比例約 16.7%，健康趨勢只有約 4.0%；首次回測 50MA
+# 與均線糾結則沒有穩定的看空預測力，所以不能直接標成逆風或崩盤警訊。
 
 BREADTH_MA = 150            # 個股用幾日均線算寬度
 BREADTH_TOP = 85.0          # 當下寬度 ≥ 這個 → 頂部區（≈ P90）
 BREADTH_WASH = 30.0         # 近 N 日最低寬度 ≤ 這個 → 洗過盤（≈ P7）
 WASH_LOOKBACK = 90          # 「最近」是幾個交易日（≈ 半年的交易日數的一半，見下）
-PHASE_MA = 150              # 指數用幾日均線定方向
+PHASE_FAST_MA = 50          # 指數短中期趨勢：相當於台股季線
+PHASE_SLOW_MA = 100         # 指數中期風險線：跌破才視為真正逆風
 PHASE_STICKY = 3            # 連續幾天成立才切換狀態
 
 # 首頁折線圖保留 5 年（約 1,260 個交易日）。日常 `hist_` 仍只留 780 天；
@@ -1197,43 +1192,9 @@ PHASE_STICKY = 3            # 連續幾天成立才切換狀態
 BREADTH_KEEP = 5 * 252
 BREADTH_SEED_FILE = os.path.join(BASE_DIR, "breadth_5y_seed.json")
 
-# ---- 2026-08-04：PHASE_MA 從 50 改成 150、WASH_LOOKBACK 從 60 改成 90 ----
-#
-# 用**線上真正在跑的規則**（含洗盤回看與黏著）跑 10 年、只換均線的對照：
-#
-#            上升段   高點警訊  下跌段   底部    一年切換
-#   50MA     50.0%   10.7%   28.6%  10.7%   8.7 次
-#   100MA    56.3%   11.0%   25.1%   7.6%   5.3 次
-#   150MA    61.5%   11.4%   20.2%   6.9%   4.3 次   ← 回看仍是 60 日
-#
-# ⚠️ **50MA 一年切換 8.7 次太吵。** 它的 21 段「下跌段」裡有一堆 10~14 天的短段
-#    （2021-03、2021-05、2019-09-30…），那不是趨勢轉折，是雜訊。
-#    150MA 只剩 6 段，而**真實事件一段都沒漏**：
-#    2018Q4、2020 COVID、2022 熊市（兩段共 254 天）、2025 關稅、2026-02。
-#
-# ⚠️⚠️ **改長均線會讓「底部」萎縮，這是機制性的，不是巧合。**
-#    底部 = 「近 N 日被洗過」**且**「站回均線」。
-#    均線愈長，價格站回來愈慢，等站回時那次洗盤早就掉出回看視窗了。
-#    150MA + 回看 60 日 → 底部只剩 6.9%，2022 全年熊市**只給 5 天**。
-#    這正是台股移植過來時踩過的同一個坑（見 USSTOCK 變更紀錄）。
-#    **所以回看期必須跟著均線一起調，不能只改一個。**
-#
-# ⚠️ 掃過回看期（150MA 固定）：60 日→6.9%、90 日→12.0%、120 日→17.0%、250 日→32.6%。
-#    選 90 日的理由是**語意**：「這一季到半年內被洗過」。
-#    ⚠️ 但要知道：**2022 那段怎麼調都是 5 天** —— 因為 2022 全年指數根本沒有
-#    真正站回 150MA，8 月那次是熊市反彈。回看 ≥90 日之後 2023-01-30 才出現底部，
-#    **那才是真正的轉折**。這是這個指標「答對了」，不是漏抓。
-#
-# 【最終組態的 10 年回測】2017-05-19 ~ 2026-07-31，2312 個交易日
-#   上升段 56.4%／高點警訊 11.4%／下跌段 20.2%／底部 12.0%
-#   切換 39 次（每年 4.3 次）
-#   底部出現在：2019-02~05（2018Q4 急殺後）、2020-04~09（COVID 後）、
-#              2023-01~03（熊市真正打底）、2025-05~08（關稅急殺後）
-#
-# ⚠️ **存活者偏誤**：股票池是「今天」的前 300 大，回測早期年份會高估寬度。
-#    門檻請偏保守解讀。
-#
-# 重跑方式：`回測均線比較.command`（不連網，只讀 cache/backtest/）
+# 洗盤記憶維持近 90 日最低寬度 ≤30%。收復 50MA 是初步復甦，收復 100MA
+# 是復甦確認；三日黏著消除單日假突破。歷史寬度以今日前 300 大回算，仍有
+# 存活者偏誤，門檻只應保守解讀。
 
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
 
@@ -1601,31 +1562,43 @@ def _home_screen_html():
 
 
 PHASE_UI = {
-    "bull_up":   {"dot": "🟢", "zh": "順風・上升段", "en": "Tailwind · Uptrend",
-                  "zh_do": "順勢操作，讓獲利跑",
-                  "en_do": "Ride the trend, let winners run"},
-    "bull_top":  {"dot": "🟠", "zh": "順風・高點警訊", "en": "Tailwind · Near a Top",
-                  "zh_do": "多數股票都在高檔，開始想賣點",
-                  "en_do": "Most stocks extended — think about exits"},
-    "bear_down": {"dot": "🔴", "zh": "逆風・下跌段", "en": "Headwind · Declining",
-                  "zh_do": "守紀律，不攤平",
-                  "en_do": "Stay disciplined, never average down"},
-    "bear_low":  {"dot": "🔵", "zh": "逆風・底部", "en": "Headwind · Basing",
-                  "zh_do": "剛被洗過，可以開始留意",
-                  "en_do": "Washed out — start watching"},
+    "tailwind": {"dot": "🟢", "zh": "順風趨勢", "en": "Tailwind",
+                 "zh_do": "趨勢完整，順勢尋找主流股",
+                 "en_do": "Trend intact — focus on market leaders"},
+    "pullback": {"dot": "🟡", "zh": "多頭回檔", "en": "Bull-market Pullback",
+                 "zh_do": "中期趨勢未破壞，降低追價",
+                 "en_do": "The medium-term trend is intact — avoid chasing"},
+    "transition": {"dot": "🟠", "zh": "方向整理", "en": "Trend Transition",
+                   "zh_do": "多週期方向衝突，等待確認",
+                   "en_do": "Timeframes conflict — wait for confirmation"},
+    "riskoff": {"dot": "🔴", "zh": "逆風市場", "en": "Headwind",
+                "zh_do": "中期風險升高，控制部位",
+                "en_do": "Medium-term risk is elevated — control exposure"},
+    "recovery_early": {"dot": "🔵", "zh": "初步復甦", "en": "Early Recovery",
+                       "zh_do": "市場洗過並收復 50MA，開始觀察",
+                       "en_do": "Washed out and above 50MA — start watching"},
+    "recovery_confirmed": {"dot": "🔵", "zh": "復甦確認", "en": "Recovery Confirmed",
+                           "zh_do": "市場洗過並收復 100MA，中期改善",
+                           "en_do": "Washed out and above 100MA — trend improving"},
 }
 
 
-def _phase_raw(close, ma, breadth, wash_min):
-    """單日的市場階段。**寬度定位置，指數 vs 150MA 定方向。**"""
-    if close is None or ma is None or breadth is None:
+def _phase_raw(close, ma50, ma100, breadth, wash_min):
+    """單日市場狀態：50MA 看順風、100MA 看逆風、150MA 寬度看洗盤。"""
+    if close is None or ma50 is None or ma100 is None or breadth is None:
         return None
-    above = close > ma
-    if breadth >= BREADTH_TOP:
-        return "bull_top" if above else "bear_down"
-    if wash_min is not None and wash_min <= BREADTH_WASH:
-        return "bear_low" if above else "bear_down"
-    return "bull_up" if above else "bear_down"
+    washed = wash_min is not None and wash_min <= BREADTH_WASH
+    if washed and close > ma100:
+        return "recovery_confirmed"
+    if washed and close > ma50:
+        return "recovery_early"
+    if close > ma50 and ma50 > ma100:
+        return "tailwind"
+    if ma50 > ma100 and ma100 < close <= ma50:
+        return "pullback"
+    if close < ma100:
+        return "riskoff"
+    return "transition"
 
 
 def _phase_sticky(seq, n=PHASE_STICKY):
@@ -1740,33 +1713,37 @@ def _phase_compute():
         bd = sorted(br)
         ids = sorted(idx)
         px = [idx[d] for d in ids]
-        ma, run = {}, 0.0
-        for i, d in enumerate(ids):
-            run += px[i]
-            if i >= PHASE_MA:
-                run -= px[i - PHASE_MA]
-            if i >= PHASE_MA - 1:
-                ma[d] = run / PHASE_MA
-        st.append("指數 %dMA 可算 %d 天（~%s）"
-                  % (PHASE_MA, len(ma), max(ma) if ma else "—"))
+        mas = {}
+        for n in (PHASE_FAST_MA, PHASE_SLOW_MA):
+            out, run = {}, 0.0
+            for i, d in enumerate(ids):
+                run += px[i]
+                if i >= n:
+                    run -= px[i - n]
+                if i >= n - 1:
+                    out[d] = run / n
+            mas[n] = out
+        ma50, ma100 = mas[PHASE_FAST_MA], mas[PHASE_SLOW_MA]
+        st.append("指數 %dMA／%dMA 可算 %d／%d 天"
+                  % (PHASE_FAST_MA, PHASE_SLOW_MA, len(ma50), len(ma100)))
         recent = bd[-30:]
-        hit = [d for d in recent if d in ma]
+        hit = [d for d in recent if d in ma50 and d in ma100]
         st.append("breadth 最近 30 天有 %d 天對得上指數日期" % len(hit))
         if not hit:
             # ⚠️ 兩邊日期完全沒交集：通常是指數來源的交易日曆或格式不同
             _PHASE_WHY.update(
-                # ⚠️ 均線天數要帶常數，不要寫死 —— 改 PHASE_MA 時這行差點沒跟著改。
-                why="日期對不上：breadth 最新 %s，指數 %dMA 最新 %s"
-                    % (max(bd), PHASE_MA, max(ma) if ma else "—"), steps=st)
+                # ⚠️ 均線天數都要帶常數，避免畫面與實際計算口徑不同。
+                why="日期對不上：breadth 最新 %s，指數均線最新 %s"
+                    % (max(bd), max(ma100) if ma100 else "—"), steps=st)
             return "unknown", "", "", None
         seq = []
         bpos = {d: i for i, d in enumerate(bd)}
         for d in recent:
-            if d not in ma:
+            if d not in ma50 or d not in ma100:
                 continue
             i = bpos[d]
             window = [br[x] for x in bd[max(0, i - WASH_LOOKBACK + 1):i + 1]]
-            p = _phase_raw(idx.get(d), ma.get(d), br[d],
+            p = _phase_raw(idx.get(d), ma50.get(d), ma100.get(d), br[d],
                            min(window) if window else None)
             if p:
                 seq.append(p)
@@ -3399,10 +3376,7 @@ function breadthHtml(j){
   let idxHtml = "";
   if (j.idx){
     const q = j.idx;
-    const dir = q.above
-      ? (LANG === "en" ? "above" : "站上")
-      : (LANG === "en" ? "below" : "跌破");
-    const col = q.above ? "#CB4B3A" : "#4A7C64";
+    const col = q.close > q.ma100 ? "#CB4B3A" : "#4A7C64";
     idxHtml =
       `<div style="font-size:12.5px;color:var(--mocha);margin:2px 0 6px">`
       + (LANG === "en" ? "Nasdaq Composite" : "納斯達克綜合指數")
@@ -3410,8 +3384,9 @@ function breadthHtml(j){
       + `<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px">`
       + `<b style="font-family:var(--font-num);font-size:24px;color:var(--espresso)">`
       + q.close.toLocaleString() + `</b>`
-      + `<span style="font-size:12.5px;color:${col}">${dir} ${j.phase_ma}MA `
-      + `(${q.ma.toLocaleString()}, ${q.gap > 0 ? "+" : ""}${q.gap}%)</span></div>`;
+      + `<span style="font-size:12.5px;color:${col}">50MA ${q.ma50.toLocaleString()}`
+      + ` (${q.gap50 > 0 ? "+" : ""}${q.gap50}%) · 100MA ${q.ma100.toLocaleString()}`
+      + ` (${q.gap100 > 0 ? "+" : ""}${q.gap100}%)</span></div>`;
   }
 
   /* ⚠️ 分位數要一起顯示。單看「72%」不知道那是高是低。
@@ -3431,19 +3406,18 @@ function breadthHtml(j){
   const note = (LANG === "en")
     ? `<p style="font-size:12px;color:var(--mocha);line-height:1.8;margin:10px 0 0">
        The red line is the <b>top threshold (${j.top}%)</b>; the green line is the
-       <b>washout threshold (${j.wash}%)</b>. Breadth sets <b>where</b> the market is
-       in its cycle; the index versus its ${j.phase_ma}-day average sets
-       <b>which way</b> it is going. "Basing" needs a washout within the last
-       ${j.wash_look} trading days <b>and</b> the index back above its average.<br>
+       <b>washout threshold (${j.wash}%)</b>. The index versus 50MA identifies a
+       healthy trend or normal pullback; a break below 100MA marks a headwind.
+       Breadth uses 150MA mainly to identify whether the market was washed out.<br>
        Percentiles above cover the ${j.span_years} years shown here; the
        ${j.top}%/${j.wash}% thresholds were set from a 10-year backtest.<br>
        Historical breadth is recalculated using today's constituents, so earlier
        values may be biased upward (survivorship bias).</p>`
     : `<p style="font-size:12px;color:var(--mocha);line-height:1.8;margin:10px 0 0">
        紅線是<b>頂部門檻 ${j.top}%</b>，綠線是<b>洗盤門檻 ${j.wash}%</b>。
-       寬度決定<b>市場走到循環的哪個位置</b>，指數與 ${j.phase_ma} 日均線決定<b>往哪走</b>。
-       「底部」需要<b>近 ${j.wash_look} 個交易日內被洗過</b>，
-       <b>而且</b>指數已經站回均線 —— 兩個條件缺一不可。<br>
+       指數與 50MA 判斷順風或正常回檔，跌破 100MA 才進入逆風；
+       150MA 寬度主要判斷市場是否曾被充分洗盤。近 ${j.wash_look} 日洗過後，
+       收復 50MA 是初步復甦，收復 100MA 是復甦確認。<br>
        ⚠️ 上面的分位數只涵蓋圖上這 ${j.span_years} 年；
        ${j.top}%／${j.wash}% 的門檻是用 10 年回測訂的，兩者母體不同。<br>
        歷史寬度以今日成分股回算，較早數值可能因存活者偏誤而偏高。</p>`;
@@ -3721,6 +3695,22 @@ def _phase_banner_html():
     if not ui:
         return ""
     b = ("%.0f%%" % breadth) if breadth is not None else "—"
+    zh_rule = {
+        "tailwind": "指數站上 50MA，且 50MA 在 100MA 之上",
+        "pullback": "指數跌回 50MA 下方，但仍守在 100MA 之上",
+        "transition": "指數仍在 100MA 之上，但 50MA／100MA 方向互相衝突",
+        "riskoff": "指數跌破 100MA",
+        "recovery_early": "近 90 日市場曾洗盤，指數已收復 50MA、尚未收復 100MA",
+        "recovery_confirmed": "近 90 日市場曾洗盤，指數已收復 100MA",
+    }.get(phase, "")
+    en_rule = {
+        "tailwind": "the index is above 50MA and 50MA is above 100MA",
+        "pullback": "the index is below 50MA but still above 100MA",
+        "transition": "the index is above 100MA while the 50MA/100MA signals conflict",
+        "riskoff": "the index is below 100MA",
+        "recovery_early": "the market washed out within 90 days and the index reclaimed 50MA",
+        "recovery_confirmed": "the market washed out within 90 days and the index reclaimed 100MA",
+    }.get(phase, "")
     return (
         '<details class="mk-box">'
         '<summary>'
@@ -3735,22 +3725,18 @@ def _phase_banner_html():
         '<span class="mk-num">' + _h.escape(date) + '</span>'
         '</summary>'
         '<div class="mk-body">'
-        # ⚠️ 均線天數一律從常數帶入，不要寫死數字。
-        #    2026-08-04 PHASE_MA 從 50 改成 150 時，這裡的 "50 日均線" 差點沒跟著改，
-        #    那會變成「畫面說 50、實際算 150」—— 比沒有這句話更糟。
-        '<span class="q-zh">目前 <b>' + b + '</b> 的成分股站在自己的 '
-        + str(BREADTH_MA) + ' 日均線之上，'
-        '納斯達克綜合指數在 ' + str(PHASE_MA) + ' 日均線'
-        + ('<b>之上</b>' if phase.startswith("bull") else '<b>之下</b>') + '。<br><br>'
-        '寬度告訴你<b>市場走到循環的哪個位置</b>，指數與均線告訴你<b>現在往哪走</b>。'
+        '<span class="q-zh">依連續三日確認，目前維持<b>' + _h.escape(ui["zh"])
+        + '</b>；這個狀態的判定條件是：' + _h.escape(zh_rule) + '。目前另有 <b>' + b
+        + '</b> 的成分股站在自己的 ' + str(BREADTH_MA) + ' 日均線之上。<br><br>'
+        '<b>50MA</b> 看順風與正常回檔，<b>100MA</b> 看是否進入逆風，'
+        '<b>150MA 市場寬度</b>主要判斷市場是否曾被充分洗盤。'
         '這不預測行情，只描述環境。</span>'
-        '<span class="q-en" style="display:none"><b>' + b + '</b> of constituents are '
-        'above their own ' + str(BREADTH_MA) + '-day average, '
-        'and the Nasdaq Composite is '
-        + ('<b>above</b>' if phase.startswith("bull") else '<b>below</b>')
-        + ' its ' + str(PHASE_MA) + '-day average.<br><br>'
-        'Breadth tells you <b>where the market sits in the cycle</b>; '
-        'the index versus its average tells you <b>which way it is going</b>. '
+        '<span class="q-en" style="display:none">After three-day confirmation, the market '
+        'remains <b>' + _h.escape(ui["en"]) + '</b>; this state is defined when '
+        + _h.escape(en_rule) + '. <b>' + b + '</b> of constituents are above their own '
+        + str(BREADTH_MA) + '-day average.<br><br>'
+        '<b>50MA</b> identifies tailwinds and normal pullbacks, <b>100MA</b> marks '
+        'headwinds, and <b>150MA breadth</b> mainly identifies washouts. '
         'This describes the environment — it does not predict it.</span>'
         '</div></details>')
 
@@ -3799,8 +3785,8 @@ def api_breadth():
     cur = br[days[-1]]
     look = days[-WASH_LOOKBACK:]
 
-    # 納斯達克綜合指數的收盤價與均線。
-    # ⚠️ 一樣**只讀快取**。算 PHASE_MA 均線只是對一串數字做滑動和，很便宜，
+    # 納斯達克綜合指數的收盤價與 50MA／100MA。
+    # ⚠️ 一樣**只讀快取**。算兩條均線只是對一串數字做滑動和，很便宜，
     #    但指數本身絕不在這裡連網補抓 —— 那是預抓流程的事。
     # ⚠️ 指數與寬度**日期未必對齊**（FRED 常慢一個交易日），
     #    所以回傳指數自己的日期，前端要照實顯示，不要沿用寬度的日期。
@@ -3808,15 +3794,14 @@ def api_breadth():
     try:
         idx = _load_cache("nasdaq_index.json", 24 * 365) or {}
         ids = sorted(idx)
-        if len(ids) >= PHASE_MA:
-            px = [idx[d] for d in ids]
-            run = sum(px[-PHASE_MA:])
-            ma_v = run / PHASE_MA
+        if len(ids) >= PHASE_SLOW_MA:
             d = ids[-1]
+            ma50 = sum(idx[x] for x in ids[-PHASE_FAST_MA:]) / PHASE_FAST_MA
+            ma100 = sum(idx[x] for x in ids[-PHASE_SLOW_MA:]) / PHASE_SLOW_MA
             idx_out = {"date": d, "close": round(idx[d], 2),
-                       "ma": round(ma_v, 2),
-                       "above": idx[d] > ma_v,
-                       "gap": round((idx[d] - ma_v) / ma_v * 100, 2)}
+                       "ma50": round(ma50, 2), "ma100": round(ma100, 2),
+                       "gap50": round((idx[d] - ma50) / ma50 * 100, 2),
+                       "gap100": round((idx[d] - ma100) / ma100 * 100, 2)}
     except Exception:
         idx_out = None            # ⚠️ 指數讀不到不能影響寬度那半邊
 
@@ -3828,7 +3813,8 @@ def api_breadth():
         wash_min=round(min(br[d] for d in look), 1),
         wash_look=WASH_LOOKBACK,
         top=BREADTH_TOP, wash=BREADTH_WASH,
-        breadth_ma=BREADTH_MA, phase_ma=PHASE_MA,
+        breadth_ma=BREADTH_MA,
+        phase_fast_ma=PHASE_FAST_MA, phase_slow_ma=PHASE_SLOW_MA,
         span_days=len(days), span_years=round(len(days) / 252.0, 1),
         p={str(p): round(vals[max(0, min(len(vals) - 1, int(len(vals) * p / 100)))], 1)
            for p in (10, 25, 50, 75, 90)},
@@ -3922,8 +3908,8 @@ def api_diag():
         w("  判定過程        : %s" % _PHASE_WHY["why"])
         for _st in _PHASE_WHY["steps"]:
             w("     · %s" % _st)
-        w("  門檻            : 頂部≥%.0f%%　洗盤≤%.0f%%（近 %d 日最低）　方向 %dMA　黏著 %d 天"
-          % (BREADTH_TOP, BREADTH_WASH, WASH_LOOKBACK, PHASE_MA, PHASE_STICKY))
+        w("  規則            : 50MA 看順風　100MA 看逆風　寬度≤%.0f%%（近 %d 日）看洗盤　黏著 %d 天"
+          % (BREADTH_WASH, WASH_LOOKBACK, PHASE_STICKY))
     except Exception as e:
         w("  ❌ %s: %s" % (type(e).__name__, str(e)[:80]))
 

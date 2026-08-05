@@ -4696,13 +4696,18 @@ def api_job(job_id):
 @app.route("/api/prefetch-status")
 def api_prefetch_status():
     st = dict(PREFETCH_STATE)
+    # 執行緒物件只供同一 process 的診斷，不能交給 jsonify；背景預抓啟動後若
+    # 直接序列化會讓正式站這支端點固定回 500。
+    st.pop("thread_obj", None)
     st["source"] = dict(LAST_SOURCE)
     # cache_dir 用來確認 Render 的持久化磁碟有沒有掛上 ——
     # 若顯示的是專案目錄而不是磁碟路徑，代表 CACHE_DIR 沒設，
     # 快取會在每次部署後消失，等於每次都要重新預抓 6 分鐘。
     st["cache_dir"] = CACHE_DIR
     st["disk_mounted"] = "/opt/render" in CACHE_DIR
-    st["schedule"] = dict(SCHED_STATE)
+    schedule = dict(SCHED_STATE)
+    schedule.pop("thread_obj", None)
+    st["schedule"] = schedule
     try:
         files = os.listdir(CACHE_DIR)
         st["cached_symbols"] = len([f for f in files if f.startswith("hist_")])

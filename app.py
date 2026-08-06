@@ -61,9 +61,17 @@ MA_NAMES = {10: "10-day", 20: "20-day", 50: "50-day", 150: "150-day"}
 MA_NAMES_ZH = {10: "10日線", 20: "20日線", 50: "50日線", 150: "150日線"}
 
 # 要保留幾個交易日的歷史。
-# 3 年 ≈ 756 個交易日 —— 支援到「3 年新高」，也涵蓋所有均線需求。
+# 5 年 ≈ 1,260 個交易日 —— 支援到「5 年新高」，也涵蓋所有均線與 RS 需求。
+#
 # ⚠️ 加大這個值只影響「第一次抓取」；之後每天只補新的交易日（見 get_history）。
-HIST_DAYS = 780
+#    但**改這個常數會讓現有快取全部被判定為「太短」而整段重抓** ——
+#    300 檔約 6 分鐘。這是一次性的，不是每天都會發生。
+#
+# ⚠️⚠️ **改這個值時，`NH_TIERS` 的最長級距必須跟著檢查。**
+#    級距比 HIST_DAYS 長的話，`new_high_label()` 會因為 `len(closes) < n` 永遠跳過它，
+#    結果是**那一級靜悄悄地永遠不會出現** —— 不會報錯，只是不見了。
+#    2026-08-06 從 780（3 年）拉到 1260（5 年）就是為了讓「5 年新高」真的算得出來。
+HIST_DAYS = 1260
 
 
 # ---------------------------------------------------------------- 中文對照
@@ -297,8 +305,10 @@ def get_universe(n=500):
 # ---------------------------------------------------------------- 來源二：日線收盤
 
 STOOQ = "https://stooq.com/q/d/l/?s={sym}.us&i=d"
+# ⚠️ range 要 >= HIST_DAYS 換算的年數，否則備援回來的資料永遠達不到滿額，
+#    「5 年新高」那一級就會在走備援的那幾檔上安靜地消失。
 YAHOO = ("https://query{n}.finance.yahoo.com/v8/finance/chart/{sym}"
-         "?range=2y&interval=1d")
+         "?range=5y&interval=1d")
 
 # 最近一次成功的來源，供 /api/prefetch-status 顯示
 LAST_SOURCE = {"name": None, "fails": 0, "incremental": False}
@@ -315,7 +325,7 @@ def _hist_nasdaq(symbol, frm_date=None):
     回傳格式：data.tradesTable.rows[]，日期是 MM/DD/YYYY、價格帶 $ 與逗號，
     且**由新到舊**排列，這裡會轉成由舊到新。
 
-    frm_date（"YYYY-MM-DD"）只抓該日之後 —— 增量更新用，避免每天重抓三年份。
+    frm_date（"YYYY-MM-DD"）只抓該日之後 —— 增量更新用，避免每天重抓五年份。
     """
     to = _utcnow()
     if frm_date:
@@ -484,15 +494,16 @@ def get_history(symbol, max_age_hours=12, debug=False):
 def _get_history_now(symbol, key, debug=False):
     """實際去抓。**已經有的歷史不重抓，只補新的交易日。**
 
-    這是把歷史從 1 年拉長到 3 年之後的關鍵優化：
-    一次抓 3 年約 85 KB，300 檔就是 26 MB —— 每天全部重抓很浪費，
+    這是把歷史拉長（1 年 → 3 年 → 2026-08-06 起 5 年）之後的關鍵優化：
+    一次抓 5 年約 140 KB，300 檔就是 40 MB —— 每天全部重抓很浪費，
     而且會讓每日更新的時間跟第一次一樣久。
+    ⚠️ 那 40 MB 是**下載量**，不是存下來的大小；快取只留 [日期, 收盤價]。
 
     做法：
       1. 讀出快取（**不管多舊**，`max_age_hours=None`）
       2. 若舊資料的起點夠早（涵蓋 HIST_DAYS 所需區間），只抓「最後一天之後」的資料
       3. 合併、去重（以日期為鍵，新的覆蓋舊的）、排序、裁到 HIST_DAYS
-      4. 若舊資料太短（例如剛把 HIST_DAYS 從 320 調到 780），就整段重抓
+      4. 若舊資料太短（例如剛把 HIST_DAYS 從 780 調到 1260），就整段重抓
 
     只有 Nasdaq 支援指定起始日；備援來源一律整段抓。
     """
@@ -899,11 +910,15 @@ def _ma_series(closes, period, back):
 # 理由（見台股版文章 040）：貼近前高但差一點點，意義跟剛好突破幾乎相同，
 # 硬要「嚴格超越」會漏掉一堆正在測試前高的股票。
 NH_TOL = 0.02
-NH_TIERS = [("3y", 756, "3年新高"), ("2y", 504, "2年新高"), ("1y", 252, "1年新高"),
-            ("6m", 126, "半年新高"), ("3m", 63, "3個月新高")]
-NH_LABEL = {"3y": "3年新高", "2y": "2年新高", "1y": "1年新高",
+# ⚠️ 最長級距（1260）必須 <= HIST_DAYS，否則那一級永遠算不出來（見 HIST_DAYS 的註解）。
+# ⚠️ **沒有「歷史新高」這一級，而且不該加。** 手上只有 5 年資料，
+#    標成「歷史新高」等於宣稱一件我們沒有證據的事 —— 股價完全可能 6 年前更高。
+#    台股版有這一級，是因為它有 6 年的 FinMind 資料。兩邊不要互相類比。
+NH_TIERS = [("5y", 1260, "5年新高"), ("3y", 756, "3年新高"), ("2y", 504, "2年新高"),
+            ("1y", 252, "1年新高"), ("6m", 126, "半年新高"), ("3m", 63, "3個月新高")]
+NH_LABEL = {"5y": "5年新高", "3y": "3年新高", "2y": "2年新高", "1y": "1年新高",
             "6m": "半年新高", "3m": "3個月新高", "": "—"}
-NH_ORDER = ["3y", "2y", "1y", "6m", "3m"]
+NH_ORDER = ["5y", "3y", "2y", "1y", "6m", "3m"]
 
 
 def new_high_label(closes):
@@ -1309,7 +1324,9 @@ PHASE_FAST_MA = 50          # 指數短中期趨勢：相當於台股季線
 PHASE_SLOW_MA = 100         # 指數中期風險線：跌破才視為真正逆風
 PHASE_STICKY = 3            # 連續幾天成立才切換狀態
 
-# 首頁折線圖保留 5 年（約 1,260 個交易日）。日常 `hist_` 仍只留 780 天；
+# 首頁折線圖保留 5 年（約 1,260 個交易日），與 `HIST_DAYS` 現在同長。
+# ⚠️ 種子檔仍然要留著：新上市股票與剛加入股票池的個股不會有完整 5 年，
+#    而且種子是「當時的成分股」算出來的，不是今天回算的。
 # 較早的區段由隨程式部署的彙總種子檔提供，之後每日預抓用現行資料覆蓋／追加。
 # ⚠️ 種子檔只有每天一個百分比，不會把 300 檔長歷史帶進正式環境。
 BREADTH_KEEP = 5 * 252
@@ -1539,7 +1556,7 @@ def build_breadth():
             with open(BREADTH_SEED_FILE, "r", encoding="utf-8") as f:
                 seed = json.load(f) or {}
         except Exception:
-            pass                 # 種子缺失時安全降級成現有約 2.3 年
+            pass                 # 種子缺失時安全降級成現有 hist_ 能算出的長度
         seed.update(out)
         keep = dict(sorted(seed.items())[-BREADTH_KEEP:])
         _save_cache("breadth.json", keep)
@@ -1919,7 +1936,7 @@ def prefetch(universe_n=300, force=False):
         PREFETCH_STATE["stage"] = "讀取股價資料 %d / %d" % (i, total)
     syms = [u["symbol"] for u in uni]
     histories = load_histories(syms, status_cb=cb, force=force)
-    # RS 最長需要 251 個收盤；hist 本來就保留 780 日。這裡一次算好四種
+    # RS 最長需要 251 個收盤；hist 本來就保留 1,260 日。這裡一次算好四種
     # 百分位並寫快取，使用者開 RS 頁時不必再掃 300 檔 × 250 日。
     PREFETCH_STATE["stage"] = "計算 RS 排名"
     try:
@@ -2154,8 +2171,7 @@ PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>美股咖啡館 US Stock Coffee｜美股選股工具・均線篩選</title>
-<meta name="description" content="免費美股選股工具。用 10/20/50/150 日均線與均線排列篩選市值前 300 大美股，找出強勢股與轉弱股。免註冊、開啟即用。">
+__SEO_HEAD__
 <meta name="theme-color" content="#33241A">
 <link rel="icon" href="/icon.png?v=2" type="image/png" sizes="any">
 <link rel="shortcut icon" href="/icon.png?v=2" type="image/png">
@@ -2701,7 +2717,7 @@ PAGE = r"""<!DOCTYPE html>
 
 <nav id="sidebar">
   <div class="sbTitle">☕ <span data-i18n="brand.name">美股咖啡館</span></div>
-  <a class="navitem active" data-page="home" href="/"><i>☕</i><b data-i18n="nav.home">菜單首頁</b><small>US Stock Coffee</small></a>
+  <a class="navitem active" data-page="home" href="/"><i>☕</i><b data-i18n="nav.home">菜單首頁</b><small data-i18n="nav.home.sub">今天適合出手嗎</small></a>
   <details class="navgroup">
     <summary><i>📋</i><b data-i18n="nav.group">選股菜單</b><small data-i18n="nav.group.sub">強勢股・拉回買點・績效</small></summary>
     <a class="navitem sub" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
@@ -2999,7 +3015,7 @@ __HOME_SCREEN__
       <span class="badge" data-i18n="pro.beta">功能試作</span>
     </div>
     <div style="font-size:14px;color:#666;line-height:1.8;margin-bottom:14px" data-i18n-html="pro.nhBody">
-      從市值前 300 大美股中，找出最近指定期間任一天符合<b>3 個月、半年、1 年、2 年或3 年新高</b>的股票。創新高採 2% 容差，避免只差一點就漏掉正在測試前高的股票。
+      從市值前 300 大美股中，找出最近指定期間任一天符合<b>3 個月、半年、1 年、2 年、3 年或 5 年新高</b>的股票。創新高採 2% 容差，避免只差一點就漏掉正在測試前高的股票。
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px">
       <label class="opt" style="margin:0"><input type="radio" name="proHighDays" value="1" checked><span data-i18n="pro.nh1">近一日</span></label>
@@ -3064,13 +3080,24 @@ const START_PAGE = "__START_PAGE__";
    data-i18n-html → 換 innerHTML（保留 <b>/<p> 格式）
    JS 產生的字串   → 用 t(key, 中文預設)
    公司名稱與產業則由後端提供中英兩份，用 coName()/coSector() 挑。 */
-let LANG = localStorage.getItem("us_lang") || "zh";
+/* ⚠️ 網址上的 ?lang=en 優先於 localStorage。
+   伺服器是照 ?lang=en 決定 <title>／canonical 的，前端若還照舊值渲染，
+   就會變成「head 說英文、內文是中文」—— 這種不一致 Google 看得到，使用者也看得到。
+   分享出去的英文連結也必須真的開出英文畫面。 */
+const _urlLang = new URLSearchParams(location.search).get("lang");
+let LANG = (_urlLang === "en") ? "en"
+         : (_urlLang === "zh") ? "zh"
+         : (localStorage.getItem("us_lang") || "zh");
+if (_urlLang === "en" || _urlLang === "zh") localStorage.setItem("us_lang", LANG);
+/* 每頁的 title 由伺服器帶進來（兩種語言各一份），切語言時才不會被站名蓋掉。 */
+const TITLE_ZH = "__TITLE_ZH__", TITLE_EN = "__TITLE_EN__";
 
 const I18N = { en: {
   "ui.menu": "Menu",
   "brew.title": "Brewing, please wait", "brew.wait": "Getting ready…",
   "brand.name": "US Stock Coffee",
-  "nav.home": "Menu", "nav.group": "Stock Screeners",
+  "nav.home": "Menu", "nav.home.sub": "Is today a good day to act?",
+  "nav.group": "Stock Screeners",
   "nav.group.sub": "Leaders · Pullbacks · Performance",
   "nav.screen.sub": "Find leading stocks",
   "nav.pull.sub": "Close back within ±3% of an MA",
@@ -3125,7 +3152,7 @@ const I18N = { en: {
   "alert.preparingNote": "Alerts will check official US closing prices against your targets and notify this device. The feature will open after push keys, subscription storage and the US close schedule are ready.",
   "p5.title": "Pro｜New Highs", "p9.title": "Pro｜RS Ranking",
   "pro.beta": "Beta", "pro.nhTitle": "New-high stock screener",
-  "pro.nhBody": "Find top-300 US stocks that reached a <b>3-month, 6-month, 1-year, 2-year or 3-year high</b> on any day in the selected window. A 2% tolerance avoids missing stocks that are effectively retesting a prior high.",
+  "pro.nhBody": "Find top-300 US stocks that reached a <b>3-month, 6-month, 1-year, 2-year, 3-year or 5-year high</b> on any day in the selected window. A 2% tolerance avoids missing stocks that are effectively retesting a prior high.",
   "pro.nh1": "Last day", "pro.nh3": "Last 3 days", "pro.nh5": "Last 5 days",
   "pro.nhBtn": "Screen new highs",
   "rs.title": "RS relative-strength ranking",
@@ -3184,8 +3211,8 @@ const I18N = { en: {
   "flt.eps": "Q EPS YoY", "flt.align": "MA alignment", "flt.nh": "New high",
   "flt.any": "Any", "flt.hasNH": "Made a new high",
   "yoy.neg": "Negative", "yoy.lo": "0–20%", "yoy.mid": "20–50%", "yoy.hi": "Over 50%",
-  "nh.3y": "3-year high", "nh.2y": "2-year high", "nh.1y": "1-year high",
-  "nh.6m": "6-month high", "nh.3m": "3-month high",
+  "nh.5y": "5-year high", "nh.3y": "3-year high", "nh.2y": "2-year high",
+  "nh.1y": "1-year high", "nh.6m": "6-month high", "nh.3m": "3-month high",
   "al.strict_bull": "Strict bullish", "al.loose_bull": "Loose bullish",
   "al.squeeze": "MA squeeze", "al.loose_bear": "Loose bearish",
   "al.strict_bear": "Strict bearish", "al.none": "Unordered"
@@ -3221,9 +3248,13 @@ function applyLang(){
     el.style.display = (LANG === "en") ? "" : "none";
   });
   document.documentElement.lang = (LANG === "zh") ? "zh-Hant-TW" : "en";
-  document.title = (LANG === "zh")
-    ? "美股咖啡館 US Stock Coffee｜美股選股工具・均線篩選"
-    : "US Stock Coffee｜US Stock Screener · Moving-Average Filter";
+  document.title = (LANG === "zh") ? TITLE_ZH : TITLE_EN;
+  /* canonical 跟著語言走，與伺服器端注入的規則一致（英文＝?lang=en）。 */
+  const can = document.querySelector('link[rel="canonical"]');
+  if (can){
+    const base = location.origin + location.pathname;
+    can.href = (LANG === "en") ? base + "?lang=en" : base;
+  }
 }
 function coName(s){ return LANG === "zh" ? (s.name_zh || s.name) : s.name; }
 function coSector(s){ return LANG === "zh" ? (s.sector_zh || s.sector) : s.sector; }
@@ -3236,6 +3267,14 @@ if (langBtn){
     LANG = (LANG === "zh") ? "en" : "zh";
     localStorage.setItem("us_lang", LANG);
     langBtn.textContent = (LANG === "zh") ? "EN" : "中";
+    /* 網址跟著語言改（不重新載入）。使用者複製網址分享時，對方才會看到同一種語言，
+       也讓網址與 canonical／hreflang 說的是同一件事。 */
+    try {
+      const u = new URL(location.href);
+      if (LANG === "en") u.searchParams.set("lang", "en");
+      else u.searchParams.delete("lang");
+      history.replaceState(null, "", u.pathname + u.search + u.hash);
+    } catch(_){}
     applyLang();
     document.querySelectorAll(".tw-month").forEach(el => {
       el.textContent = twMonth(parseInt(el.dataset.month, 10));
@@ -3416,9 +3455,9 @@ function render(res){
 }
 
 /* ---- 創新高（與後端 NH_TIERS / NH_LABEL 對應）---- */
-const NH_LABEL = {"3y": "3年新高", "2y": "2年新高", "1y": "1年新高",
+const NH_LABEL = {"5y": "5年新高", "3y": "3年新高", "2y": "2年新高", "1y": "1年新高",
                   "6m": "半年新高", "3m": "3個月新高"};
-const NH_ORDER = ["3y", "2y", "1y", "6m", "3m"];
+const NH_ORDER = ["5y", "3y", "2y", "1y", "6m", "3m"];
 function fmtNH(v){
   if (!v) return "—";
   return "<b style='color:var(--caramel-2)'>" + nhName(v) + "</b>";
@@ -3909,7 +3948,7 @@ function renderProHigh(j){
   let so=`<option value="">${LANG==="en"?"All sectors":"全部產業"}（${rows.length}）</option>`;
   Object.keys(sectors).sort((a,b)=>sectors[b]-sectors[a]).forEach(k=>so+=`<option value="${k}">${LANG==="en"?k:zhSectorFromRows(rows,k)}（${sectors[k]}）</option>`);
   let ho=`<option value="">${LANG==="en"?"All high levels":"全部新高程度"}（${rows.length}）</option>`;
-  ["3y","2y","1y","6m","3m"].filter(k=>highs[k]).forEach(k=>ho+=`<option value="${k}">${nhName(k)}（${highs[k]}）</option>`);
+  NH_ORDER.filter(k=>highs[k]).forEach(k=>ho+=`<option value="${k}">${nhName(k)}（${highs[k]}）</option>`);
   const filters=`<div class="resfilter"><span class="rflabel">${t("flt.sector","產業")}</span><select data-pro-filter="sector" onchange="proHighFilter()">${so}</select>`
     + `<span class="rflabel">${t("flt.nh","新高程度")}</span><select data-pro-filter="high" onchange="proHighFilter()">${ho}</select><span class="rflabel" data-pro-count>${LANG==="en"?"Filtered: ":"篩選後："}${rows.length}</span></div>`;
   let trs="", cards=""; rows.forEach(s=>{const name=coName(s),sector=coSector(s),high=nhName(s.new_high);
@@ -4327,11 +4366,91 @@ def _valid_app_token(tok):
 # 要改網址時設環境變數 TW_URL 即可，不必動程式。
 TW_URL = os.environ.get("TW_URL", "https://stock-coffee.com").strip()
 
+# 網址 → 分頁 id ＋ 每頁專屬的 SEO 中繼資料（與台股版同一套結構）。
+#
+# ⚠️ `index: False` 的頁面**不會**進 sitemap，而且會送 noindex。
+#    試作頁（/pro、/pro/rs）與準備頁（/risk、/alerts）內容太薄，
+#    被收錄只會拉低整站的品質評價 —— 但網址仍然存在、可以直接連、可以分享。
+#    功能做完之後把 index 改成 True 即可，不必改別的地方。
 PAGE_ROUTES = {
-    "screener": "p1", "pullback": "p3", "twr": "p7",
-    "risk": "p8", "alerts": "p4", "articles": "pm",
-    "pro": "p5", "pro/rs": "p9",
+    "screener": {
+        "page": "p1", "index": True,
+        "zh": ("找強勢股｜美股均線篩選與均線排列",
+               "從市值前 150／300 大美股中，篩出站上或跌破 10／20／50／150 日均線、"
+               "並符合指定均線排列的股票，附季報營收與 EPS 年增率、創新高分級。免註冊。"),
+        "en": ("Find Leading Stocks｜US Moving-Average Screener",
+               "Screen the top 150/300 US stocks for those above or below the 10/20/50/150-day "
+               "moving averages with a given MA alignment, plus quarterly revenue/EPS growth "
+               "and new-high tiers. No sign-up."),
+    },
+    "pullback": {
+        "page": "p3", "index": True,
+        "zh": ("拉回找買點｜美股收盤回到均線 ±3%",
+               "找出收盤價回到 10／20／50／150 日均線 ±3% 範圍內的美股，依乖離絕對值排序，"
+               "用來等強勢股的回檔進場點。免註冊。"),
+        "en": ("Pullback Buy Points｜US Stocks Back Within ±3% of an MA",
+               "Find US stocks whose close has returned to within ±3% of the 10/20/50/150-day "
+               "moving average, sorted by absolute deviation — for timing entries on pullbacks."),
+    },
+    "twr": {
+        "page": "p7", "index": True,
+        "zh": ("我的績效｜時間加權報酬率（TWR）計算機",
+               "逐月輸入淨存入與月底資產，算出不受存提款干擾的累積與年化報酬率。"
+               "資料只存在你的瀏覽器，免註冊。"),
+        "en": ("My Performance｜Time-Weighted Return (TWR) Calculator",
+               "Enter monthly net deposits and month-end balances to get cumulative and annualised "
+               "returns unaffected by deposits and withdrawals. Stored only in your browser."),
+    },
+    "articles": {
+        "page": "pm", "index": True,
+        "zh": ("文章區｜美股大盤判讀與動量交易教學",
+               "美股大盤怎麼看、均線與市場寬度怎麼用、美股與台股有什麼不同 —— "
+               "美股咖啡館的教學文章索引。"),
+        "en": ("Articles｜Reading the US Market and Momentum Trading",
+               "How to read the US market, how to use moving averages and market breadth, and how "
+               "US and Taiwan markets differ — the US Stock Coffee article index."),
+    },
+    # ↓ 以下四頁 index=False：兩頁是準備中、兩頁是功能試作，內容都還太薄。
+    "risk": {
+        "page": "p8", "index": False,
+        "zh": ("風控管理｜自選股 ATR 與波動率", "自選股的 ATR、波動率與停損管理。開發中。"),
+        "en": ("Risk Dashboard｜ATR and Volatility",
+               "ATR, volatility and stop management for your watchlist. In development."),
+    },
+    "alerts": {
+        "page": "p4", "index": False,
+        "zh": ("推播通知｜收盤到價提醒", "設定目標價，收盤價落在 ±2% 時通知你。測試中。"),
+        "en": ("Price Alerts｜Close-Price Notifications",
+               "Set a target price and get notified when the close lands within ±2%. In testing."),
+    },
+    "pro": {
+        "page": "p5", "index": False,
+        "zh": ("專業版創新高股票篩選", "從市值前 300 大美股找出近期創 3 個月至 5 年新高的股票。功能試作中。"),
+        "en": ("Pro New-high Stock Screener",
+               "Find recent 3-month through 5-year highs among the top 300 US stocks. Prototype."),
+    },
+    "pro/rs": {
+        "page": "p9", "index": False,
+        "zh": ("RS 相對強弱排名｜美股市場百分位",
+               "比較市值前 300 大美股 20／60／120／250 日的價格表現，篩出 RS 領先股。功能試作中。"),
+        "en": ("RS Relative-Strength Ranking｜US Market Percentile",
+               "Rank the top 300 US stocks by 20-, 60-, 120- or 250-day price strength. Prototype."),
+    },
 }
+
+# 首頁沒有 slug，另外放一份。
+HOME_SEO = {
+    "zh": ("美股咖啡館 US Stock Coffee｜美股選股工具・均線篩選",
+           "免費美股選股工具。用 10/20/50/150 日均線與均線排列篩選市值前 300 大美股，"
+           "找出強勢股與拉回買點，附大盤生命週期、市場寬度與 TWR 報酬率計算機。免註冊、開啟即用。"),
+    "en": ("US Stock Coffee｜US Stock Screener · Moving-Average Filter",
+           "Free US stock screener. Filter the top 300 US stocks by 10/20/50/150-day moving "
+           "averages and MA alignment to find leaders and pullback entries, with a market "
+           "lifecycle view, market breadth and a TWR calculator. No sign-up."),
+}
+
+# 分頁 id → 網址路徑（反查用）
+PAGE_PATHS = {v["page"]: k for k, v in PAGE_ROUTES.items()}
 
 # ---------------------------------------------------------------- 文章
 
@@ -4461,7 +4580,7 @@ def article_page(aid):
     import html as _h
     a, others = _find_article(aid)
     if not a:
-        return _render("pm"), 404
+        return _render("articles"), 404
     url = SITE_URL + "/article/" + quote(a["slug"])
     ld = {"@context": "https://schema.org", "@type": "Article",
           "headline": a["title"], "description": a["summary"], "url": url,
@@ -4623,7 +4742,123 @@ def _lifecycle_html(phase):
             '<div class="q-en" style="display:none">' + one("en") + '</div>')
 
 
-def _render(start_page="home"):
+def _only_page(html, keep):
+    """只保留目標分頁的 `<div class="page" id="…">`，其餘整段移除。
+
+    ⚠️⚠️ **這是這個站最重要的一項 SEO 設定。**
+    九個網址如果都送出全部分頁的 HTML，Google 會看到九個內文幾乎一樣的頁面，
+    判定為重複內容、只挑一個當代表，其餘八個等於白做。
+
+    以 `<div>` 配對計數切割，不用正則硬拆巢狀結構（正則處理不了巢狀）。
+    寫法與台股版完全相同 —— 兩邊要改就一起改。
+    """
+    out, i = [], 0
+    while True:
+        j = html.find('<div class="page', i)
+        if j < 0:
+            out.append(html[i:])
+            break
+        out.append(html[i:j])
+        head_end = html.find(">", j)
+        head = html[j:head_end + 1]
+        m = re.search(r'id="(\w+)"', head)
+        pid = m.group(1) if m else ""
+        depth, k = 0, j
+        while k < len(html):
+            nd = html.find("<div", k)
+            cd = html.find("</div>", k)
+            if cd < 0:
+                k = len(html)
+                break
+            if 0 <= nd < cd:
+                depth += 1
+                k = nd + 4
+            else:
+                depth -= 1
+                k = cd + 6
+                if depth == 0:
+                    break
+        if pid == keep:
+            block = html[j:k]
+            if 'class="page"' in head:      # 確保目標頁是顯示狀態
+                block = block.replace('<div class="page"', '<div class="page show"', 1)
+            out.append(block)
+        i = k
+    return "".join(out)
+
+
+def _page_seo(slug, lang):
+    """回傳 (title, description)。slug 為 None 代表首頁。"""
+    cfg = PAGE_ROUTES.get(slug) if slug else None
+    if cfg:
+        t, d = cfg[lang]
+        suffix = "｜美股咖啡館" if lang == "zh" else " | US Stock Coffee"
+        return t + suffix, d
+    return HOME_SEO[lang]
+
+
+def _seo_head(slug, lang):
+    """整個 <head> 的 SEO 區塊：title、description、canonical、hreflang、OG、JSON-LD。
+
+    ⚠️ **canonical 與 hreflang 必須互相對應**：中文頁指到英文頁、英文頁也要指回中文頁，
+       否則 Search Console 會報「沒有回傳連結」而整組忽略。
+    ⚠️ 英文版是**參數**（`?lang=en`）不是路徑，沒有 `/en/screener` 這種網址。
+    """
+    import html as _h
+    title, desc = _page_seo(slug, lang)
+    path = "/" + slug if slug else "/"
+    zh_url, en_url = SITE_URL + path, SITE_URL + path + "?lang=en"
+    canon = en_url if lang == "en" else zh_url
+    noindex = bool(slug) and not PAGE_ROUTES[slug]["index"]
+
+    ld = {"@context": "https://schema.org", "@type": "WebApplication",
+          "name": "US Stock Coffee", "url": SITE_URL,
+          "applicationCategory": "FinanceApplication",
+          "operatingSystem": "Any", "inLanguage": ["zh-Hant-TW", "en"],
+          "isAccessibleForFree": True,
+          "description": _page_seo(None, "zh")[1],
+          "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+          "publisher": {"@type": "Organization", "name": "美股咖啡館 US Stock Coffee",
+                        "url": SITE_URL, "logo": SITE_URL + "/icon.png"}}
+
+    e = _h.escape
+    lines = [
+        "<title>" + e(title) + "</title>",
+        '<meta name="description" content="' + e(desc) + '">',
+        '<link rel="canonical" href="' + e(canon) + '">',
+        '<link rel="alternate" hreflang="zh-Hant" href="' + e(zh_url) + '">',
+        '<link rel="alternate" hreflang="en" href="' + e(en_url) + '">',
+        '<link rel="alternate" hreflang="x-default" href="' + e(zh_url) + '">',
+        '<meta name="robots" content="' +
+        ("noindex,follow" if noindex else "index,follow,max-image-preview:large") + '">',
+        '<meta property="og:type" content="website">',
+        '<meta property="og:site_name" content="美股咖啡館 US Stock Coffee">',
+        '<meta property="og:title" content="' + e(title) + '">',
+        '<meta property="og:description" content="' + e(desc) + '">',
+        '<meta property="og:url" content="' + e(canon) + '">',
+        '<meta property="og:image" content="' + SITE_URL + '/icon.png">',
+        '<meta property="og:locale" content="' +
+        ("zh_TW" if lang == "zh" else "en_US") + '">',
+        '<meta name="twitter:card" content="summary">',
+        '<meta name="twitter:title" content="' + e(title) + '">',
+        '<meta name="twitter:description" content="' + e(desc) + '">',
+        '<script type="application/ld+json">'
+        + json.dumps(ld, ensure_ascii=False) + '</script>',
+    ]
+    return "\n".join(lines)
+
+
+def _render(slug=None):
+    """送出頁面。slug 為 None 代表首頁。
+
+    ⚠️ **每個網址只送自己那一頁**（`_only_page`），而且 head 是伺服器端注入的 ——
+       爬蟲不執行 JS 也讀得到正確的 title 與 canonical。
+    """
+    start_page = PAGE_ROUTES[slug]["page"] if slug else "home"
+    lang = "en" if request.args.get("lang") == "en" else "zh"
+    title_zh, _ = _page_seo(slug, "zh")
+    title_en, _ = _page_seo(slug, "en")
+
     html = PAGE.replace("__APP_TOKEN__", make_app_token())
     html = html.replace("__START_PAGE__", start_page, 1)
     html = html.replace("__TW_URL__", TW_URL)
@@ -4632,6 +4867,13 @@ def _render(start_page="home"):
     # ⚠️ 只放**公開**金鑰。VAPID_PRIVATE 絕對不能出現在頁面上。
     html = html.replace("__VAPID_PUBLIC__", VAPID_PUBLIC)
     html = html.replace("__ART_LINKS__", _art_links_html())
+    html = html.replace("__SEO_HEAD__", _seo_head(slug, lang), 1)
+    # ⚠️ 這兩個是 JS 字串常值，必須跳脫雙引號，否則標題含 " 就會把 <script> 打斷。
+    html = html.replace("__TITLE_ZH__", title_zh.replace('"', '\\"'), 1)
+    html = html.replace("__TITLE_EN__", title_en.replace('"', '\\"'), 1)
+    if lang == "en":
+        html = html.replace('<html lang="zh-Hant-TW">', '<html lang="en">', 1)
+    html = _only_page(html, start_page)     # ⭐ 每個網址只送出自己那一頁
     return render_template_string(html)
 
 
@@ -5026,12 +5268,75 @@ self.addEventListener('notificationclick', e => {
 
 @app.route("/")
 def index():
-    return _render("home")
+    return _render(None)
 
 
-for _slug, _pid in PAGE_ROUTES.items():
-    app.add_url_rule("/" + _slug, "page_" + _slug,
-                     (lambda p=_pid: (lambda: _render(p)))())
+# ⚠️ 路由名要把 "/" 換掉（"pro/rs"），Flask 的 endpoint 名不能含斜線。
+for _slug in PAGE_ROUTES:
+    app.add_url_rule("/" + _slug, "page_" + _slug.replace("/", "_"),
+                     (lambda s=_slug: (lambda: _render(s)))())
+
+
+@app.route("/robots.txt")
+def robots_txt():
+    """檢索規則。API、Service Worker 與診斷端點不需要被收錄。
+
+    ⚠️ 不要擋 AI 爬蟲 —— 這個站的流量有一部分會從那裡來（台股版同一個決定）。
+    """
+    body = ("User-agent: *\n"
+            "Allow: /\n"
+            "Disallow: /api/\n"
+            "Disallow: /sw.js\n"
+            "\n"
+            "Sitemap: " + SITE_URL + "/sitemap.xml\n")
+    return app.response_class(body, mimetype="text/plain")
+
+
+@app.route("/sitemap.xml")
+def sitemap_xml():
+    """動態產生 sitemap：首頁、可索引的功能頁、文章索引與每篇文章。
+
+    ⚠️ `index: False` 的頁面不放進來 —— 送 noindex 又列進 sitemap 是自相矛盾的訊號。
+    ⚠️ hreflang 必須**互相對應**（每個網址都列出全部語言版本，含自己），
+       否則 Search Console 會報「沒有回傳連結」而整組忽略。
+    """
+    import html as _h
+    today = _utcnow().strftime("%Y-%m-%d")
+
+    def url(loc, lastmod, prio, changefreq, alts=()):
+        x = ["  <url>", "    <loc>" + _h.escape(loc) + "</loc>"]
+        for hl, href in alts:
+            x.append('    <xhtml:link rel="alternate" hreflang="' + hl
+                     + '" href="' + _h.escape(href) + '"/>')
+        x.append("    <lastmod>" + lastmod + "</lastmod>")
+        x.append("    <changefreq>" + changefreq + "</changefreq>")
+        x.append("    <priority>" + prio + "</priority>")
+        x.append("  </url>")
+        return "\n".join(x)
+
+    def pair(loc):
+        return [("zh-Hant", loc), ("en", loc + "?lang=en"), ("x-default", loc)]
+
+    parts = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
+             ' xmlns:xhtml="http://www.w3.org/1999/xhtml">']
+    parts.append(url(SITE_URL + "/", today, "1.0", "daily", pair(SITE_URL + "/")))
+    for slug, cfg in PAGE_ROUTES.items():
+        if not cfg["index"] or slug == "articles":
+            continue
+        loc = SITE_URL + "/" + slug
+        parts.append(url(loc, today, "0.9", "weekly", pair(loc)))
+    arts = _load_articles()
+    if arts:
+        loc = SITE_URL + "/articles"
+        parts.append(url(loc, today, "0.8", "weekly", pair(loc)))
+        for a in arts:
+            # 文章頁目前只有中文（沒有 articles/en），所以不列 en 版本。
+            aloc = SITE_URL + "/article/" + quote(a["slug"])
+            parts.append(url(aloc, a.get("date") or today, "0.7", "monthly",
+                             [("zh-Hant", aloc), ("x-default", aloc)]))
+    parts.append("</urlset>")
+    return app.response_class("\n".join(parts), mimetype="application/xml")
 
 
 @app.route("/api/diag")

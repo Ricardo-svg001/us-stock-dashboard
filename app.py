@@ -1691,9 +1691,9 @@ PHASE_UI = {
     "pullback": {"dot": "🟡", "zh": "多頭回檔", "en": "Bull-market Pullback",
                  "zh_do": "中期趨勢未破壞，降低追價",
                  "en_do": "The medium-term trend is intact — avoid chasing"},
-    "transition": {"dot": "🟠", "zh": "方向整理", "en": "Trend Transition",
-                   "zh_do": "多週期方向衝突，等待確認",
-                   "en_do": "Timeframes conflict — wait for confirmation"},
+    "transition": {"dot": "🟠", "zh": "高風險整理", "en": "High-risk Consolidation",
+                   "zh_do": "50MA 與 100MA 結構衝突，降低曝險",
+                   "en_do": "50MA and 100MA conflict — reduce exposure"},
     "riskoff": {"dot": "🔴", "zh": "逆風市場", "en": "Headwind",
                 "zh_do": "中期風險升高，控制部位",
                 "en_do": "Medium-term risk is elevated — control exposure"},
@@ -1704,6 +1704,18 @@ PHASE_UI = {
                            "zh_do": "市場洗過並收復 100MA，中期改善",
                            "en_do": "Washed out and above 100MA — trend improving"},
 }
+
+# 首頁生命週期只排列既有六狀態，不改變 _phase_raw 的判定。
+# 排序是市場輪廓而非預測路徑：市場可能跳階，也可能退回前一階段。
+MARKET_LIFECYCLE = [
+    ("recovery_early", "初步復甦", "洗盤後收復 50MA", "Early Recovery", "Reclaims 50MA after a washout"),
+    ("recovery_confirmed", "復甦確認", "收復 100MA", "Recovery Confirmed", "Reclaims 100MA"),
+    ("tailwind", "順風趨勢", "50MA 在 100MA 之上", "Tailwind", "50MA above 100MA"),
+    ("pullback", "多頭回檔", "回撤 50MA、守住 100MA", "Bull-market Pullback", "Tests 50MA, holds 100MA"),
+    ("transition", "高風險整理", "50MA 與 100MA 結構衝突", "High-risk Consolidation", "50MA and 100MA conflict"),
+    ("riskoff", "逆風市場", "跌破 100MA", "Headwind", "Breaks below 100MA"),
+]
+LIFECYCLE_STAGE = {phase: i for i, (phase, *_rest) in enumerate(MARKET_LIFECYCLE, 1)}
 
 
 def _phase_raw(close, ma50, ma100, breadth, wash_min):
@@ -2530,6 +2542,9 @@ PAGE = r"""<!DOCTYPE html>
            color:var(--espresso); }
   .mk-do { font-size:13px; color:var(--mocha); overflow:hidden;
            text-overflow:ellipsis; white-space:nowrap; }
+  .mk-stage { flex-shrink:0; border:1px solid var(--grounds); border-radius:999px;
+             padding:3px 8px; font-family:var(--font-num); font-size:11px;
+             font-weight:700; color:var(--caramel-2); background:var(--milk); }
   /* 本日推薦：沿用市場階段卡片的寬度與圓角，讓兩者看起來是同一組東西 */
   .hs-box { max-width:560px; margin:0 auto 16px; display:block;
            background:var(--foam); border:1.5px solid var(--grounds);
@@ -2548,11 +2563,35 @@ PAGE = r"""<!DOCTYPE html>
   .mk-body { padding:2px 16px 14px; border-top:1px solid var(--grounds);
            font-size:14px; color:#555; line-height:1.9; }
   .mk-body b { color:var(--espresso); }
+  .life-head { display:flex; align-items:baseline; justify-content:space-between;
+              gap:10px; margin:14px 0 10px; }
+  .life-head b { font-family:var(--font-head); color:var(--espresso); font-size:15px; }
+  .life-head span { color:var(--mocha); font-size:12px; }
+  .life-track { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+  .life-step { min-width:0; border:1.5px solid var(--grounds); border-radius:12px;
+               padding:10px; background:rgba(255,255,255,.46); color:var(--mocha); }
+  .life-step.on { border-color:var(--caramel); background:var(--milk);
+                  box-shadow:0 0 0 2px rgba(166,103,65,.09); color:var(--espresso); }
+  .life-top { display:flex; align-items:center; gap:7px; }
+  .life-no { width:22px; height:22px; border-radius:50%; display:inline-flex;
+             align-items:center; justify-content:center; flex-shrink:0;
+             background:var(--grounds); color:var(--espresso); font:700 11px var(--font-num); }
+  .life-step.on .life-no { background:var(--caramel); color:#fff; }
+  .life-name { font-family:var(--font-head); font-size:13px; font-weight:700; }
+  .life-hint { display:block; margin:6px 0 0 29px; font-size:11.5px; line-height:1.45; }
+  .life-now { display:inline-block; margin:7px 0 0 29px; padding:2px 7px;
+              border-radius:999px; background:var(--caramel); color:#fff;
+              font-size:10.5px; font-weight:700; }
+  .life-note { margin:11px 0 13px; color:var(--mocha); font-size:12px; line-height:1.7; }
+  .life-intro { margin-top:12px; padding-top:12px; border-top:1px solid var(--grounds); }
   .mk-num { font-family:var(--font-num); font-size:12px; color:var(--mocha);
            flex-shrink:0; }
   @media(max-width:520px){
     .mk-main { flex-direction:column; align-items:flex-start; gap:2px; }
+    .mk-stage { align-self:flex-start; }
     .mk-num { display:none; }
+    .life-track { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .life-step { padding:9px 8px; }
   }
   .qcard { max-width:560px; margin:0 auto 16px; background:var(--foam);
            border:1.5px solid var(--grounds); border-radius:20px;
@@ -3172,6 +3211,14 @@ function applyLang(){
   document.querySelectorAll("[data-i18n-html]").forEach(el => {
     if (!el.dataset.zhHtml) el.dataset.zhHtml = el.innerHTML;
     el.innerHTML = t(el.dataset.i18nHtml, el.dataset.zhHtml);
+  });
+  /* 伺服器端已同時渲染中英文的區塊（市場階段、本日推薦、生命週期）。
+     這些沒有 data-i18n，必須在切換語言時直接切顯示，否則英文介面仍會混入中文。 */
+  document.querySelectorAll(".q-zh").forEach(el => {
+    el.style.display = (LANG === "zh") ? "" : "none";
+  });
+  document.querySelectorAll(".q-en").forEach(el => {
+    el.style.display = (LANG === "en") ? "" : "none";
   });
   document.documentElement.lang = (LANG === "zh") ? "zh-Hant-TW" : "en";
   document.title = (LANG === "zh")
@@ -4483,6 +4530,12 @@ def _phase_banner_html():
     if not ui:
         return ""
     b = ("%.0f%%" % breadth) if breadth is not None else "—"
+    stage = LIFECYCLE_STAGE.get(phase)
+    stage_html = ""
+    if stage:
+        stage_html = (
+            '<span class="mk-stage q-zh">第 ' + str(stage) + ' / 6 階段</span>'
+            '<span class="mk-stage q-en" style="display:none">Stage ' + str(stage) + ' of 6</span>')
     zh_rule = {
         "tailwind": "指數站上 50MA，且 50MA 在 100MA 之上",
         "pullback": "指數跌回 50MA 下方，但仍守在 100MA 之上",
@@ -4510,23 +4563,64 @@ def _phase_banner_html():
         '<span class="mk-do q-en" style="display:none">'
         + _h.escape(ui["en_do"]) + '</span>'
         '</span>'
+        + stage_html +
         '<span class="mk-num">' + _h.escape(date) + '</span>'
         '</summary>'
         '<div class="mk-body">'
-        '<span class="q-zh">依連續三日確認，目前維持<b>' + _h.escape(ui["zh"])
+        + _lifecycle_html(phase) +
+        '<div class="life-intro">'
+        '<span class="q-zh"><b>怎麼閱讀：</b>大盤生命週期把市場整理成六個位置，'
+        '讓你快速辨認目前較接近復甦、順風、回檔、整理或逆風。它不是下一站預測；'
+        '階段可能跳過或退回，多頭回檔守穩後也可能直接返回順風趨勢。<br><br>'
+        '依連續三日確認，目前維持<b>' + _h.escape(ui["zh"])
         + '</b>；這個狀態的判定條件是：' + _h.escape(zh_rule) + '。目前另有 <b>' + b
         + '</b> 的成分股站在自己的 ' + str(BREADTH_MA) + ' 日均線之上。<br><br>'
         '<b>50MA</b> 看順風與正常回檔，<b>100MA</b> 看是否進入逆風，'
         '<b>150MA 市場寬度</b>主要判斷市場是否曾被充分洗盤。'
         '這不預測行情，只描述環境。</span>'
-        '<span class="q-en" style="display:none">After three-day confirmation, the market '
+        '<span class="q-en" style="display:none"><b>How to read it:</b> The market lifecycle '
+        'organizes the environment into six positions, so you can quickly identify recovery, '
+        'tailwind, pullback, consolidation or headwind. It is not a forecast of the next stop; '
+        'stages can be skipped or reversed, and a pullback that stabilizes can return directly '
+        'to Tailwind.<br><br>After three-day confirmation, the market '
         'remains <b>' + _h.escape(ui["en"]) + '</b>; this state is defined when '
         + _h.escape(en_rule) + '. <b>' + b + '</b> of constituents are above their own '
         + str(BREADTH_MA) + '-day average.<br><br>'
         '<b>50MA</b> identifies tailwinds and normal pullbacks, <b>100MA</b> marks '
         'headwinds, and <b>150MA breadth</b> mainly identifies washouts. '
         'This describes the environment — it does not predict it.</span>'
-        '</div></details>')
+        '</div></div></details>')
+
+
+def _lifecycle_html(phase):
+    """首頁六階段市場地圖；中英文同時渲染，交由既有語言切換顯示。"""
+    import html as _h
+
+    def one(lang):
+        rows = []
+        for no, (key, zh, zh_hint, en, en_hint) in enumerate(MARKET_LIFECYCLE, 1):
+            name, hint = (zh, zh_hint) if lang == "zh" else (en, en_hint)
+            active = key == phase
+            rows.append(
+                '<div class="life-step' + (' on' if active else '') + '"'
+                + (' aria-current="step"' if active else '') + '>'
+                '<div class="life-top"><span class="life-no">' + str(no) + '</span>'
+                '<span class="life-name">' + _h.escape(name) + '</span></div>'
+                '<span class="life-hint">' + _h.escape(hint) + '</span>'
+                + (('<span class="life-now">' + ('目前位置' if lang == "zh" else 'Current') + '</span>')
+                   if active else '')
+                + '</div>')
+        title = "大盤生命週期" if lang == "zh" else "Market Lifecycle"
+        sub = "目前位置，不是未來預測" if lang == "zh" else "Current position, not a forecast"
+        note = ("階段不一定依序前進，也可能跳階或退回；請把它當作市場地圖，而不是買賣訊號。"
+                if lang == "zh" else
+                "Stages may be skipped or reversed. Treat this as a market map, not a trading signal.")
+        return ('<div class="life-head"><b>' + title + '</b><span>' + sub + '</span></div>'
+                '<div class="life-track">' + ''.join(rows) + '</div>'
+                '<p class="life-note">' + note + '</p>')
+
+    return ('<div class="q-zh">' + one("zh") + '</div>'
+            '<div class="q-en" style="display:none">' + one("en") + '</div>')
 
 
 def _render(start_page="home"):

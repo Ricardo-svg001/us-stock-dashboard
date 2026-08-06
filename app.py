@@ -2813,10 +2813,22 @@ __HOME_SCREEN__
       <p>這個功能從市值前 150 或 300 大的美股裡，篩出符合你設定的標的：
       可以指定站上或跌破 10、20、50、150 日均線，也可以直接用<b>均線排列</b>篩選——
       嚴格多頭（10&gt;20&gt;50&gt;150）代表越晚買的人成本越高卻還願意買，通常是趨勢正在走的股票。</p>
-      <p>篩完如果檔數太多，上方的產業下拉可以繼續縮小範圍。
+      <p>篩完如果檔數太多，上方的四個下拉可以繼續縮小範圍：<b>產業</b>、
+      <b>季 EPS 年增</b>、<b>均線排列</b>與<b>創新高程度</b>，四個條件是 AND 關係。
       <b>產業分布本身就是訊息</b>——如果三十檔裡有十二檔是同一個產業，
-      那多半就是當下的主流題材。</p>
-      <p><b>適合誰</b>：持有數個月的動量交易者。這裡是收盤資料，做不了當沖。</p>
+      那多半就是當下的主流題材，而族群行情的持續性遠高於單一個股。</p>
+      <p><b>三種常用的組合</b>：
+      ①「站上 50 日線 ＋ 嚴格多頭」找的是趨勢已經確立、還在走的股票；
+      ②「站上 10 日線 ＋ 近三日完全符合」找的是短線剛轉強、連續站穩的股票；
+      ③「跌破 150 日線 ＋ 嚴格空頭」則是反過來找轉弱的標的，
+      可以拿來檢查手上的持股該不該減碼。</p>
+      <p>每一列還會顯示<b>創新高等級</b>（3 個月到 5 年）與<b>季報營收／EPS 年增率</b>。
+      前者告訴你這檔股票在自己的歷史裡站在什麼位置，後者是基本面有沒有跟上的粗略檢查——
+      ⚠️ 美股只公布季報，所以那個數字可能已經是兩三個月前的事。</p>
+      <p><b>什麼時候不要用這頁</b>：大盤處在逆風階段時，這裡照樣會篩出幾十檔
+      「相對強勢」的股票，但那不代表可以進場。先看首頁的市場階段再決定要不要出手。</p>
+      <p><b>適合誰</b>：持有數個月的動量交易者。這裡是收盤資料，做不了當沖。
+      想找的是「回檔後的進場點」而不是「現在誰最強」的話，請改用<b>拉回找買點</b>。</p>
     </div>
   </details>
 
@@ -2874,7 +2886,19 @@ __HOME_SCREEN__
       萬一看錯，停損點也很明確（跌破那條均線）。</p>
       <p>均線怎麼選看你的操作週期——短線看 20 日線，波段看 50 或 150 日線。
       搭配<b>均線排列</b>條件，可以只找「趨勢還在、只是短暫休息」的股票。</p>
-      <p>結果依<b>貼近均線的程度</b>排序，最上面的就是拉回得最剛好的。</p>
+      <p>結果依<b>乖離的絕對值</b>排序（乖離＝收盤價距離均線幾 %），
+      最上面的就是貼得最近的。正乖離代表還在均線上方、負乖離代表已經跌破一點點——
+      同樣是 ±3% 以內，這兩種的意義並不一樣。</p>
+      <p><b>⚠️ 這頁用的是收盤價，不是盤中現價。</b>
+      理由是定義必須穩定：用現價算，同一檔股票在早上十點與下午三點會給出不同答案，
+      清單會整天跳動。盤中現價只出現在結果表格裡當參考，不參與篩選。</p>
+      <p><b>怎麼分辨「健康的回檔」與「趨勢正在轉弱」</b>：
+      回檔到均線時，均線排列若仍是多頭、而且成交沒有異常放大，多半只是休息；
+      如果同一段期間裡短均線已經跌破長均線（排列變成空頭或糾結），
+      那就不是回檔，是趨勢在換方向。這也是為什麼建議搭配排列條件一起篩。</p>
+      <p><b>這頁不會告訴你的事</b>：它只回答「現在誰站在均線附近」，
+      不回答「這檔股票值不值得買」。要先有標的，才輪到談進場點——
+      標的請用<b>找強勢股</b>先篩出來。</p>
     </div>
   </details>
 
@@ -2906,11 +2930,29 @@ __HOME_SCREEN__
 <div class="page" id="p7">
   <h2 class="ptitle" data-i18n="p7.title">我的績效</h2>
 
-  <div class="card" style="background:#eef4fc">
-    <div style="font-size:14px;color:#333;line-height:1.9" data-i18n="twr.intro">
-      使用時間加權報酬率（TWR），扣除中途存入或提出資金的影響，較能反映你的操作績效。逐月填入淨存入與月底總資產即可，資料只會儲存在這台裝置的瀏覽器。
+  <details class="pgintro">
+    <summary data-i18n="p7.introT">你的報酬率，很可能算錯了</summary>
+    <div class="pgintro-b" data-i18n-html="p7.intro">
+      <p>多數人算報酬率的方式是「現在總資產 ÷ 投入本金 − 1」。
+      只要中途沒有存錢或提錢，這樣算沒問題；<b>但只要有一次不定期的匯入，這個數字就會失真</b>。</p>
+      <p>舉個極端的例子：年初 100 萬，上半年賠掉 20% 剩 80 萬；
+      七月你又匯入 100 萬，下半年賺 10%，年底變成 198 萬。
+      用「總資產 ÷ 總投入」算是 −1%，看起來只是小虧；
+      但你真正的操作結果是「先賠 20%、再賺 10%」，也就是 <b>−12%</b>。
+      差別來自於：<b>你在賠錢之後才把大部分的錢投進來</b>，那不是操作能力，是時機的巧合。</p>
+      <p><b>時間加權報酬率（TWR）</b>就是為了拆掉這個影響：把每個月當成一段獨立的期間，
+      各自算出當月報酬，再連乘起來。存入與提出多少完全不影響結果——
+      這也是基金與代操績效的標準算法，因為經理人無法決定客戶什麼時候匯錢進來。</p>
+      <p><b>跟 IRR（金額加權）差在哪</b>：IRR 會把「你投入多少、什麼時候投入」一起算進去，
+      回答的是「我這筆錢賺了多少」；TWR 回答的是「我的選股與進出場做得好不好」。
+      想評估自己的操作能力，要看 TWR；想知道實際口袋裡多了多少，看 IRR。</p>
+      <p><b>怎麼填</b>：只需要兩欄——當月<b>淨存入</b>（存入減提出，提領填負數）與
+      <b>月底總資產</b>（現金＋所有持股市值）。未到的月份留白即可，
+      系統只計算有填的區間，並同時給你累積報酬率與年化報酬率。</p>
+      <p><b>資料只存在這台裝置的瀏覽器</b>（localStorage），不會上傳、伺服器也沒有帳號系統。
+      好處是不必註冊，代價是換裝置或清除瀏覽資料就會不見——這點先講清楚，不假裝有同步。</p>
     </div>
-  </div>
+  </details>
 
   <div class="card">
     <h2 data-i18n="twr.basic">基本設定</h2>
@@ -3145,6 +3187,8 @@ const I18N = { en: {
   "home.c3": "The Taiwan edition — same logic, already live",
   "p1.title": "Find Strong Stocks", "p3.title": "Find Pullback Entries",
   "p7.title": "My Performance",
+  "p7.introT": "Your return is probably wrong",
+  "p7.intro": "<p>Most people compute return as \"current assets ÷ money put in − 1\". That is fine as long as you never added or withdrew funds midway — <b>but a single irregular transfer distorts it</b>.</p><p>An extreme example: you start the year with $1M and lose 20% in the first half, leaving $800k. In July you wire in another $1M and gain 10% in the second half, ending at $1.98M. Assets over contributions gives −1%, which looks like a small loss. But what you actually did was lose 20% and then gain 10% — that is <b>−12%</b>. The gap exists because <b>most of your money arrived after the loss</b>. That is timing, not skill.</p><p><b>Time-weighted return (TWR)</b> removes that effect: each month is treated as its own period, and the monthly returns are chained together. Deposits and withdrawals make no difference to the result. This is the standard for funds and managed accounts, precisely because a manager cannot control when clients wire money in.</p><p><b>How it differs from IRR (money-weighted)</b>: IRR accounts for how much you invested and when, answering \"how did this pot of money do?\" TWR answers \"how good were my picks and my timing of entries and exits?\" Use TWR to judge your process; use IRR to see what actually landed in your pocket.</p><p><b>What to enter</b>: just two columns per month — <b>net deposit</b> (deposits minus withdrawals; use a negative number for withdrawals) and <b>month-end total assets</b> (cash plus the market value of all holdings). Leave future months blank; only the months you fill are used, and you get both cumulative and annualised figures.</p><p><b>Everything stays in this browser</b> (localStorage). Nothing is uploaded and there is no account system. The upside is no sign-up; the cost is that changing device or clearing site data loses it — worth saying plainly rather than pretending there is sync.</p>",
   "p8.title": "Risk Dashboard", "p4.title": "Price Alerts",
   "risk.preparing": "US risk data is being prepared",
   "risk.preparingNote": "This page will provide ATR, volatility, moving-average trend and Beta for your watchlist, plus initial and trailing stops based on your entry price. It will open after the US OHLC data definition is verified.",
@@ -3162,9 +3206,9 @@ const I18N = { en: {
   "rs.p250": "250 days (long term)", "rs.threshold": "Minimum RS",
   "rs.btn": "Show RS ranking",
   "p1.introT": "Find stocks that are moving right now — using moving averages",
-  "p1.intro": "<p>A moving average is the average cost of a group of buyers. Above the 50-day line, the people who bought this quarter are in profit; below the 150-day line, most buyers of the past half-year are underwater. Moving averages don't predict — they tell you where market participants stand, and that shapes what they do next.</p><p>This screener filters the top 150 or 300 US companies by market cap: crossing above or below the 10, 20, 50 or 150-day moving average, or screening directly by <b>MA alignment</b> — strict bullish (10&gt;20&gt;50&gt;150) means later buyers paid more and still bought, which usually marks a trend in progress.</p><p>If the screen returns too many names, the dropdowns above narrow it further. <b>The sector distribution is itself a signal</b> — when twelve of thirty results share an industry, that's where money is going.</p><p><b>Who it's for</b>: momentum traders holding for several months. This is closing data — not built for day trading.</p>",
+  "p1.intro": "<p>A moving average is the average cost of a group of buyers. Above the 50-day line, the people who bought this quarter are in profit; below the 150-day line, most buyers of the past half-year are underwater. Moving averages don't predict — they tell you where market participants stand, and that shapes what they do next.</p><p>This screener filters the top 150 or 300 US companies by market cap: crossing above or below the 10, 20, 50 or 150-day moving average, or screening directly by <b>MA alignment</b> — strict bullish (10&gt;20&gt;50&gt;150) means later buyers paid more and still bought, which usually marks a trend in progress.</p><p>If the screen returns too many names, four dropdowns narrow it further and combine with AND: <b>sector</b>, <b>quarterly EPS growth</b>, <b>MA alignment</b> and <b>new-high tier</b>. <b>The sector distribution is itself a signal</b> — when twelve of thirty results share an industry, that is where money is going, and group moves persist far better than isolated ones.</p><p><b>Three common setups</b>: (1) above the 50-day plus strict bullish alignment finds trends already established and still running; (2) above the 10-day with \"all of the last 3 days\" finds names that have just turned up and held; (3) below the 150-day plus strict bearish alignment does the reverse — useful for checking whether something you already own should be trimmed.</p><p>Each row also shows the <b>new-high tier</b> (3 months to 5 years) and <b>quarterly revenue/EPS growth</b>. The first tells you where the stock sits within its own history; the second is a rough check on whether fundamentals are keeping up — note that US companies report quarterly, so that figure may already be two or three months old.</p><p><b>When not to use this page</b>: in a headwind market it will still return dozens of \"relatively strong\" names, and that does not make them tradable. Check the market stage on the home page first.</p><p><b>Who it's for</b>: momentum traders holding for several months. This is closing data — not built for day trading. If you want an entry after a pullback rather than a list of what is strongest right now, use <b>Pullback Buy Points</b> instead.</p>",
   "p3.introT": "Wait for a strong stock to come back, instead of chasing the high",
-  "p3.intro": "<p>Leading stocks don't rise every day. After a run they consolidate, and that consolidation often stalls near a moving average — because that line is a group's average cost, which becomes psychological support.</p><p>This screen finds stocks whose <b>latest close has returned to within ±3% of the moving average you choose</b>. The point isn't to call the bottom; it's an entry with controlled risk — you're not buying the high, and if you're wrong the stop is obvious (a break of that line).</p><p>Which average to use depends on your holding period — the 20-day for shorter trades, the 50 or 150-day for swings. Combined with the <b>MA alignment</b> filter, you can look only for stocks whose trend is intact and merely resting.</p><p>Results are sorted by <b>how close price is to the line</b> — the top of the list pulled back the most precisely.</p>",
+  "p3.intro": "<p>Leading stocks don't rise every day. After a run they consolidate, and that consolidation often stalls near a moving average — because that line is a group's average cost, which becomes psychological support.</p><p>This screen finds stocks whose <b>latest close has returned to within ±3% of the moving average you choose</b>. The point isn't to call the bottom; it's an entry with controlled risk — you're not buying the high, and if you're wrong the stop is obvious (a break of that line).</p><p>Which average to use depends on your holding period — the 20-day for shorter trades, the 50 or 150-day for swings. Combined with the <b>MA alignment</b> filter, you can look only for stocks whose trend is intact and merely resting.</p><p>Results are sorted by <b>absolute deviation</b> (how many percent the close sits from the line), so the top of the list pulled back the most precisely. A positive deviation means price is still above the line, negative means it has dipped slightly below — both can be within ±3%, but they do not mean the same thing.</p><p><b>This page uses closing prices, not intraday quotes.</b> The definition has to be stable: computed on live prices, the same stock would give different answers at 10am and 3pm and the list would churn all day. The intraday quote appears in the results table for reference only and never affects the screen.</p><p><b>Telling a healthy pullback from a failing trend</b>: if the MA alignment is still bullish when price reaches the line, it is usually just a rest. If the shorter average has already crossed below the longer one (alignment turned bearish or squeezed), that is not a pullback — the trend is changing direction. This is why pairing the alignment filter with this screen is worth the extra click.</p><p><b>What this page does not answer</b>: it tells you who is currently near a moving average, not whether a stock is worth owning. You need a candidate first and an entry second — find candidates with <b>Find Leading Stocks</b>.</p>",
   "twr.intro": "Time-weighted return (TWR) removes the effect of deposits and withdrawals, giving a clearer view of your investing performance. Enter each month's net cash flow and ending portfolio value. Data stays in this browser on this device.",
   "twr.basic": "Basic settings", "twr.year": "Year",
   "twr.start": "Starting portfolio value (cash + holdings)",
@@ -4469,12 +4513,22 @@ def _md_to_html(md):
             out.append("</%s>" % list_kind)
             list_kind = None
 
+    def _link(m):
+        text, url = m.group(1), m.group(2)
+        if url.startswith("/"):
+            return '<a href="%s">%s</a>' % (url, text)      # 站內：同一個分頁
+        return '<a href="%s" target="_blank" rel="noopener">%s</a>' % (url, text)
+
     def inline(s):
         s = _h.escape(s)
         s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
-        s = re.sub(r"\[(.+?)\]\((https?://[^\s)]+)\)",
-                   r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
-        s = re.sub(r"\[(.+?)\]\((/[^\s)]*)\)", r'<a href="\2">\1</a>', s)
+        # ⚠️⚠️ **站內與外部連結必須用同一條規則一次處理，而且標題不能含中括號。**
+        #    2026-08-07 修：原本拆成兩條 re.sub，外部連結那條先跑。
+        #    同一行裡「先站內、後外部」時（例：`[A](/)是[B](https://…)`），
+        #    `\[(.+?)\]` 會回溯吃掉中間整段，把 `A](/)是[B` 當成連結文字 ——
+        #    畫面上就會看到多出來的 `](/)是[` 符號。
+        #    `[^\[\]]+` 讓標題不能跨過任何一組中括號，回溯就發生不了。
+        s = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s)]+|/[^\s)]*)\)", _link, s)
         return s
 
     for raw in md.splitlines():

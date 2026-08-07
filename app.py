@@ -491,6 +491,63 @@ def get_history(symbol, max_age_hours=12, debug=False):
                        lambda: _load_cache(key, max_age_hours))
 
 
+# ---------------------------------------------------------------- 拆股護欄
+#
+# ⚠️⚠️ **增量抓取遇上拆股，會安靜地毀掉一整檔股票的所有指標。**
+#
+# 機制：`_get_history_now()` 只抓「最後一天之後」的新資料再併回舊快取。
+# 供應商在拆股後回的是**還原過**的新價格，但**舊的一千多列永遠不會被重抓** ——
+# 於是同一條序列裡混著拆股前與拆股後兩種口徑。
+#
+# 具體後果（以 4 拆 1 為例）：序列上出現一根 −75% 的假崩盤，
+# 50MA 還停在舊價位 → 這檔被判定「跌破所有均線」、創新高永遠不成立、
+# RS 掉到最低百分位。**完全不會報錯，而且錯掉的列不會自我修復。**
+# 前 300 大裡每年都有幾檔拆股（NVDA 2024-06 十拆一、AAPL 2020-08 四拆一）。
+#
+# 護欄做法：**比對跳動幅度是不是接近整數比例**，而不是只看「跌超過 N%」。
+# 單日 −35% 在美股是可能的（財報爆雷），拿門檻硬切會把真崩盤誤判成拆股。
+SPLIT_RATIOS = (1.5, 2, 3, 4, 5, 6, 7, 8, 10, 15, 20, 30)
+SPLIT_TOL = 0.05                 # 比例容差 5%（拆股當天仍有正常漲跌）
+_SPLIT_REFETCH = {}              # key → 已強制重抓的日期，同一天只做一次
+SPLIT_NOTES = {}                 # key → 說明，給 /api/diag 看
+
+
+def _split_ratio(prev, cur):
+    """相鄰兩天的價格跳動像不像拆股？像的話回傳比例字串，否則回 None。"""
+    try:
+        prev, cur = float(prev), float(cur)
+    except (TypeError, ValueError):
+        return None
+    if prev <= 0 or cur <= 0:
+        return None
+    r = prev / cur
+    for n in SPLIT_RATIOS:
+        if abs(r - n) <= n * SPLIT_TOL:          # 正拆：舊價高、新價低
+            return "1:%g" % n
+        if abs(r - 1.0 / n) <= (1.0 / n) * SPLIT_TOL:   # 反向拆股：舊價低、新價高
+            return "%g:1" % n
+    return None
+
+
+def _find_split_breaks(rows):
+    """整段掃描，回傳**所有**疑似拆股斷層 [(日期, 比例), …]。
+
+    ⚠️ 掃全段而不是只看尾巴：程式可能好幾天沒跑，斷層不一定落在最近幾天。
+       成本是每檔 1,260 次浮點比較，可以忽略。
+
+    ⚠️⚠️ **一定要回傳全部，不能只回第一個。**
+       同一檔股票可能先有一次真崩盤（查證後標記為「來源就長這樣」），
+       之後才真的拆股。只回第一個的話，永遠回傳那個已查證的崩盤，
+       **後來真正的拆股就被永久遮住了** —— 而那正是這個護欄要抓的東西。
+    """
+    out = []
+    for i in range(1, len(rows)):
+        ratio = _split_ratio(rows[i - 1][1], rows[i][1])
+        if ratio:
+            out.append((rows[i][0], ratio))
+    return out
+
+
 def _get_history_now(symbol, key, debug=False):
     """實際去抓。**已經有的歷史不重抓，只補新的交易日。**
 
@@ -522,23 +579,59 @@ def _get_history_now(symbol, key, debug=False):
                                or str(meta.get("full_from", "9999")) <= need_from)
     frm = old[-1][0] if have_full else None   # 從最後一天開始抓（含當天，讓當日收盤有機會更新）
 
-    rows, errs = [], []
-    for name, fn in HIST_SOURCES:
-        try:
-            got = fn(symbol, frm) if name == "nasdaq" else fn(symbol)
-            if got:
-                LAST_SOURCE["name"] = name
-                LAST_SOURCE["incremental"] = bool(frm) and name == "nasdaq"
-                if frm:                       # 增量：與舊資料合併
-                    merged = dict(old)
-                    merged.update(dict(got))  # 同一天以新抓到的為準
-                    rows = sorted(merged.items())
+    errs = []
+
+    def _fetch(from_date):
+        """跑一次來源鏈。from_date 為 None 代表整段重抓。"""
+        for name, fn in HIST_SOURCES:
+            try:
+                got = fn(symbol, from_date) if name == "nasdaq" else fn(symbol)
+                if got:
+                    LAST_SOURCE["name"] = name
+                    LAST_SOURCE["incremental"] = bool(from_date) and name == "nasdaq"
+                    if from_date:                 # 增量：與舊資料合併
+                        merged = dict(old)
+                        merged.update(dict(got))  # 同一天以新抓到的為準
+                        out = sorted(merged.items())
+                    else:
+                        out = sorted(dict(got).items())
+                    return out[-HIST_DAYS:]
+            except Exception as e:
+                errs.append("%s: %s %s" % (name, type(e).__name__, str(e)[:90]))
+        return []
+
+    rows = _fetch(frm)
+
+    # ---- 拆股護欄：只有「增量合併」的結果才可能混到兩種口徑 ----
+    #
+    # ⚠️ 比例比對必然會有偽陽性：單日 −50% 的財報爆雷跟 1:2 拆股在數字上長得一樣。
+    #    偽陽性的代價只是「多抓一次完整歷史」，但**不能每天都多抓一次** ——
+    #    所以確認過「來源本身就是這樣」之後，把結論記進 meta，日後直接跳過。
+    #    📌 這條 memo 是整個護欄能不能長期存在的關鍵：
+    #       沒有它，一檔五年前崩過盤的股票會被永遠每天多抓一次，
+    #       而且 /api/diag 上會永遠掛著一個假警告。
+    verified = {tuple(b) for b in (meta.get("verified_breaks") or [])}
+    if frm and rows:
+        fresh = [b for b in _find_split_breaks(rows) if b not in verified]
+        if not fresh:
+            SPLIT_NOTES.pop(key, None)
+        elif _SPLIT_REFETCH.get(key) == _utcnow().strftime("%Y-%m-%d"):
+            SPLIT_NOTES[key] = "%s 疑似拆股 %s，今日已重抓過，暫不重試" % fresh[0]
+        else:
+            _SPLIT_REFETCH[key] = _utcnow().strftime("%Y-%m-%d")
+            full = _fetch(None)
+            if full:
+                rows, frm = full, None          # frm=None 讓下面重寫 meta
+                again = [b for b in _find_split_breaks(rows) if b not in verified]
+                if again:
+                    # 整段重抓後仍有斷層 → 不是快取混到兩種口徑，
+                    # 而是**來源本身就沒還原**（或那天真的暴跌）。記住，別再重抓。
+                    meta["verified_breaks"] = sorted(
+                        [list(b) for b in verified] + [list(b) for b in again])
+                    _save_cache(meta_key, meta)
+                    SPLIT_NOTES[key] = "%s 落差 %s：整段重抓後仍在，判定為來源原始資料" % again[0]
                 else:
-                    rows = sorted(dict(got).items())
-                rows = rows[-HIST_DAYS:]
-                break
-        except Exception as e:
-            errs.append("%s: %s %s" % (name, type(e).__name__, str(e)[:90]))
+                    SPLIT_NOTES[key] = "%s 疑似拆股 %s，已整段重抓修正" % fresh[0]
 
     if not rows:
         _HIST_FAILED.add(key)          # ⚠️ 讓退避縮短成幾分鐘，不要跟假日共用一小時
@@ -553,8 +646,11 @@ def _get_history_now(symbol, key, debug=False):
 
     _save_cache(key, rows)
     if not frm and rows:
-        # 剛做完一次完整抓取，記下起始日 —— 下次就能安心走增量
-        _save_cache(meta_key, {"full_from": need_from, "at": rows[-1][0]})
+        # 剛做完一次完整抓取，記下起始日 —— 下次就能安心走增量。
+        # ⚠️ 用更新而不是整個蓋掉：`verified_break`（拆股護欄的查證結論）
+        #    也存在這個檔裡，蓋掉的話那檔股票會每天被重抓一次，永遠好不了。
+        meta.update({"full_from": need_from, "at": rows[-1][0]})
+        _save_cache(meta_key, meta)
     return rows
 
 
@@ -938,6 +1034,181 @@ def new_high_label(closes):
         if last >= max(closes[-n:]) * (1 - NH_TOL):
             return key
     return ""
+
+
+# ---------------------------------------------------------------- 風控頁
+#
+# 資料口徑已於 2026-08-07 用 `檢查資料口徑.command` 實測確認：
+#   ・整合行情的成交（AAPL 單日 4,600 萬股，級距對）
+#   ・高低價**不含盤前盤後**（70 次跳空只有 6% 被前一日高低涵蓋）
+#   ・**只還原拆股、不還原配息**（KO／JNJ／PG 各 274 天重疊，差異 0.000%）
+#
+# ⚠️⚠️ **停損價是這個站上唯一一個使用者會直接照著下單的數字。**
+#    其他欄位算錯，使用者頂多多看兩眼；停損算錯，他會真的把單掛在錯的價位。
+#    所以這一區的任何一個數字，寧可顯示「—」也不要顯示可疑的值。
+RISK_MAX = 3                    # 最多幾檔（跟台股版一致）
+RISK_ATR_PERIOD = 14
+RISK_VOL_SESSIONS = 126         # 半年年化波動率
+RISK_BETA_SESSIONS = 252        # Beta 用近一年
+RISK_OHLC_DAYS = 150            # 抓幾個日曆天的 OHLC（約 100 個交易日，ATR14 綽綽有餘）
+RISK_OHLC_TTL_H = 12
+RISK_STOP_MULTIPLES = (1.5, 2.0, 3.0)
+
+
+def _hist_ohlc_nasdaq(symbol):
+    """近三個多月的 OHLC。**只給風控頁用，不進 `hist_` 快取。**
+
+    ⚠️ `hist_` 只存 [日期, 收盤價]，是均線／創新高／RS 的唯一來源，
+       定義必須穩定。OHLC 另存一份，兩者不要混。
+    ⚠️ `todate` 一定要用今天 —— 端點對「結束日在過去」的區間會回空
+       （2026-08-07 實測，第一版檢查腳本就是栽在這裡）。
+    """
+    to = _utcnow()
+    frm = to - timedelta(days=RISK_OHLC_DAYS)
+    j = _get(NASDAQ_HIST.format(sym=symbol.upper(),
+                                frm=frm.strftime("%Y-%m-%d"),
+                                to=to.strftime("%Y-%m-%d")), timeout=40, tries=2).json()
+    raw = (((j or {}).get("data") or {}).get("tradesTable") or {}).get("rows") or []
+    out = []
+    for r in raw:
+        d = (r.get("date") or "").strip()
+        o, h, l, c = (_num(r.get("open")), _num(r.get("high")),
+                      _num(r.get("low")), _num(r.get("close")))
+        if not d or None in (h, l, c):
+            continue
+        try:
+            mm, dd, yy = d.split("/")
+        except ValueError:
+            continue
+        out.append({"date": "%s-%s-%s" % (yy, mm, dd),
+                    "open": o, "high": h, "low": l, "close": c})
+    out.sort(key=lambda x: x["date"])
+    return out
+
+
+def get_risk_daily(symbol):
+    """逐檔快取 12 小時的 OHLC。抓不到時**不寫空快取**（否則整天都是空的）。"""
+    key = "risk_daily_%s.json" % symbol.upper()
+    cached = _load_cache(key, RISK_OHLC_TTL_H)
+    if cached is not None:
+        return cached
+    try:
+        rows = _hist_ohlc_nasdaq(symbol)
+    except Exception:
+        rows = []
+    if rows:
+        _save_cache(key, rows)
+    return rows
+
+
+def _atr(records, period=RISK_ATR_PERIOD):
+    """Wilder ATR。records 是依日期排序的 high/low/close 字典串列。
+
+    ⚠️ 真實波幅 = max(當日高低, |高−前收|, |低−前收|)。
+       **中間那兩項就是跳空。** 所以「高低價不含盤後」不代表財報跳空被忽略 ——
+       跳空會完整反映在隔天的 TR 上，這正是 Wilder 這樣定義的原因。
+    """
+    trs, prev_close = [], None
+    for row in records:
+        try:
+            high, low, close = float(row["high"]), float(row["low"]), float(row["close"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        tr = high - low if prev_close is None else max(
+            high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+        prev_close = close
+    if len(trs) < period:
+        return None
+    atr = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+
+def _daily_returns(closes):
+    return [(closes[i] / closes[i - 1] - 1)
+            for i in range(1, len(closes)) if closes[i - 1]]
+
+
+def _annual_vol(closes, sessions=RISK_VOL_SESSIONS):
+    """年化波動率（%）：日報酬標準差 × √252。資料不足回 None。"""
+    if len(closes) < sessions + 1:
+        return None
+    rs = _daily_returns(closes[-(sessions + 1):])
+    if len(rs) < 2:
+        return None
+    mean = sum(rs) / len(rs)
+    var = sum((x - mean) ** 2 for x in rs) / (len(rs) - 1)
+    return math.sqrt(var) * math.sqrt(252) * 100
+
+
+def _beta(dated_closes, idx_map, sessions=RISK_BETA_SESSIONS):
+    """對納斯達克綜合指數的 Beta。
+
+    ⚠️ **一定要按日期對齊再算報酬**，不能各自取最後 N 筆。
+       個股與指數的資料日期常常差一天（FRED 慢一個交易日），
+       各取各的會把不同天的報酬配成一對 —— 算出來的 Beta 看起來正常，卻是錯的。
+    """
+    if not idx_map:
+        return None
+    pairs = [(d, c, idx_map[d]) for d, c in dated_closes if d in idx_map and c]
+    if len(pairs) < 60:
+        return None
+    pairs = pairs[-(sessions + 1):]
+    sr = _daily_returns([p[1] for p in pairs])
+    ir = _daily_returns([p[2] for p in pairs])
+    n = min(len(sr), len(ir))
+    if n < 30:
+        return None
+    sr, ir = sr[-n:], ir[-n:]
+    im = sum(ir) / n
+    sm = sum(sr) / n
+    var = sum((x - im) ** 2 for x in ir)
+    if var <= 0:
+        return None
+    cov = sum((sr[i] - sm) * (ir[i] - im) for i in range(n))
+    return cov / var
+
+
+def risk_metrics(symbols):
+    """回傳每一檔的風控指標。找不到資料的欄位一律 None，前端顯示「—」。"""
+    idx = _load_cache("nasdaq_index.json", 24 * 365) or {}
+    uni = {u.get("symbol"): u for u in (_load_cache("universe.json", None) or [])}
+    out = []
+    for sym in symbols[:RISK_MAX]:
+        sym = (sym or "").upper().strip()
+        if not sym:
+            continue
+        hist = get_history(sym) or []
+        closes = [c for _d, c in hist]
+        ohlc = get_risk_daily(sym)
+        atr = _atr(ohlc)
+        last = closes[-1] if closes else None
+        # ⚠️ ATR 與收盤價要用**同一批資料的最後一天**才對得起來；
+        #    OHLC 有抓到就以它為準，因為 ATR 是從它算的。
+        if ohlc:
+            last = ohlc[-1]["close"]
+        mas = {p: _sma(closes, p) for p in MA_SET}
+        vol, beta = _annual_vol(closes), _beta(hist, idx)
+        u = uni.get(sym) or {}
+        out.append({
+            "symbol": sym,
+            "name": u.get("name") or sym,
+            "name_zh": zh_company(sym, u.get("name") or sym),
+            "sector": u.get("sector") or "",
+            "sector_zh": zh_sector(u.get("sector") or ""),
+            "close": round(last, 2) if last else None,
+            "as_of": (ohlc[-1]["date"] if ohlc else (hist[-1][0] if hist else None)),
+            "atr": round(atr, 2) if atr else None,
+            "atr_pct": round(atr / last * 100, 2) if (atr and last) else None,
+            "vol": round(vol, 1) if vol else None,
+            "align": align_label(mas),
+            "beta": round(beta, 2) if beta is not None else None,
+            "ma": {str(p): (round(v, 2) if v else None) for p, v in mas.items()},
+            "sessions": len(ohlc),
+        })
+    return out
 
 
 def align_label(mas):
@@ -1983,7 +2254,25 @@ def prefetch(universe_n=300, force=False):
 #    （3 月第 2 個週日 ～ 11 月第 1 個週日），自己算 15 行就好，
 #    符合本專案「只用 flask/requests/gunicorn」的相依原則。
 
-UPDATE_HOUR_ET = int(os.environ.get("UPDATE_HOUR_ET", "18"))
+# ⚠️⚠️ **這是「開始嘗試」的時間，不是「一定會抓到」的時間。**
+#
+# 2026-08-07 從 18 提前到 17（收盤後 1 小時，台灣夏令 05:00／冬令 06:00）。
+# 原本堅持 18:00 的理由是：Nasdaq 的當日 K 線要等官方結算寫入，
+# 收盤瞬間去抓常常只回到前一交易日，而增量抓取會判定「今天沒有新資料」，
+# **要等隔天才補上** —— 看起來有在更新，實際整天慢一天，比不排程更難察覺。
+#
+# 現在可以提前，是因為改成「**先探測、抓到才跑全量**」：
+#   17:00 用單一檔股票探測今天的收盤有沒有出來（1 次請求，很便宜）
+#   → 有：立刻跑全量 300 檔
+#   → 沒有：等 UPDATE_RETRY_MINUTES 再探測一次，最多 UPDATE_MAX_PROBES 次
+#   → 都沒有（例如國定假日）：最後仍跑一次全量，然後結束
+#
+# 📌 所以提前的風險被吸收掉了：來源準備好就早一小時拿到，
+#    來源還沒好也不會像以前那樣「錯過就等明天」。
+UPDATE_HOUR_ET = int(os.environ.get("UPDATE_HOUR_ET", "17"))
+UPDATE_RETRY_MINUTES = int(os.environ.get("UPDATE_RETRY_MINUTES", "20"))
+UPDATE_MAX_PROBES = int(os.environ.get("UPDATE_MAX_PROBES", "7"))   # 17:00～19:00
+PROBE_SYMBOL = os.environ.get("PROBE_SYMBOL", "AAPL")
 # ⚠️ 行程啟動時刻。診斷要靠它判斷「是不是每次看都剛重啟」——
 #    gunicorn 的 --timeout 太短時 worker 會被反覆砍掉，PID 每次都不同。
 PROCESS_STARTED_TS = time.time()
@@ -1998,7 +2287,8 @@ PROCESS_STARTED_TS = time.time()
 IMPORT_PID = os.getpid()
 
 SCHED_STATE = {"enabled": False, "next_run": "—", "last_run": "—", "last_result": "—",
-               "alerts_result": "—", "loop_error": "", "heartbeat": "—", "heartbeat_ts": 0}
+               "alerts_result": "—", "loop_error": "", "heartbeat": "—", "heartbeat_ts": 0,
+               "probe": "—", "probe_error": ""}
 
 # 上次更新紀錄寫在持久化磁碟，重啟後仍看得到。
 # 只存 last_run / last_result 兩個欄位 —— next_run 每次啟動都會重算，存了反而會誤導。
@@ -2090,6 +2380,51 @@ def _beat():
     SCHED_STATE["heartbeat"] = _fmt_et(_utcnow())
 
 
+def _sleep_beats(seconds):
+    """分段睡眠並持續更新心跳。
+
+    ⚠️ **背景執行緒裡不要一次睡很久。** 睡 20 分鐘期間心跳不會更新，
+       診斷頁會顯示「有啟動但心跳停了 N 分鐘」—— 看起來像執行緒死了。
+       把「等待」誤判成「死亡」會讓人去查一個根本不存在的問題。
+    """
+    end = time.time() + max(0.0, seconds)
+    while True:
+        remain = end - time.time()
+        if remain <= 0:
+            return
+        time.sleep(min(60.0, remain))
+        _beat()
+
+
+def _target_session_et():
+    """這次排程「應該要抓到」的交易日：美東今天（平日）。
+
+    ⚠️ 不處理國定假日 —— 假日時這個日期不存在，探測永遠追不上，
+       所以呼叫端一定要有次數上限（`UPDATE_MAX_PROBES`），不能無限等。
+    """
+    et = _utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))
+    return et.strftime("%Y-%m-%d") if et.weekday() < 5 else None
+
+
+def _probe_last_session(symbol=None):
+    """**單檔**探測：來源目前最新的交易日是哪一天。抓不到回 None。
+
+    ⚠️ **只讀不寫，絕對不碰任何快取。** 這支的用途是「先問問看資料好了沒」，
+       一次請求、只要最近幾天，成本大約是全量預抓的三百分之一。
+    📌 有了它，排程才敢提前到收盤後一小時：探到才跑全量，
+       探不到就等一下再探 —— 而不是像以前那樣「時間到就全量抓一次，錯過等明天」。
+    """
+    sym = symbol or PROBE_SYMBOL
+    frm = (_utcnow() - timedelta(days=12)).strftime("%Y-%m-%d")
+    try:
+        rows = _hist_nasdaq(sym, frm)
+    except Exception as e:
+        SCHED_STATE["probe_error"] = "%s: %s" % (type(e).__name__, str(e)[:80])
+        return None
+    SCHED_STATE["probe_error"] = ""
+    return max((d for d, _c in rows), default=None)
+
+
 def _daily_updater():
     """外層只做一件事：**確保沒有任何例外能無聲逃走**。
 
@@ -2139,6 +2474,27 @@ def _daily_updater_inner():
                     break
                 time.sleep(min(300.0, remain))
                 _beat()
+            # ---- 先探測：來源今天的收盤出來了沒 ----
+            # ⚠️ 探測失敗**不能**讓這一輪跳過全量預抓：探測只有一檔，
+            #    它可能剛好抓失敗、或那一檔停牌。探不到最後還是要跑一次，
+            #    否則「探測壞掉」會變成「整天不更新」，而且沒有任何錯誤。
+            target = _target_session_et()
+            probes, got = 0, None
+            while target and probes < UPDATE_MAX_PROBES:
+                got = _probe_last_session()
+                probes += 1
+                SCHED_STATE["probe"] = ("第 %d/%d 次：來源最新 %s（目標 %s）"
+                                        % (probes, UPDATE_MAX_PROBES, got or "—", target))
+                _beat()
+                if got and got >= target:
+                    break
+                if probes >= UPDATE_MAX_PROBES:
+                    break
+                _sleep_beats(UPDATE_RETRY_MINUTES * 60)
+            if target:
+                SCHED_STATE["probe"] += (
+                    "　✅ 探到當日收盤，開始全量更新" if (got and got >= target)
+                    else "　⚠️ 探測次數用完仍未見當日收盤（可能休市），仍跑一次全量")
             try:
                 prefetch(300, force=True)   # ⚠️ 收盤後必須繞過 TTL，見 load_histories
                 SCHED_STATE["last_result"] = "成功"
@@ -2372,6 +2728,42 @@ __SEO_HEAD__
             font-size:14.5px; color:var(--espresso); display:flex; justify-content:space-between;
             align-items:center; }
   .picked .clr { color:var(--caramel-2); cursor:pointer; font-size:13px; }
+  /* ---- 風控管理 ---- */
+  .chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px;
+            background:var(--milk); border:1px solid var(--grounds); border-radius:999px;
+            font-family:var(--font-num); font-weight:700; font-size:14px; }
+  .chip i { font-style:normal; cursor:pointer; color:var(--mocha); font-size:12px; }
+  .chip i:hover { color:var(--up); }
+  .rk-card { padding:16px 18px; }
+  .rk-h { display:flex; align-items:baseline; gap:9px; }
+  .rk-h b { font-family:var(--font-num); font-size:19px; color:var(--espresso); }
+  .rk-h span { font-size:14px; color:var(--mocha); flex:1; }
+  .rk-h i { font-style:normal; cursor:pointer; color:var(--mocha); font-size:13px; }
+  .rk-sub { font-size:12.5px; color:var(--mocha); margin:3px 0 12px;
+            font-family:var(--font-num); }
+  .rk-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+  .rk-i { background:var(--foam); border:1px solid var(--grounds);
+            border-radius:10px; padding:9px 11px; }
+  .rk-i .k { font-size:11.5px; color:var(--mocha); font-weight:700; }
+  .rk-i .v { font-size:17px; font-weight:700; font-family:var(--font-num);
+            color:var(--espresso); margin:2px 0 1px; }
+  .rk-i .v small { font-family:var(--font-num); font-size:12px; color:var(--mocha); }
+  .rk-i .n { font-size:11px; color:var(--mocha); line-height:1.5; }
+  .rk-entry { display:flex; align-items:center; gap:9px; margin-top:12px; }
+  .rk-entry span { font-size:13px; color:var(--mocha); font-weight:700; white-space:nowrap; }
+  .rk-entry input { flex:1; padding:9px 11px; font-size:15px; font-family:var(--font-num);
+            border:1.5px solid var(--grounds); border-radius:10px; background:#fff;
+            box-sizing:border-box; }
+  .rk-entry input:focus { outline:none; border-color:var(--caramel); }
+  .rk-stops { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-top:10px;
+            background:var(--milk); border-radius:10px; padding:10px 12px; }
+  .rk-stops div { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+  .rk-stops span { font-size:12px; color:var(--mocha); }
+  .rk-stops b { font-family:var(--font-num); font-size:15px; color:var(--espresso); }
+  .rk-hint { margin-top:10px; font-size:12.5px; color:var(--mocha); line-height:1.7; }
+  @media (max-width:640px){
+    .rk-grid, .rk-stops { grid-template-columns:1fr; }
+  }
   /* 載入中：泡咖啡冒煙動畫 */
   .brewbox { position:relative; width:64px; height:60px; }
   .brewbox .steam { position:absolute; top:0; width:5px; height:20px; border-radius:3px;
@@ -2518,6 +2910,12 @@ __SEO_HEAD__
   .navitem small, .navgroup summary small { padding-left:30px; }
   .navgroup .navitem.sub small { padding-left:30px; }
   /* 首頁：科斯托蘭尼名言卡 */
+  .updnote { max-width:560px; margin:0 auto 14px; padding:9px 13px;
+            background:var(--foam); border:1px solid var(--grounds); border-radius:10px;
+            font-size:12.5px; color:var(--mocha); line-height:1.75; }
+  .updnote b { color:var(--espresso); font-family:var(--font-num); }
+  .updnote small { display:block; font-size:11.5px; color:var(--mocha);
+            opacity:.85; margin-top:3px; line-height:1.6; }
   .qhead { display:flex; align-items:center; gap:12px; max-width:560px;
            margin:26px auto 14px; font-family:var(--font-head); font-weight:700;
            font-size:13px; color:var(--mocha); letter-spacing:.16em; }
@@ -2777,6 +3175,8 @@ __SEO_HEAD__
 
 __PHASE_BAR__
 
+__UPDATE_NOTE__
+
   <details class="mk-box" id="brBox">
     <summary><span class="mk-main"><b data-i18n="br.open">大盤詳細數據</b></span></summary>
     <div class="mk-body">
@@ -2994,13 +3394,54 @@ __HOME_SCREEN__
 <!-- ============ 我的自選股：風控管理 ============ -->
 <div class="page" id="p8">
   <h2 class="ptitle" data-i18n="p8.title">風控管理</h2>
-  <div class="card" style="text-align:center;padding:30px 22px">
-    <div style="font-size:42px;margin-bottom:10px">🛡️</div>
-    <h2 data-i18n="risk.preparing">美股風控資料準備中</h2>
-    <div style="font-size:14px;color:#666;line-height:1.9" data-i18n="risk.preparingNote">
-      將提供自選股 ATR、波動率、均線趨勢與 Beta，並搭配進場價計算初始停損與移動停損。美股 OHLC 資料口徑確認後開放。
+  <details class="pgintro">
+    <summary data-i18n="risk.introT">先想清楚會賠多少，再想能賺多少</summary>
+    <div class="pgintro-b" data-i18n-html="risk.intro">
+      <p>這頁把你持有的股票攤開來看四件事：<b>每天大概會動多少（ATR）</b>、
+      <b>整體有多顛（波動率）</b>、<b>趨勢還在不在（均線排列）</b>、
+      以及<b>跟大盤的連動程度（Beta）</b>。</p>
+      <p>填進場價之後，會用 ATR 幫你算出<b>初始停損</b>與<b>移動停損</b>。
+      重點不是那個數字有多精準，而是<b>逼你在買進之前就把出場條件寫下來</b>——
+      套牢之後才想停損，通常就不會停了。</p>
+      <p><b>為什麼用 ATR 而不是固定百分比</b>：同樣是 5%，對一檔日均波動 1% 的
+      公用事業股來說是很遠的停損，對日均波動 6% 的高波動股卻是「今天就會被掃到」。
+      ATR 是「這檔股票平常一天會動多少」，用它當單位，
+      停損距離才會自動跟著標的的性格調整。</p>
+      <p><b>資料只存在這台裝置的瀏覽器</b>，不會上傳、也沒有帳號系統。
+      換裝置或清除瀏覽資料就會不見——這點先講清楚，不假裝有同步。</p>
+    </div>
+  </details>
+
+  <div class="card">
+    <h2><span class="stepno">01</span><span data-i18n="risk.pick">選擇持股（最多 3 檔）</span></h2>
+    <div class="stockpick" style="position:relative">
+      <input id="rkInput" type="text" autocomplete="off" data-i18n-ph="risk.ph"
+             placeholder="輸入代號或公司名，例如 AAPL">
+      <div id="rkSuggest" class="suggest"></div>
+    </div>
+    <div style="font-size:12px;color:#888;line-height:1.7;margin-top:8px"
+         data-i18n="risk.pickNote">只提供市值前 300 大。選好後按下方按鈕計算。</div>
+    <div id="rkChips" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="stepno">02</span><span data-i18n="risk.mult">停損倍數</span></h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <label class="opt" style="margin:0"><input type="radio" name="rkMult" value="1.5"><span data-i18n="risk.m15">1.5 × ATR（短線）</span></label>
+      <label class="opt" style="margin:0"><input type="radio" name="rkMult" value="2" checked><span data-i18n="risk.m2">2 × ATR（波段）</span></label>
+      <label class="opt" style="margin:0"><input type="radio" name="rkMult" value="3"><span data-i18n="risk.m3">3 × ATR（長抱）</span></label>
+    </div>
+    <div style="font-size:12px;color:#888;line-height:1.8;margin-top:10px"
+         data-i18n-html="risk.multNote">
+      倍數越大，停損越遠、越不容易被洗掉，但每次認錯的代價也越大。
+      <b>⚠️ 停損最常見的錯誤是設太遠</b>——如果你發現自己一直往上調倍數，
+      通常代表部位開太大，該調的是張數不是停損。
     </div>
   </div>
+
+  <button class="gobtn" id="rkBtn" data-i18n="risk.btn">計算風控指標</button>
+  <div class="status" id="rkStatus"></div>
+  <div id="rkResult"></div>
 </div>
 
 <!-- ============ 我的自選股：推播通知 ============ -->
@@ -3190,8 +3631,28 @@ const I18N = { en: {
   "p7.introT": "Your return is probably wrong",
   "p7.intro": "<p>Most people compute return as \"current assets ÷ money put in − 1\". That is fine as long as you never added or withdrew funds midway — <b>but a single irregular transfer distorts it</b>.</p><p>An extreme example: you start the year with $1M and lose 20% in the first half, leaving $800k. In July you wire in another $1M and gain 10% in the second half, ending at $1.98M. Assets over contributions gives −1%, which looks like a small loss. But what you actually did was lose 20% and then gain 10% — that is <b>−12%</b>. The gap exists because <b>most of your money arrived after the loss</b>. That is timing, not skill.</p><p><b>Time-weighted return (TWR)</b> removes that effect: each month is treated as its own period, and the monthly returns are chained together. Deposits and withdrawals make no difference to the result. This is the standard for funds and managed accounts, precisely because a manager cannot control when clients wire money in.</p><p><b>How it differs from IRR (money-weighted)</b>: IRR accounts for how much you invested and when, answering \"how did this pot of money do?\" TWR answers \"how good were my picks and my timing of entries and exits?\" Use TWR to judge your process; use IRR to see what actually landed in your pocket.</p><p><b>What to enter</b>: just two columns per month — <b>net deposit</b> (deposits minus withdrawals; use a negative number for withdrawals) and <b>month-end total assets</b> (cash plus the market value of all holdings). Leave future months blank; only the months you fill are used, and you get both cumulative and annualised figures.</p><p><b>Everything stays in this browser</b> (localStorage). Nothing is uploaded and there is no account system. The upside is no sign-up; the cost is that changing device or clearing site data loses it — worth saying plainly rather than pretending there is sync.</p>",
   "p8.title": "Risk Dashboard", "p4.title": "Price Alerts",
-  "risk.preparing": "US risk data is being prepared",
-  "risk.preparingNote": "This page will provide ATR, volatility, moving-average trend and Beta for your watchlist, plus initial and trailing stops based on your entry price. It will open after the US OHLC data definition is verified.",
+  "risk.introT": "Work out what you can lose before what you can make",
+  "risk.intro": "<p>This page lays out four things about the stocks you hold: <b>how much it typically moves in a day (ATR)</b>, <b>how choppy it is overall (volatility)</b>, <b>whether the trend is still intact (MA alignment)</b>, and <b>how tightly it tracks the market (Beta)</b>.</p><p>Enter your entry price and it computes an <b>initial stop</b> and a <b>trailing stop</b> from ATR. The value isn't in the precision of that number — it's in <b>forcing you to write down the exit before you buy</b>. Decide a stop after you're underwater and you usually won't take it.</p><p><b>Why ATR instead of a fixed percentage</b>: 5% is a distant stop for a utility that moves 1% a day, and a same-day stop-out for a name that moves 6%. ATR is \"how much this stock normally moves in a day\", so using it as the unit makes the stop distance adapt to the character of the stock.</p><p><b>Everything stays in this browser</b> — nothing is uploaded and there is no account system. Changing device or clearing site data loses it, which is worth saying plainly rather than pretending there is sync.</p>",
+  "risk.pick": "Pick your holdings (up to 3)",
+  "risk.ph": "Ticker or company name, e.g. AAPL",
+  "risk.pickNote": "Top 300 by market cap only. Choose them, then press the button below.",
+  "risk.mult": "Stop multiple",
+  "risk.m15": "1.5 × ATR (short term)", "risk.m2": "2 × ATR (swing)", "risk.m3": "3 × ATR (long hold)",
+  "risk.multNote": "A larger multiple means a wider stop that is harder to get shaken out of — but every time you are wrong it costs more. <b>⚠️ The most common mistake with stops is setting them too far away.</b> If you find yourself steadily raising the multiple, the position is usually too large: adjust the size, not the stop.",
+  "risk.btn": "Calculate Risk Metrics",
+  "risk.calc": "Calculating… (the first run fetches data, ~15 seconds)",
+  "risk.none": "Pick at least one stock first",
+  "risk.max": "Up to 3 at a time — remove one first",
+  "risk.fail": "Calculation failed, please try again later",
+  "risk.needEntry": "Enter your entry price and the initial and trailing stops will appear here",
+  "risk.initStop": "Initial stop", "risk.trailStop": "Trailing stop",
+  "risk.peak": "Peak since set", "risk.dist": "Distance to stop",
+  "risk.entry": "Entry price",
+  "risk.nAtr": "Typical daily range — the unit for stop distance",
+  "risk.kVol": "Volatility (6m, annualised)",
+  "risk.nVol": "Overall choppiness — use it to size the position",
+  "risk.kAlign": "MA trend", "risk.nAlign": "Whether the trend is still intact",
+  "risk.nBeta": "Sensitivity to the Nasdaq Composite; above 1 moves more than the market",
   "alert.preparing": "US close-price alerts are being prepared",
   "alert.preparingNote": "Alerts will check official US closing prices against your targets and notify this device. The feature will open after push keys, subscription storage and the US close schedule are ready.",
   "p5.title": "Pro｜New Highs", "p9.title": "Pro｜RS Ranking",
@@ -4337,6 +4798,177 @@ async function clearUsPushBadge(){
 }
 clearUsPushBadge();
 
+/* ================= 風控管理（/risk）=================
+   ⚠️ 進場價、追蹤最高價與停損只存在 localStorage（us_risk_positions），
+      跟到價提醒的 us_push_cid 一樣不上傳。沒有帳號系統是刻意的取捨。 */
+const RK_KEY = "us_risk_positions";
+let rkList = [], rkStocks = [], rkLoaded = false, rkSugIdx = -1, rkLast = null;
+
+function rkLoad(){
+  try { return JSON.parse(localStorage.getItem(RK_KEY) || "{}") || {}; }
+  catch(_){ return {}; }
+}
+function rkSave(o){ try { localStorage.setItem(RK_KEY, JSON.stringify(o)); } catch(_){} }
+function rkMult(){ return parseFloat((document.querySelector("input[name=rkMult]:checked") || {}).value || "2"); }
+
+async function rkLoadStocks(){
+  if (rkLoaded) return;
+  try {
+    const r = await fetch("/api/stocklist", {headers: {"X-App-Token": APP_TOKEN}});
+    if (!r.ok) throw new Error("stock list " + r.status);
+    rkStocks = await r.json(); rkLoaded = true;
+  } catch(e){
+    $("#rkInput").placeholder = t("alert.loadFail", "股票清單載入失敗，請重新整理");
+  }
+}
+async function rkSearch(){
+  await rkLoadStocks();
+  const raw = ($("#rkInput").value || "").trim(), kw = raw.toUpperCase();
+  const box = $("#rkSuggest");
+  if (!raw){ box.classList.remove("show"); return; }
+  const hit = rkStocks.filter(s => s.code.indexOf(kw) === 0
+    || (s.name || "").toUpperCase().indexOf(kw) >= 0
+    || (s.name_zh || "").indexOf(raw) >= 0).slice(0, 20);
+  rkSugIdx = -1;
+  if (!hit.length){
+    box.innerHTML = '<div class="empty">'
+      + t("alert.notFound", "找不到符合的股票（僅限市值前 300 大）") + "</div>";
+    box.classList.add("show"); return;
+  }
+  box.innerHTML = hit.map(s => {
+    const nm = (LANG === "en") ? s.name : (s.name_zh || s.name);
+    return '<div onclick="rkAdd(\'' + s.code + '\')"><b>' + s.code + "</b>" + nm + "</div>";
+  }).join("");
+  box.classList.add("show");
+}
+function rkAdd(code){
+  $("#rkInput").value = "";
+  $("#rkSuggest").classList.remove("show");
+  if (rkList.indexOf(code) >= 0) return;
+  if (rkList.length >= 3){
+    $("#rkStatus").textContent = t("risk.max", "最多同時看 3 檔，請先移除一檔");
+    return;
+  }
+  rkList.push(code); rkChips(); $("#rkStatus").textContent = "";
+}
+function rkDel(code){
+  rkList = rkList.filter(x => x !== code);
+  rkChips();
+  if (rkLast) rkRender(rkLast);
+}
+function rkChips(){
+  $("#rkChips").innerHTML = rkList.map(c =>
+    '<span class="chip">' + c + '<i onclick="rkDel(\'' + c + '\')">✕</i></span>').join("");
+}
+
+/* ⚠️⚠️ 移動停損：**只上移、不下調**。
+   前次停損當下限，避免 ATR 變大時停損反而往下跑（那等於自己放寬認錯的標準）。
+   ⚠️ 但**使用者手動改倍數時要重算**，不受前次下限限制 ——
+      下限的用意是擋住「指標波動造成的放寬」，不是把使用者的決定鎖死。 */
+function rkStops(sym, price, atr, mult){
+  const all = rkLoad(), p = all[sym] || {};
+  const entry = parseFloat(p.entry || "");
+  if (!(entry > 0) || !(atr > 0)) return null;
+  const peak = Math.max(parseFloat(p.peak || 0) || 0, price || 0, entry);
+  const initial = entry - mult * atr;
+  let trail = peak - mult * atr;
+  const sameMult = String(p.mult || "") === String(mult);
+  if (sameMult && p.stop != null) trail = Math.max(trail, parseFloat(p.stop));
+  if (trail < initial) trail = initial;
+  all[sym] = {entry: entry, peak: peak, stop: trail, mult: mult};
+  rkSave(all);
+  return {entry: entry, peak: peak, initial: initial, trail: trail};
+}
+function rkSetEntry(sym, v){
+  const all = rkLoad(), p = all[sym] || {};
+  const n = parseFloat(v);
+  if (!(n > 0)){ delete all[sym]; rkSave(all); if (rkLast) rkRender(rkLast); return; }
+  /* 改進場價等於重新開始一個部位：追蹤最高價與停損都要歸零重算。 */
+  all[sym] = {entry: n, peak: n, stop: null, mult: null};
+  rkSave(all); if (rkLast) rkRender(rkLast);
+}
+
+function rkFmt(v, d){ return (v == null) ? "—" : Number(v).toFixed(d == null ? 2 : d); }
+function rkRender(data){
+  rkLast = data;
+  const mult = rkMult();
+  const rows = (data.rows || []).filter(r => rkList.indexOf(r.symbol) >= 0);
+  if (!rows.length){ $("#rkResult").innerHTML = ""; return; }
+  $("#rkResult").innerHTML = rows.map(r => {
+    const nm = (LANG === "en") ? r.name : (r.name_zh || r.name);
+    const s = rkStops(r.symbol, r.close, r.atr, mult);
+    let stopHtml = '<div class="rk-hint">'
+      + t("risk.needEntry", "填入進場價後，這裡會算出初始停損與移動停損") + "</div>";
+    if (s){
+      const dist = (r.close && s.trail) ? (r.close - s.trail) / r.close * 100 : null;
+      const lamp = (dist == null) ? "" : (dist < 0 ? "🔴" : (dist <= 5 ? "🟡" : "🟢"));
+      stopHtml = '<div class="rk-stops">'
+        + '<div><span>' + t("risk.initStop", "初始停損") + "</span><b>"
+        + rkFmt(s.initial) + "</b></div>"
+        + '<div><span>' + t("risk.trailStop", "移動停損") + "</span><b>"
+        + rkFmt(s.trail) + "</b></div>"
+        + '<div><span>' + t("risk.peak", "設定後最高") + "</span><b>"
+        + rkFmt(s.peak) + "</b></div>"
+        + '<div><span>' + t("risk.dist", "距離停損") + "</span><b>" + lamp + " "
+        + (dist == null ? "—" : (dist.toFixed(1) + "%")) + "</b></div></div>";
+    }
+    return '<div class="card rk-card">'
+      + '<div class="rk-h"><b>' + r.symbol + "</b><span>" + nm + "</span>"
+      + '<i onclick="rkDel(\'' + r.symbol + '\')">✕</i></div>'
+      + '<div class="rk-sub">' + t("th.last", "收盤") + " " + rkFmt(r.close)
+      + (r.as_of ? ("　" + r.as_of) : "") + "</div>"
+      + '<div class="rk-grid">'
+      + '<div class="rk-i"><div class="k">ATR（' + (data.atr_period || 14) + '）</div><div class="v">'
+      + rkFmt(r.atr) + (r.atr_pct ? ('　<small>' + r.atr_pct + "%</small>") : "")
+      + '</div><div class="n">' + t("risk.nAtr", "每日典型波動，停損距離的單位") + "</div></div>"
+      + '<div class="rk-i"><div class="k">' + t("risk.kVol", "半年年化波動率") + '</div><div class="v">'
+      + (r.vol == null ? "—" : (r.vol + "%"))
+      + '</div><div class="n">' + t("risk.nVol", "整體顛簸程度，用來決定部位大小") + "</div></div>"
+      + '<div class="rk-i"><div class="k">' + t("risk.kAlign", "均線趨勢") + '</div><div class="v">'
+      + alignName(r.align)
+      + '</div><div class="n">' + t("risk.nAlign", "趨勢還在不在") + "</div></div>"
+      + '<div class="rk-i"><div class="k">Beta</div><div class="v">' + rkFmt(r.beta)
+      + '</div><div class="n">' + t("risk.nBeta", "對納斯達克綜合指數的連動；>1 比大盤敏感") + "</div></div>"
+      + "</div>"
+      + '<div class="rk-entry"><span>' + t("risk.entry", "進場價") + "</span>"
+      + '<input type="number" step="0.01" value="' + ((rkLoad()[r.symbol] || {}).entry || "")
+      + '" onchange="rkSetEntry(\'' + r.symbol + '\', this.value)"></div>'
+      + stopHtml + "</div>";
+  }).join("");
+}
+
+async function runRisk(){
+  if (!rkList.length){
+    $("#rkStatus").textContent = t("risk.none", "請先選擇至少一檔股票");
+    return;
+  }
+  const btn = $("#rkBtn");
+  btn.disabled = true;
+  $("#rkStatus").textContent = t("risk.calc", "計算中…（第一次會抓資料，約十幾秒）");
+  try {
+    const r = await fetch("/api/risk", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-App-Token": APP_TOKEN},
+      body: JSON.stringify({symbols: rkList})
+    });
+    if (r.status === 403){ retryOnStaleToken(); return; }
+    const j = await r.json();
+    if (j.error){ $("#rkStatus").textContent = j.error; return; }
+    $("#rkStatus").textContent = "";
+    rkRender(j);
+  } catch(e){
+    $("#rkStatus").textContent = t("risk.fail", "計算失敗，請稍後再試");
+  } finally { btn.disabled = false; }
+}
+
+if ($("#rkBtn")){
+  $("#rkBtn").onclick = runRisk;
+  $("#rkInput").oninput = rkSearch;
+  document.querySelectorAll("input[name=rkMult]").forEach(el => {
+    el.onchange = () => { if (rkLast) rkRender(rkLast); };
+  });
+}
+
 /* ---- 依網址開對應分頁 ---- */
 if (START_PAGE && $("#" + START_PAGE)){
   document.querySelectorAll(".page").forEach(p => p.classList.remove("show"));
@@ -4454,12 +5086,17 @@ PAGE_ROUTES = {
                "How to read the US market, how to use moving averages and market breadth, and how "
                "US and Taiwan markets differ — the US Stock Coffee article index."),
     },
-    # ↓ 以下四頁 index=False：兩頁是準備中、兩頁是功能試作，內容都還太薄。
+    # ⚠️ `risk` 在 2026-08-07 功能完成後改成 index=True。
+    #    ↓ 以下三頁仍是 index=False：一頁測試中、兩頁功能試作，內容都還太薄。
     "risk": {
-        "page": "p8", "index": False,
-        "zh": ("風控管理｜自選股 ATR 與波動率", "自選股的 ATR、波動率與停損管理。開發中。"),
-        "en": ("Risk Dashboard｜ATR and Volatility",
-               "ATR, volatility and stop management for your watchlist. In development."),
+        "page": "p8", "index": True,
+        "zh": ("風控管理｜自選股 ATR、波動率、均線趨勢與 Beta",
+               "選最多 3 檔持股，一次看清 14 日 ATR、半年年化波動率、均線趨勢與對納斯達克的 Beta，"
+               "並用進場價算出初始停損與移動停損。資料只存在你的瀏覽器，免註冊。"),
+        "en": ("Risk Dashboard｜ATR, Volatility, MA Trend and Beta",
+               "Pick up to 3 holdings and see 14-day ATR, six-month annualised volatility, "
+               "moving-average trend and beta to the Nasdaq Composite, plus initial and trailing "
+               "stops from your entry price. Stored only in your browser, no sign-up."),
     },
     "alerts": {
         "page": "p4", "index": False,
@@ -4692,6 +5329,42 @@ def _compress(resp):
 
 
 
+def _update_note_html():
+    """首頁的「資料日期 ＋ 下次預計更新」。**只讀快取與時間，不連網。**
+
+    ⚠️⚠️ **要誠實地講成一個區間，不是一個時間點。**
+       排程是「17:00 ET 開始探測，探到當日收盤才跑全量」，
+       所以完成時間落在 17:00～19:00 ET 之間，取決於來源什麼時候備妥。
+       寫死一個「05:00 更新」看起來精準，但**那個精準是假的** ——
+       使用者 05:05 來看發現沒更新，只會覺得網站壞了。
+
+    ⚠️ 夏令／冬令的台灣時間不一樣（差一小時），所以**用 `_next_update_utc()`
+       實際算出來的那個時間點換算**，不要在畫面上寫死「05:00」。
+    """
+    try:
+        nxt = _next_update_utc()
+    except Exception:
+        return ""
+    tw_start = nxt + timedelta(hours=8)                      # UTC → 台北
+    tw_end = tw_start + timedelta(
+        minutes=(UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES)
+    as_of = _home_screen_target_date() or ""
+    zh = ("資料日期 <b>%s</b>　·　下次更新 <b>%s %s–%s</b>（台灣時間）"
+          % (as_of.replace("-", "/") or "—",
+             tw_start.strftime("%m/%d"), tw_start.strftime("%H:%M"),
+             tw_end.strftime("%H:%M")))
+    en = ("Data as of <b>%s</b>　·　next update <b>%s %s–%s</b> Taipei time"
+          % (as_of or "—", tw_start.strftime("%m/%d"),
+             tw_start.strftime("%H:%M"), tw_end.strftime("%H:%M")))
+    tip_zh = "美股 16:00 收盤後，官方結算寫入才抓得到；來源備妥就更新，最晚不超過區間結束。"
+    tip_en = ("US markets close at 16:00 ET; the daily bar is only available after "
+              "official settlement. We update as soon as the source is ready.")
+    return ('<div class="updnote">'
+            '<span class="q-zh">' + zh + '<small>' + tip_zh + '</small></span>'
+            '<span class="q-en" style="display:none">' + en
+            + '<small>' + tip_en + '</small></span></div>')
+
+
 def _phase_banner_html():
     """首頁的「今日市場」。**只讀快取**，讀不到就回空字串。
 
@@ -4917,6 +5590,7 @@ def _render(slug=None):
     html = html.replace("__START_PAGE__", start_page, 1)
     html = html.replace("__TW_URL__", TW_URL)
     html = html.replace("__PHASE_BAR__", _phase_banner_html())
+    html = html.replace("__UPDATE_NOTE__", _update_note_html())
     html = html.replace("__HOME_SCREEN__", _home_screen_html())
     # ⚠️ 只放**公開**金鑰。VAPID_PRIVATE 絕對不能出現在頁面上。
     html = html.replace("__VAPID_PUBLIC__", VAPID_PUBLIC)
@@ -5112,6 +5786,31 @@ def api_stocklist():
                      "name": u.get("name", ""),
                      "name_zh": zh_company(u.get("symbol", ""), u.get("name", ""))}
                     for u in uni[:300] if u.get("symbol")])
+
+
+@app.route("/api/risk", methods=["POST"])
+def api_risk():
+    """風控頁：一次算最多 3 檔的 ATR／波動率／均線趨勢／Beta。
+
+    ⚠️ 會連網抓 OHLC（每檔 12 小時快取一次），所以**必須限制檔數**。
+       上限 3 檔與台股版一致 —— 這不是效能考量而已，
+       風控本來就該只放在你真的持有的部位上。
+    """
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    p = request.get_json(silent=True) or {}
+    syms = [str(x).upper().strip() for x in (p.get("symbols") or []) if str(x).strip()]
+    syms = list(dict.fromkeys(syms))            # 去重、保順序
+    if not syms:
+        return jsonify(rows=[])
+    if len(syms) > RISK_MAX:
+        return jsonify(error="最多只能同時看 %d 檔" % RISK_MAX), 400
+    try:
+        return jsonify(rows=risk_metrics(syms), atr_period=RISK_ATR_PERIOD,
+                       vol_sessions=RISK_VOL_SESSIONS,
+                       beta_sessions=RISK_BETA_SESSIONS)
+    except Exception as e:
+        return jsonify(error="風控資料計算失敗：%s" % str(e)[:80]), 500
 
 
 @app.route("/api/alerts", methods=["GET", "POST"])
@@ -5511,9 +6210,17 @@ def api_diag():
     w("  背景執行緒行程   : %s" % (_BG_PID if _BG_PID else "❌ 還沒啟動"))
     if SCHED_STATE.get("loop_error"):
         w("  ⚠️ 骨幹錯誤     : %s" % SCHED_STATE["loop_error"])
-    w("  觸發時間        : 每個美東交易日 %02d:00 ET（收盤後 %d 小時）"
+    w("  開始嘗試時間     : 每個美東交易日 %02d:00 ET（收盤後 %d 小時）"
       % (UPDATE_HOUR_ET, UPDATE_HOUR_ET - 16))
+    w("  探測策略        : 每 %d 分鐘用 %s 探一次，最多 %d 次（到 %02d:%02d ET），"
+      "探到當日收盤才跑全量"
+      % (UPDATE_RETRY_MINUTES, PROBE_SYMBOL, UPDATE_MAX_PROBES,
+         UPDATE_HOUR_ET + (UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES // 60,
+         (UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES % 60))
     w("  下次更新        : %s" % SCHED_STATE["next_run"])
+    w("  上次探測        : %s" % SCHED_STATE.get("probe", "—"))
+    if SCHED_STATE.get("probe_error"):
+        w("  ⚠️ 探測錯誤     : %s" % SCHED_STATE["probe_error"])
     w("  上次更新        : %s" % SCHED_STATE["last_run"])
     w("  上次結果        : %s" % SCHED_STATE["last_result"])
     # ⚠️ 「成功」只代表沒拋例外，不代表真的抓到新資料 ——
@@ -5547,6 +6254,13 @@ def api_diag():
         w("  池外殘留檔案     : %d 檔（已跌出前 300 大，不會更新也不影響篩選）" % _orphan)
         w("  等待重試        : %d 檔抓失敗（%.0f 分鐘後重試）"
           % (len(_HIST_FAILED), HIST_RETRY_FAIL_MINUTES))
+        # ⚠️ 拆股護欄：只印「觀察到的事實」，不要替讀的人斷定是拆股還是崩盤（見 5.13）。
+        if SPLIT_NOTES:
+            w("  價格斷層        : %d 檔" % len(SPLIT_NOTES))
+            for _k, _v in sorted(SPLIT_NOTES.items())[:8]:
+                w("      %-18s %s" % (_k.replace("hist_", "").replace(".json", ""), _v))
+        else:
+            w("  價格斷層        : 無（沒有偵測到疑似拆股的價格跳動）")
         w("  快取最新交易日   : %s%s"
           % ("　".join("%s %s" % (k, v) for k, v in _lat.items()),
              "" if all(v >= _exp for v in _lat.values()) else "  ← ⚠️ 落後了"))

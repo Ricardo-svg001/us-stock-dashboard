@@ -1036,6 +1036,110 @@ def new_high_label(closes):
     return ""
 
 
+# ---------------------------------------------------------------- 均線扣抵法
+#
+# 與台股版**同一套算法、同樣的函式名**（`_ma_deduction` / `_recent_slope`）——
+# 兩邊要改就一起改。差別只有均線組合與資料來源。
+#
+# 「扣抵」是移動平均的算術性質，不是預測：
+#   明日 MA = 今日 MA + (明日收盤 − 扣抵值) / N
+#   扣抵值 = N 天前的那一筆收盤（明天會被移出視窗的那根 K 棒）
+# 所以**扣抵值比現價低 → 均線必定上揚**，跟明天漲不漲沒有關係。
+#
+# ⚠️ **台股用 60／120（季線／半年線），美股用 50／150。**
+#    50 日線在美股的地位相當於台股季線，150 日線是歐尼爾與 Minervini 的趨勢模板用的那條。
+#    直接把 60／120 搬過來會變成「畫面說季線、實際算的是別的東西」。
+# ⚠️⚠️ **為什麼是 50／100／150 三條，而不是選一條。**
+#    2026-08-07 用 `回測跌破均線.command` 實測納斯達克綜合指數（1971 年以來）。
+#    ⚠️⚠️ **那份回測有兩種問法，答案差一個量級：**
+#      【A】每次穿越都當獨立事件 → 中位僅 −2%、七到九成在 20 日內收回
+#      【B】用循環切段、只取底部前最後一次跌破 → 中位 −15%~−20%
+#    **兩個都對，回答的是不同問題。**【B】用了「哪一次是最後一次」這個未來資訊，
+#    不是即時訊號的期望值。
+#
+#    在【B】的定義下，100MA 三個期間都比 150MA 深 1.3~3 個百分點
+#    （近 10 年 −19.8% vs −16.8%、近 25 年 −17.4% vs −15.3%、
+#      1971 以來 −16.7% vs −15.4%），在【A】的假訊號率也不比 150MA 高。
+#    **兩個角度都不輸** —— 這支持首頁市場階段用 100MA 當逆風線（PHASE_SLOW_MA），
+#    也支持扣抵法把它納進來。
+#
+#    而 150MA 仍然要留：找強勢股的 MA_SET 與市場寬度都用它，
+#    使用者在別的頁面看到的就是這條。三條都算，計算成本幾乎是零。
+#
+# 📌 **這一段的第一版寫成「100 與 150 分不出高下」，是因為只做了【A】。**
+#    那正是台股 `台股大盤循環回測.md` 標為「已作廢的錯誤算法」的同一個坑。
+#    改參數之前先確認你引用的數字回答的是哪一個問題。
+#
+# 📌 回測另一個重要發現：**單次跌破的假訊號率 71~93%** ——
+#    所以扣抵法只回答「均線幾天後會走到這裡」，**不要延伸成買賣訊號**。
+DEDUCT_MAS = (50, 100, 150)
+# ⚠️⚠️ **這個值必須 >= 最長的均線天數。**
+#    盤整情境下，N 日均線要「整個視窗都換成目標價」才會等於目標價 —— 也就是**剛好 N 天**。
+#    往後推的天數若小於 N，那條均線的「盤整」那一列就會**永遠顯示「超過 N 個交易日」**，
+#    而正確答案其實是算得出來的。使用者會以為那條線追不上，實際上只是我們沒算完。
+DEDUCT_MAX_DAYS = max(DEDUCT_MAS)
+DEDUCT_SLOPE_LOOKBACK = 20      # 「延續趨勢」用近幾日的實際斜率
+
+
+def _ma_deduction(closes, target, days_ahead=DEDUCT_MAX_DAYS,
+                  daily_change=0.0, periods=DEDUCT_MAS):
+    """均線扣抵試算。回傳每條均線的現值、明日扣抵 K 棒、追上目標所需交易日。
+
+    ⚠️ **「追上」要分兩個方向講清楚**：均線在價格下方時是均線往上追；
+       在上方時是均線往下貼近。兩者意義完全相反。
+    ⚠️ 均線**現在就已經到位**時天數是 0 不是 1 —— 顯示 1 會讓人以為還有一天。
+    """
+    out = {}
+    for n in periods:
+        if len(closes) < n:
+            out[str(n)] = {"period": n, "ma": None, "error": "not_enough"}
+            continue
+        window = [float(x) for x in closes[-n:]]
+        ma_now = sum(window) / n
+        deduct_next = window[0]
+        below = ma_now < target
+        price = float(target)
+        w = list(window)
+        days, path, crossed = 0, [], None
+        if (below and ma_now >= target) or (not below and ma_now <= target):
+            crossed = 0
+        for i in range(1, days_ahead + 1 if crossed is None else 1):
+            price = price * (1 + daily_change)
+            w = w[1:] + [price]
+            ma = sum(w) / n
+            days = i
+            if i <= 30 or i % 5 == 0:
+                path.append({"d": i, "ma": round(ma, 2), "price": round(price, 2)})
+            if crossed is None and ((below and ma >= price) or (not below and ma <= price)):
+                crossed = i
+                break
+        out[str(n)] = {
+            "period": n,
+            "ma": round(ma_now, 2),
+            "gap_pct": round((target - ma_now) / ma_now * 100, 2) if ma_now else None,
+            "deduct_next": round(deduct_next, 2),
+            "rising": deduct_next < target,
+            "side": "below" if below else "above",
+            "days": crossed,
+            "days_scanned": days,
+            "path": path,
+        }
+    return out
+
+
+def _recent_slope(closes, lookback=DEDUCT_SLOPE_LOOKBACK):
+    """近 lookback 個交易日的平均每日變動比例。資料不足或算不出來回 0。
+
+    ⚠️ 用頭尾的複合成長率，不是線性迴歸：使用者要的是「照最近的速度走下去」。
+    """
+    if len(closes) < lookback + 1:
+        return 0.0
+    a, b = float(closes[-lookback - 1]), float(closes[-1])
+    if a <= 0 or b <= 0:
+        return 0.0
+    return (b / a) ** (1.0 / lookback) - 1.0
+
+
 # ---------------------------------------------------------------- 風控頁
 #
 # 資料口徑已於 2026-08-07 用 `檢查資料口徑.command` 實測確認：
@@ -2728,6 +2832,32 @@ __SEO_HEAD__
             font-size:14.5px; color:var(--espresso); display:flex; justify-content:space-between;
             align-items:center; }
   .picked .clr { color:var(--caramel-2); cursor:pointer; font-size:13px; }
+  /* ---- 均線扣抵法 ---- */
+  .ded-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+  .ded-i { background:var(--foam); border:1px solid var(--grounds);
+           border-radius:10px; padding:9px 11px; }
+  .ded-i .k { font-size:11.5px; color:var(--mocha); font-weight:700; }
+  .ded-i .v { font-size:18px; font-weight:700; font-family:var(--font-num);
+           color:var(--espresso); margin:2px 0 1px; }
+  .ded-i .n { font-size:11.5px; color:var(--mocha); line-height:1.5; }
+  .ded-note { font-size:13px; color:var(--mocha); margin:10px 0; line-height:1.7; }
+  .ded-note b { color:var(--espresso); font-family:var(--font-num); }
+  .ded-rows { background:var(--milk); border-radius:10px; padding:4px 12px; }
+  .ded-rows div { display:flex; justify-content:space-between; align-items:baseline;
+           gap:10px; padding:9px 0; border-bottom:1px solid rgba(107,85,64,.12);
+           font-size:13.5px; color:var(--mocha); }
+  .ded-rows div:last-child { border-bottom:none; }
+  .ded-rows b { font-size:19px; color:var(--caramel-2); font-family:var(--font-num); }
+  .ded-rows small.ded-pos { color:var(--up); font-weight:700; }
+  .ded-rows small.ded-neg-v { color:var(--down); font-weight:700; }
+  .ded-rows .ded-over { font-size:13.5px; color:var(--mocha); }
+  .ded-rows b.ded-done { font-size:16px; color:var(--down); }
+  .ded-neg { margin-top:9px; font-size:12px; color:var(--mocha); line-height:1.75;
+           background:rgba(203,75,58,.07); border-radius:8px; padding:8px 11px; }
+  .ded-warn { max-width:560px; margin:14px auto 0; font-size:12.5px; color:var(--mocha);
+           line-height:1.8; background:var(--foam); border:1px solid var(--grounds);
+           border-radius:10px; padding:10px 13px; }
+  @media (max-width:640px){ .ded-grid { grid-template-columns:1fr; } }
   /* ---- 風控管理 ---- */
   .chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px;
             background:var(--milk); border:1px solid var(--grounds); border-radius:999px;
@@ -3123,9 +3253,10 @@ __SEO_HEAD__
     <a class="navitem sub" data-page="p7" href="/twr"><i>📈</i><b data-i18n="p7.title">我的績效</b><small data-i18n="nav.twr.sub">TWR 報酬率試算</small></a>
   </details>
   <details class="navgroup">
-    <summary><i>⭐</i><b data-i18n="nav.mine">我的自選股</b><small data-i18n="nav.mine.sub">風控管理・到價提醒</small></summary>
+    <summary><i>⭐</i><b data-i18n="nav.mine">我的自選股</b><small data-i18n="nav.mine.sub">風控管理・到價提醒・扣抵法</small></summary>
     <a class="navitem sub" data-page="p8" href="/risk"><i>🛡️</i><b data-i18n="p8.title">風控管理</b><small data-i18n="nav.risk.sub">ATR・波動率・趨勢・Beta</small></a>
     <a class="navitem sub" data-page="p4" href="/alerts"><i>🔔</i><b data-i18n="p4.title">推播通知</b><small data-i18n="nav.alert.sub">收盤到價提醒（測試中）</small></a>
+    <a class="navitem sub" data-page="p10" href="/deduction"><i>📐</i><b data-i18n="nav.deduct">均線扣抵法</b><small data-i18n="nav.deduct.sub">50／100／150MA 何時追上</small></a>
   </details>
   <a class="navitem" data-page="pm" href="/articles"><i>📚</i><b data-i18n="pm.title">文章區</b><small data-i18n="pm.sub">美股大盤與動量交易教學</small></a>
   <details class="navgroup">
@@ -3444,6 +3575,58 @@ __HOME_SCREEN__
   <div id="rkResult"></div>
 </div>
 
+<!-- ============ 我的自選股：均線扣抵法 ============ -->
+<div class="page" id="p10">
+  <h2 class="ptitle" data-i18n="p10.title">均線扣抵法</h2>
+
+  <details class="pgintro">
+    <summary data-i18n="ded.introT">還有多少時間可以整理？</summary>
+    <div class="pgintro-b" data-i18n-html="ded.intro">
+      <p><b>扣抵不是預測，是算術。</b>50 日線是最近 50 個交易日的平均，
+      所以明天算的時候，會把 50 天前的那一筆丟掉、換成明天的收盤。
+      那根「即將被丟掉的 K 棒」就叫<b>扣抵值</b>。</p>
+      <p>由此可以直接推出一件事：<b>扣抵值比現在的價格低，50 日線就一定會往上</b>——
+      跟明天漲不漲完全無關。反過來，扣抵值比現價高，均線就會往下。</p>
+      <p>這頁回答的是：<b>照這樣走下去，50、100、150 日線要幾個交易日才會追上這個價位？</b>
+      均線追上來之後，原本在下方的支撐就貼到價格附近，行情通常得選邊——
+      所以這個天數可以當成「<b>還有多少時間可以慢慢整理</b>」的粗估。</p>
+      <p>會同時算兩種假設：<b>盤整</b>（價格停在原地，均線追得最慢，算出來是上限）
+      與<b>依近 20 日的實際斜率繼續走</b>。兩個數字之間就是合理的區間。</p>
+      <p>⚠️ <b>這是算術外推，不是預測。</b>真實市場不會每天照同一個幅度走，
+      天數只是「如果照這個節奏」的估計，不是保證還有幾天。</p>
+    </div>
+  </details>
+
+  <div class="card">
+    <h2><span class="stepno">01</span><span data-i18n="ded.pick">選擇標的</span></h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <label class="opt" style="margin:0"><input type="radio" name="dedKind" value="index" checked><span data-i18n="ded.index">大盤（納斯達克綜合指數）</span></label>
+      <label class="opt" style="margin:0"><input type="radio" name="dedKind" value="stock"><span data-i18n="ded.stock">個股（前 300 大）</span></label>
+    </div>
+    <div class="stockpick" id="dedPickBox" style="display:none;position:relative">
+      <input id="dedSearch" type="text" autocomplete="off" data-i18n-ph="ded.ph"
+             placeholder="輸入代號或公司名，例如 AAPL">
+      <div id="dedSuggest" class="suggest"></div>
+      <div id="dedPicked" class="picked" style="display:none"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="stepno">02</span><span data-i18n="ded.price">要追上的價位</span></h2>
+    <input id="dedPrice" type="number" step="0.01"
+           style="width:100%;padding:11px;font-size:15px;border:1.5px solid var(--grounds);
+                  border-radius:10px;background:#fff;box-sizing:border-box;
+                  font-family:var(--font-num)">
+    <div style="font-size:12.5px;color:#888;line-height:1.75;margin-top:8px"
+         data-i18n-html="ded.priceNote">留空就用<b>最新收盤價</b>。
+      想估「如果撐在某個關卡要多久」，就把那個價位填進來。</div>
+  </div>
+
+  <button class="gobtn" id="dedBtn" data-i18n="ded.btn">試算</button>
+  <div class="status" id="dedStatus"></div>
+  <div id="dedResult"></div>
+</div>
+
 <!-- ============ 我的自選股：推播通知 ============ -->
 <div class="page" id="p4">
   <h2 class="ptitle" data-i18n="p4.title">推播通知</h2>
@@ -3631,6 +3814,32 @@ const I18N = { en: {
   "p7.introT": "Your return is probably wrong",
   "p7.intro": "<p>Most people compute return as \"current assets ÷ money put in − 1\". That is fine as long as you never added or withdrew funds midway — <b>but a single irregular transfer distorts it</b>.</p><p>An extreme example: you start the year with $1M and lose 20% in the first half, leaving $800k. In July you wire in another $1M and gain 10% in the second half, ending at $1.98M. Assets over contributions gives −1%, which looks like a small loss. But what you actually did was lose 20% and then gain 10% — that is <b>−12%</b>. The gap exists because <b>most of your money arrived after the loss</b>. That is timing, not skill.</p><p><b>Time-weighted return (TWR)</b> removes that effect: each month is treated as its own period, and the monthly returns are chained together. Deposits and withdrawals make no difference to the result. This is the standard for funds and managed accounts, precisely because a manager cannot control when clients wire money in.</p><p><b>How it differs from IRR (money-weighted)</b>: IRR accounts for how much you invested and when, answering \"how did this pot of money do?\" TWR answers \"how good were my picks and my timing of entries and exits?\" Use TWR to judge your process; use IRR to see what actually landed in your pocket.</p><p><b>What to enter</b>: just two columns per month — <b>net deposit</b> (deposits minus withdrawals; use a negative number for withdrawals) and <b>month-end total assets</b> (cash plus the market value of all holdings). Leave future months blank; only the months you fill are used, and you get both cumulative and annualised figures.</p><p><b>Everything stays in this browser</b> (localStorage). Nothing is uploaded and there is no account system. The upside is no sign-up; the cost is that changing device or clearing site data loses it — worth saying plainly rather than pretending there is sync.</p>",
   "p8.title": "Risk Dashboard", "p4.title": "Price Alerts",
+  /* --- 均線扣抵法 --- */
+  "nav.deduct": "MA Deduction", "nav.deduct.sub": "When the 50/100/150MA catches up",
+  "p10.title": "Moving-Average Deduction",
+  "ded.introT": "How much time is left to consolidate?",
+  "ded.intro": "<p><b>Deduction is arithmetic, not prediction.</b> The 50-day average is the mean of the last 50 closes, so tomorrow's calculation drops the close from 50 days ago and adds tomorrow's. That bar about to be dropped is the <b>deduction value</b>.</p><p>One thing follows directly: <b>if the deduction value is below the current price, the 50-day line must rise</b> — regardless of what happens tomorrow. If it is above, the average must fall.</p><p>This page answers: <b>at this pace, how many sessions until the 50-, 100- and 150-day averages reach this price?</b> Once the average catches up, support sits right at price and the market usually has to pick a side — so the number is a rough gauge of <b>how much room there is to keep consolidating</b>.</p><p>Two assumptions are shown: <b>flat</b> (price stays put — the slowest case, so an upper bound) and <b>continuing the last 20 sessions' slope</b>. The two numbers bracket a reasonable range.</p><p>⚠️ <b>This is arithmetic extrapolation, not a forecast.</b> Real markets do not move by the same amount every day.</p>",
+  "ded.pick": "Choose a symbol", "ded.index": "Nasdaq Composite", "ded.stock": "Stock (top 300)",
+  "ded.ph": "Ticker or company name, e.g. AAPL",
+  "ded.price": "Price to reach",
+  "ded.priceNote": "Leave blank to use the <b>latest close</b>. To estimate how long a specific level would take, enter it here.",
+  "ded.btn": "Calculate", "ded.calc": "Calculating…",
+  "ded.fail": "Calculation failed, please try again later",
+  "ded.needStock": "Pick a stock first",
+  "ded.last": "latest close", "ded.target": "target",
+  "ded.useLast": " (blank — using latest close)",
+  "ded.slope": "Last ", "ded.slope2": " sessions averaged ", "ded.maUnit": "-day MA",
+  "ded.now": "Current MA", "ded.dv": "Tomorrow's deduction bar",
+  "ded.rise": "Below target → the MA will rise", "ded.fall": "Above target → the MA will fall",
+  "ded.up": "MA is below price, rising toward it",
+  "ded.down": "MA is above price, easing toward it",
+  "ded.gap": "Price vs MA", "ded.flat": "Flat (price stays at ",
+  "ded.trend": "Continuing the 20-session slope",
+  "ded.sessions": " sessions", "ded.over": "more than ", "ded.perDay": "day",
+  "ded.done": "already deducted",
+  "ded.noData": "Not enough history to compute this average",
+  "ded.negNote": "\u26a0\ufe0f The recent slope is negative, so the shorter count in the trend row means price would fall to the average \u2014 not that the average is catching up. For \"how long can this keep consolidating\", read the flat row.",
+  "ded.warn": "\u26a0\ufe0f This is arithmetic extrapolation, not a forecast. It assumes the same daily move every session, which real markets do not do. Treat the session count as a rough \"if this pace holds\" estimate, not a guarantee.",
   "risk.introT": "Work out what you can lose before what you can make",
   "risk.intro": "<p>This page lays out four things about the stocks you hold: <b>how much it typically moves in a day (ATR)</b>, <b>how choppy it is overall (volatility)</b>, <b>whether the trend is still intact (MA alignment)</b>, and <b>how tightly it tracks the market (Beta)</b>.</p><p>Enter your entry price and it computes an <b>initial stop</b> and a <b>trailing stop</b> from ATR. The value isn't in the precision of that number — it's in <b>forcing you to write down the exit before you buy</b>. Decide a stop after you're underwater and you usually won't take it.</p><p><b>Why ATR instead of a fixed percentage</b>: 5% is a distant stop for a utility that moves 1% a day, and a same-day stop-out for a name that moves 6%. ATR is \"how much this stock normally moves in a day\", so using it as the unit makes the stop distance adapt to the character of the stock.</p><p><b>Everything stays in this browser</b> — nothing is uploaded and there is no account system. Changing device or clearing site data loses it, which is worth saying plainly rather than pretending there is sync.</p>",
   "risk.pick": "Pick your holdings (up to 3)",
@@ -4798,6 +5007,160 @@ async function clearUsPushBadge(){
 }
 clearUsPushBadge();
 
+/* ================= 均線扣抵法（/deduction）=================
+   ⚠️ 與台股版同一套版面與說法（結論先行、三種結果三種說法、負斜率要另外解釋）。
+      兩邊要改就一起改。 */
+let dedCode = '', dedName = '', dedLoaded = false, dedStocks = [];
+function dedKind(){
+  const el = document.querySelector('input[name=dedKind]:checked');
+  return el ? el.value : 'index';
+}
+function dedToggle(){
+  const stock = dedKind() === 'stock';
+  $('#dedPickBox').style.display = stock ? '' : 'none';
+  if (!stock){ dedCode = ''; dedName = ''; $('#dedPicked').style.display = 'none'; }
+}
+async function dedLoadStocks(){
+  if (dedLoaded) return;
+  try {
+    const r = await fetch('/api/stocklist', {headers: {'X-App-Token': APP_TOKEN}});
+    if (!r.ok) throw new Error('stock list ' + r.status);
+    dedStocks = await r.json(); dedLoaded = true;
+  } catch(e){
+    $('#dedSearch').placeholder = t('alert.loadFail', '股票清單載入失敗，請重新整理');
+  }
+}
+async function dedSearch(){
+  /* ⚠️ 這裡呼叫的每個函式都必須真的存在 —— 名字打錯只有在**使用者實際打字時**
+        才會丟 ReferenceError，語法檢查與載入期執行都抓不到。
+        台股版 2026-08-07 就是這樣讓「輸入代號沒反應」上線的。 */
+  await dedLoadStocks();
+  const raw = ($('#dedSearch').value || '').trim(), kw = raw.toUpperCase();
+  const box = $('#dedSuggest');
+  if (!raw){ box.classList.remove('show'); return; }
+  const hit = dedStocks.filter(x => x.code.indexOf(kw) === 0
+    || (x.name || '').toUpperCase().indexOf(kw) >= 0
+    || (x.name_zh || '').indexOf(raw) >= 0).slice(0, 20);
+  if (!hit.length){
+    box.innerHTML = '<div class="empty">'
+      + t('alert.notFound', '找不到符合的股票（僅限市值前 300 大）') + '</div>';
+    box.classList.add('show'); return;
+  }
+  box.innerHTML = hit.map(x => {
+    const nm = (LANG === 'en') ? x.name : (x.name_zh || x.name);
+    return '<div onclick="dedPick(\'' + x.code + "','"
+      + String(nm).replace(/'/g, '') + '\')"><b>' + x.code + '</b>' + nm + '</div>';
+  }).join('');
+  box.classList.add('show');
+}
+function dedPick(code, name){
+  dedCode = code; dedName = name;
+  $('#dedSearch').value = '';
+  $('#dedSuggest').classList.remove('show');
+  const p = $('#dedPicked');
+  p.innerHTML = '<span>' + t('alert.picked', '已選擇') + '：<b>' + code + ' ' + name
+    + '</b></span><span class="clr" onclick="dedClear()">'
+    + t('alert.repick', '重新選擇 ✕') + '</span>';
+  p.style.display = 'flex';
+}
+function dedClear(){
+  dedCode = ''; dedName = '';
+  $('#dedPicked').style.display = 'none';
+  $('#dedSearch').value = '';
+}
+function dedDays(o, maxDays){
+  /* ⚠️ 三種結果要用三種說法：追不上→「超過 N 個交易日」、已到位→「已扣抵」、其餘→天數。
+        顯示 0 會讓人以為還有一天可以整理；空白看起來像壞掉。 */
+  if (o.days == null) return '<span class="ded-over">' + t('ded.over', '超過 ')
+    + maxDays + t('ded.sessions', ' 個交易日') + '</span>';
+  if (o.days === 0) return '<b class="ded-done">' + t('ded.done', '已扣抵') + '</b>';
+  return '<b>' + o.days + '</b>' + t('ded.sessions', ' 個交易日');
+}
+function dedCard(name, flat, trend, maxDays, target, slope){
+  /* ⚠️ 閱讀順序＝結論先行：天數放最上面，「目前均線／明日扣抵 K 棒」是解釋，放後面。 */
+  const dir = (flat.side === 'below')
+    ? t('ded.up', '均線在價格下方，往上追')
+    : t('ded.down', '均線在價格上方，往下貼近');
+  const slopeCls = slope > 0 ? 'ded-pos' : (slope < 0 ? 'ded-neg-v' : '');
+  const slopeTxt = (slope > 0 ? '+' : '') + slope + '%/' + t('ded.perDay', '日');
+  return '<div class="card"><h2>' + name + '</h2>'
+    + '<div class="ded-rows">'
+    + '<div><span>' + t('ded.flat', '盤整（價格停在 ') + target.toLocaleString() + '）</span><span>'
+    + dedDays(flat, maxDays) + '</span></div>'
+    + '<div><span>' + t('ded.trend', '延續近 20 日斜率')
+    + ' <small class="' + slopeCls + '">(' + slopeTxt + ')</small></span><span>'
+    + dedDays(trend, maxDays) + '</span></div>'
+    + '</div>'
+    /* ⚠️⚠️ 斜率為負時「天數變少」是價格跌下去碰到均線，不是均線追上來 —— 意義相反。 */
+    + (slope < 0 ? '<div class="ded-neg">' + t('ded.negNote',
+        '⚠️ 近期斜率是向下的，所以「趨勢」那一列的天數變少，是因為價格跌下去碰到均線，'
+        + '不是均線追上來。想估的若是多頭整理可以等多久，請看「盤整」那一列。') + '</div>' : '')
+    + '<div class="ded-note">' + dir + '　·　'
+    + t('ded.gap', '目前價位距離均線') + ' <b>'
+    + (flat.gap_pct == null ? '—' : (flat.gap_pct > 0 ? '+' : '') + flat.gap_pct + '%') + '</b></div>'
+    + '<div class="ded-grid">'
+    + '<div class="ded-i"><div class="k">' + t('ded.now', '目前均線') + '</div><div class="v">'
+    + flat.ma.toLocaleString() + '</div></div>'
+    + '<div class="ded-i"><div class="k">' + t('ded.dv', '明日扣抵 K 棒') + '</div><div class="v">'
+    + flat.deduct_next.toLocaleString() + '</div><div class="n">'
+    + (flat.rising ? t('ded.rise', '低於目標價 → 均線會往上')
+                   : t('ded.fall', '高於目標價 → 均線會往下')) + '</div></div>'
+    + '</div></div>';
+}
+async function runDeduct(){
+  const btn = $('#dedBtn');
+  if (dedKind() === 'stock' && !dedCode){
+    $('#dedStatus').textContent = t('ded.needStock', '請先選擇一檔股票');
+    return;
+  }
+  btn.disabled = true;
+  $('#dedStatus').textContent = t('ded.calc', '試算中…');
+  try {
+    const body = {code: dedKind() === 'stock' ? dedCode : 'COMP'};
+    const pv = parseFloat($('#dedPrice').value);
+    if (pv > 0) body.price = pv;
+    const r = await fetch('/api/deduct', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-App-Token': APP_TOKEN},
+      body: JSON.stringify(body)});
+    if (r.status === 403){ retryOnStaleToken(); return; }
+    const j = await r.json();
+    if (j.error){ $('#dedStatus').textContent = j.error; $('#dedResult').innerHTML = ''; return; }
+    $('#dedStatus').textContent = '';
+    const label = (LANG === 'en') ? (j.name || j.code) : (j.name_zh || j.name || j.code);
+    let h = '<div class="concl blue">' + label + '　'
+      + t('ded.last', '最新收盤') + ' <b>' + j.last.toLocaleString() + '</b>　'
+      + t('ded.target', '目標價') + ' <b>' + j.target.toLocaleString() + '</b>'
+      + (j.custom_price ? '' : t('ded.useLast', '（未填，用最新收盤）'))
+      + '<div style="font-size:12.5px;font-weight:normal;color:#777;margin-top:6px">'
+      + t('ded.slope', '近 ') + j.slope_lookback + t('ded.slope2', ' 日平均每日 ')
+      + (j.slope_pct > 0 ? '+' : '') + j.slope_pct + '%</div></div>';
+    for (const n of (j.mas || [50, 100, 150])){
+      const key = String(n), f = j.flat[key], tr = j.trend[key];
+      if (!f || f.ma == null){
+        h += '<div class="card"><h2>' + n + 'MA</h2><div style="color:#999">'
+          + t('ded.noData', '歷史收盤不足，算不出這條均線') + '</div></div>';
+        continue;
+      }
+      h += dedCard(n + t('ded.maUnit', ' 日線'), f, tr, j.max_days, j.target, j.slope_pct);
+    }
+    h += '<div class="ded-warn">' + t('ded.warn',
+      '⚠️ 這是算術外推，不是預測。它假設未來每天都照同一個幅度走，真實市場不會這樣。天數請當成「如果照這個節奏」的粗估，不是保證還有幾天。') + '</div>';
+    $('#dedResult').innerHTML = h;
+  } catch(e){
+    $('#dedStatus').textContent = t('ded.fail', '試算失敗，請稍後再試');
+  } finally { btn.disabled = false; }
+}
+if ($('#dedBtn')){
+  $('#dedBtn').onclick = runDeduct;
+  $('#dedSearch').oninput = dedSearch;
+  document.querySelectorAll('input[name=dedKind]').forEach(el => { el.onchange = dedToggle; });
+  document.addEventListener('click', e => {
+    const p = $('#dedSearch') && $('#dedSearch').parentElement;
+    if (p && !p.contains(e.target) && $('#dedSuggest')) $('#dedSuggest').classList.remove('show');
+  });
+}
+
 /* ================= 風控管理（/risk）=================
    ⚠️ 進場價、追蹤最高價與停損只存在 localStorage（us_risk_positions），
       跟到價提醒的 us_push_cid 一樣不上傳。沒有帳號系統是刻意的取捨。 */
@@ -5097,6 +5460,16 @@ PAGE_ROUTES = {
                "Pick up to 3 holdings and see 14-day ATR, six-month annualised volatility, "
                "moving-average trend and beta to the Nasdaq Composite, plus initial and trailing "
                "stops from your entry price. Stored only in your browser, no sign-up."),
+    },
+    "deduction": {
+        "page": "p10", "index": True,
+        "zh": ("均線扣抵法｜50／100／150 日線何時追上目前價位",
+               "用扣抵值推算納斯達克綜合指數或個股的 50、100、150 日線，"
+               "在盤整或延續目前斜率兩種假設下，還要幾個交易日才會追上指定價位。免註冊。"),
+        "en": ("Moving-Average Deduction｜When Will the 50, 100 and 150MA Catch Up",
+               "Project the 50-, 100- and 150-day moving averages for the Nasdaq Composite or any "
+               "top-300 US stock using the deduction value, and see how many sessions they need "
+               "to reach a given price under a flat or trend-continuation assumption."),
     },
     "alerts": {
         "page": "p4", "index": False,
@@ -5786,6 +6159,53 @@ def api_stocklist():
                      "name": u.get("name", ""),
                      "name_zh": zh_company(u.get("symbol", ""), u.get("name", ""))}
                     for u in uni[:300] if u.get("symbol")])
+
+
+@app.route("/api/deduct", methods=["POST"])
+def api_deduct():
+    """均線扣抵法：50MA／150MA 要幾個交易日才追得上指定價位。
+
+    ⚠️ **只讀既有快取，不連網。** 指數讀 `nasdaq_index.json`、
+       個股讀既有的 `hist_` —— 這頁是使用者一按就跑的，不能觸發外部請求。
+    ⚠️ 盤整與延續趨勢**兩種假設一起回**：單一數字會被當成預測。
+    """
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    p = request.get_json(silent=True) or {}
+    sym = str(p.get("code") or "").strip().upper()
+    try:
+        price = float(p.get("price")) if p.get("price") not in (None, "") else None
+    except (TypeError, ValueError):
+        return jsonify(error="價格格式錯誤"), 400
+    if price is not None and price <= 0:
+        return jsonify(error="價格要大於 0"), 400
+
+    name, closes = "", []
+    if not sym or sym in ("COMP", "IXIC", "INDEX", "NASDAQ"):
+        sym, name = "COMP", "納斯達克綜合指數"
+        idx = _load_cache("nasdaq_index.json", 24 * 365) or {}
+        closes = [idx[d] for d in sorted(idx)][-400:]
+    else:
+        closes = [c for _d, c in (get_history(sym) or [])]
+        for u in (_load_cache("universe.json", None) or []):
+            if u.get("symbol") == sym:
+                name = u.get("name") or sym
+                break
+    if len(closes) < max(DEDUCT_MAS):
+        return jsonify(error="這檔的歷史收盤不足 %d 個交易日，算不出 %dMA 扣抵"
+                             % (max(DEDUCT_MAS), max(DEDUCT_MAS))), 400
+
+    last = float(closes[-1])
+    target = price if price is not None else last
+    slope = _recent_slope(closes)
+    return jsonify(
+        code=sym, name=name or sym, name_zh=(name if sym == "COMP"
+                                             else zh_company(sym, name or sym)),
+        last=round(last, 2), target=round(target, 2), custom_price=price is not None,
+        slope_pct=round(slope * 100, 3), slope_lookback=DEDUCT_SLOPE_LOOKBACK,
+        flat=_ma_deduction(closes, target, daily_change=0.0),
+        trend=_ma_deduction(closes, target, daily_change=slope),
+        mas=list(DEDUCT_MAS), max_days=DEDUCT_MAX_DAYS)
 
 
 @app.route("/api/risk", methods=["POST"])

@@ -1036,6 +1036,163 @@ def new_high_label(closes):
     return ""
 
 
+# ---------------------------------------------------------------- 名言卡
+#
+# ⚠️⚠️ **`quotes/` 兩個專案共用同一份內容，新增名言必須兩邊一起加。**
+#    來源是台股咖啡館（2026-08-07 複製過來，中英各 4 位作者、68 張卡）。
+#    只加一邊的話，兩站的「第 N / 68」編號會對不上，
+#    而且使用者在兩站之間切換時會發現內容不一樣 —— 那看起來像其中一站壞了。
+#    📌 慣例寫在 `quotes/_如何新增名言.md.txt` 與兩邊的 PROJECT_CONTEXT。
+QUOTES_DIR = os.environ.get("QUOTES_DIR") or os.path.join(BASE_DIR, "quotes")
+
+
+def _load_quotes(lang="zh"):
+    """讀名言檔，回傳 ([(作者, 主題, [句子...]), ...], [來源說明...])。
+
+    front-matter：author（顯示名）、full（完整介紹）、
+    mode（single＝一句一卡／group＝一主題一卡）。內文用 `## 主題` 分段。
+    ⚠️ 中英**檔名必須完全一致**且主題數、句數相同 —— 系統是用「第幾張卡」
+       對應翻譯的，數量不同會配到錯的句子（`檢查名言分類.command` 會驗）。
+    """
+    base = QUOTES_DIR if lang == "zh" else os.path.join(QUOTES_DIR, "en")
+    cards, sources = [], []
+    if not os.path.isdir(base):
+        return cards, sources
+    for fn in sorted(os.listdir(base)):
+        if not fn.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(base, fn), "r", encoding="utf-8") as f:
+                raw = f.read()
+        except Exception:
+            continue
+        meta, body = {}, raw
+        if raw.startswith("---"):
+            parts = raw.split("---", 2)
+            if len(parts) >= 3:
+                for ln in parts[1].strip().split("\n"):
+                    if ":" in ln:
+                        k, v = ln.split(":", 1)
+                        meta[k.strip()] = v.strip()
+                body = parts[2]
+        author = meta.get("author", fn[:-3])
+        mode = meta.get("mode", "single")
+        if meta.get("full"):
+            sources.append(meta["full"])
+        tag, buf = None, []
+
+        def flush():
+            if not tag or not buf:
+                return
+            if mode == "group":
+                cards.append((author, tag, list(buf)))
+            else:
+                for one in buf:
+                    cards.append((author, tag, [one]))
+        for ln in body.split("\n"):
+            t = ln.strip()
+            if t.startswith("## "):
+                flush()
+                tag, buf = t[3:].strip(), []
+            elif t:
+                buf.append(t)
+        flush()
+    return cards, sources
+
+
+QUOTES, QUOTE_SOURCES = _load_quotes("zh")
+QUOTES_EN, QUOTE_SOURCES_EN = _load_quotes("en")
+
+# 市場階段 → 適合的名言主題。**key 與 PHASE_UI／MARKET_LIFECYCLE 完全相同**，
+# 所以台股那份可以直接沿用（兩站的六個階段名一致）。
+REGIME_TAGS = {
+    "tailwind": ["上漲怎麼看", "持有贏家", "領導股", "CAN SLIM",
+                 "只買突破", "研究歷史"],
+    "pullback": ["耐心與等待", "操作頻率", "紀律與節制"],
+    "transition": ["等待的重要", "等市場確認", "選擇戰場",
+                   "樂觀的代價", "賣出的重要"],
+    "riskoff": ["下跌與虧損", "永遠不要攤平", "停損", "情緒管理", "快速停損"],
+    "recovery_early": ["底部的勇氣"],
+    "recovery_confirmed": ["趨勢才是真相", "順勢而為", "先勝後戰"],
+}
+# 不綁盤勢的通用主題。首頁固定會多顯示一張，每天輪替。
+GENERIC_TAGS = ["投機者", "確定與隨機", "消息", "供需與市場", "市場的本質", "知己知彼"]
+
+
+def _quote_set(lang):
+    """對應語言的名言卡；英文缺檔時自動回退中文，不會空白。"""
+    if lang == "en" and QUOTES_EN:
+        return QUOTES_EN, QUOTE_SOURCES_EN
+    return QUOTES, QUOTE_SOURCES
+
+
+def _quote_day_no():
+    """用**美東日期**當輪替基準（這個站講的是美股）。
+
+    ⚠️ 不要用 UTC：美東下午還是同一個交易日，UTC 卻已經跳到隔天，
+       名言會在盤中換掉 —— 使用者看到的是「早上一句、下午另一句」。
+    """
+    et = _utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))
+    return (et - datetime(2026, 1, 1, tzinfo=timezone.utc)).days
+
+
+def _pick_by_tags(lang, tags, offset=0):
+    """從指定主題挑一張當日名言；主題對不上就回 None。
+
+    ⚠️⚠️ **池子一律用中文名言算索引。** 英文檔的主題是英文（`## Discipline`），
+       各自比對會挑到不同索引 —— 切換語言就變成另一則，
+       破壞「切語言看到的是同一則的翻譯」這個保證。
+    """
+    cards, _ = _quote_set(lang)
+    if not cards:
+        return None
+    pool = [i for i, c in enumerate(QUOTES) if c[1] in tags and i < len(cards)]
+    if not pool:
+        return None
+    idx = pool[(_quote_day_no() + offset) % len(pool)]
+    author, tag, lines = cards[idx]
+    return {"author": author, "tag": tag, "lines": lines,
+            "no": idx + 1, "total": len(cards)}
+
+
+def _daily_quotes(n=2, lang="zh"):
+    """全庫每日輪替（最後防線）。同一天固定不變 —— 每次重整都換會顯得很隨便。"""
+    cards, _ = _quote_set(lang)
+    if not cards:
+        return []
+    out, total = [], len(cards)
+    for i in range(n):
+        idx = (_quote_day_no() * n + i) % total
+        author, tag, lines = cards[idx]
+        out.append({"author": author, "tag": tag, "lines": lines,
+                    "no": idx + 1, "total": total})
+    return out
+
+
+def home_quotes(lang="zh", phase=None):
+    """首頁兩張卡：**第一張跟著今天的市場階段，第二張每天輪一張通用**。
+
+    ⚠️ 任何一張挑不到都安全降級：階段挑不到（unknown 或主題名打錯）→ 用通用補；
+       通用也挑不到 → 退回全庫輪替。**首頁寧可少一張，也不要空白。**
+    """
+    out = []
+    tags = REGIME_TAGS.get(phase or "")
+    if tags:
+        q = _pick_by_tags(lang, tags)
+        if q:
+            out.append(q)
+    g = _pick_by_tags(lang, GENERIC_TAGS, offset=1 if out else 0)
+    if g and (not out or g["no"] != out[0]["no"]):
+        out.append(g)
+    if len(out) < 2:
+        for q in _daily_quotes(2, lang):
+            if all(q["no"] != o["no"] for o in out):
+                out.append(q)
+            if len(out) == 2:
+                break
+    return out[:2]
+
+
 # ---------------------------------------------------------------- 均線扣抵法
 #
 # 與台股版**同一套算法、同樣的函式名**（`_ma_deduction` / `_recent_slope`）——
@@ -2832,6 +2989,50 @@ __SEO_HEAD__
             font-size:14.5px; color:var(--espresso); display:flex; justify-content:space-between;
             align-items:center; }
   .picked .clr { color:var(--caramel-2); cursor:pointer; font-size:13px; }
+  /* ---- 名言卡（與台股版同一套樣式）---- */
+  .qcard { max-width:560px; margin:0 auto 16px; background:var(--foam);
+           border:1.5px solid var(--grounds); border-radius:20px;
+           padding:22px 24px 20px; box-shadow:var(--shadow); position:relative;
+           overflow:hidden; }
+  .qcard::before { content:"\\201C"; position:absolute; top:-18px; right:14px;
+           font-family:var(--font-head); font-size:110px; line-height:1;
+           color:var(--grounds); opacity:.55; }
+  .qcard .qtag { display:inline-block; font-size:11.5px; color:var(--caramel-2);
+           border:1px solid var(--caramel); border-radius:8px; padding:2px 9px;
+           margin-bottom:12px; position:relative; }
+  .qcard .qtext { font-family:var(--font-head); font-weight:500; font-size:17.5px;
+           line-height:2; color:var(--espresso); position:relative; }
+  .qcard .qlist { position:relative; margin:0; padding:0; list-style:none; }
+  .qcard .qlist li { font-family:var(--font-head); font-weight:500; font-size:16.5px;
+           line-height:1.9; color:var(--espresso); padding-left:20px; position:relative;
+           margin-bottom:10px; }
+  .qcard .qlist li:last-child { margin-bottom:0; }
+  .qcard .qlist li::before { content:"—"; position:absolute; left:0; top:0;
+           color:var(--caramel); }
+  .qcard .qfoot { display:flex; justify-content:space-between; align-items:center;
+           margin-top:16px; padding-top:12px; border-top:1px solid var(--grounds);
+           font-size:12px; color:var(--mocha); position:relative; }
+  .qcard .qnum { font-family:var(--font-num); }
+  .qmore-wrap { max-width:560px; margin:2px auto 18px; text-align:center; }
+  .qmore { font-family:var(--font-head); font-weight:700; font-size:14.5px;
+           color:var(--caramel-2); background:var(--milk);
+           border:1.5px solid var(--grounds); border-radius:12px;
+           padding:10px 22px; cursor:pointer; transition:all .15s; }
+  .qmore:hover { background:var(--caramel); color:#fff; border-color:var(--caramel); }
+  .qmore:disabled { opacity:.5; cursor:default; background:var(--milk);
+           color:var(--mocha); border-color:var(--grounds); }
+  .qcard.qnew { animation:qFadeIn .45s ease-out; }
+  @keyframes qFadeIn {
+    from { opacity:0; transform:translateY(10px); }
+    to   { opacity:1; transform:translateY(0); }
+  }
+  @media (prefers-reduced-motion: reduce){ .qcard.qnew { animation:none; } }
+  .qsrc { max-width:560px; margin:4px auto 0; text-align:center; font-size:12.5px;
+          color:var(--mocha); line-height:1.9; }
+  @media (max-width:520px){
+    .qcard { padding:18px 18px 16px; border-radius:16px; }
+    .qcard .qtext { font-size:16.5px; line-height:1.95; }
+  }
   /* ---- 均線扣抵法 ---- */
   .ded-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
   .ded-i { background:var(--foam); border:1px solid var(--grounds);
@@ -3318,18 +3519,17 @@ __UPDATE_NOTE__
 
 __HOME_SCREEN__
 
-  <a class="menu-item" href="/screener" style="text-decoration:none;color:inherit">
-    <span class="ic">📈</span>
-    <span class="body"><span class="nm" data-i18n="p1.title">找強勢股</span>
-      <span class="ds" data-i18n="home.c1">依均線與均線排列篩選個股</span></span>
-    <span class="chev">›</span>
-  </a>
-  <a class="menu-item" href="/pullback" style="text-decoration:none;color:inherit">
-    <span class="ic">🎯</span>
-    <span class="body"><span class="nm" data-i18n="p3.title">拉回找買點</span>
-      <span class="ds" data-i18n="home.c2">收盤回到指定均線 ±3%</span></span>
-    <span class="chev">›</span>
-  </a>
+  <!-- ⚠️ 這裡原本是「找強勢股／拉回找買點」兩張 menu-item 卡。
+       2026-08-07 移除 —— 左側選單已經有同樣的入口，首頁再放一次只是重複，
+       換成名言卡（與台股版共用同一份 quotes/）。 -->
+  <div class="qhead" data-i18n="home.qhead">今日供應 · QUOTES</div>
+  <div id="qbox">
+__QUOTES_HTML__
+  </div>
+  <div class="qmore-wrap">
+    <button class="qmore" id="qmoreBtn" onclick="drawQuote()" data-i18n="home.more">再抽一張 ☕</button>
+  </div>
+  <div class="qsrc">__QUOTE_SRC__</div>
 </div>
 
 <!-- ============ 找強勢股 ============ -->
@@ -3814,6 +4014,10 @@ const I18N = { en: {
   "p7.introT": "Your return is probably wrong",
   "p7.intro": "<p>Most people compute return as \"current assets ÷ money put in − 1\". That is fine as long as you never added or withdrew funds midway — <b>but a single irregular transfer distorts it</b>.</p><p>An extreme example: you start the year with $1M and lose 20% in the first half, leaving $800k. In July you wire in another $1M and gain 10% in the second half, ending at $1.98M. Assets over contributions gives −1%, which looks like a small loss. But what you actually did was lose 20% and then gain 10% — that is <b>−12%</b>. The gap exists because <b>most of your money arrived after the loss</b>. That is timing, not skill.</p><p><b>Time-weighted return (TWR)</b> removes that effect: each month is treated as its own period, and the monthly returns are chained together. Deposits and withdrawals make no difference to the result. This is the standard for funds and managed accounts, precisely because a manager cannot control when clients wire money in.</p><p><b>How it differs from IRR (money-weighted)</b>: IRR accounts for how much you invested and when, answering \"how did this pot of money do?\" TWR answers \"how good were my picks and my timing of entries and exits?\" Use TWR to judge your process; use IRR to see what actually landed in your pocket.</p><p><b>What to enter</b>: just two columns per month — <b>net deposit</b> (deposits minus withdrawals; use a negative number for withdrawals) and <b>month-end total assets</b> (cash plus the market value of all holdings). Leave future months blank; only the months you fill are used, and you get both cumulative and annualised figures.</p><p><b>Everything stays in this browser</b> (localStorage). Nothing is uploaded and there is no account system. The upside is no sign-up; the cost is that changing device or clearing site data loses it — worth saying plainly rather than pretending there is sync.</p>",
   "p8.title": "Risk Dashboard", "p4.title": "Price Alerts",
+  "home.qhead": "TODAY'S SERVING · QUOTES",
+  "home.more": "Pour another ☕",
+  "home.more.loading": "Brewing…",
+  "home.more.done": "That's all for today ☕",
   /* --- 均線扣抵法 --- */
   "nav.deduct": "MA Deduction", "nav.deduct.sub": "When the 50/100/150MA catches up",
   "p10.title": "Moving-Average Deduction",
@@ -5007,6 +5211,37 @@ async function clearUsPushBadge(){
 }
 clearUsPushBadge();
 
+/* ---- 名言卡：再抽一張 ---- */
+async function drawQuote(){
+  const btn = $('#qmoreBtn'), box = $('#qbox');
+  if (!btn || !box) return;
+  /* ⚠️ 中英兩份卡都在 HTML 裡，要插進**目前顯示的那一份**，
+        否則切語言之後抽出來的卡會看不到。 */
+  const wrap = box.querySelector(LANG === 'en' ? '.q-en' : '.q-zh') || box;
+  const seen = [...wrap.querySelectorAll('.qcard')]
+    .map(c => c.getAttribute('data-no')).filter(Boolean).join(',');
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = t('home.more.loading', '沖泡中…');
+  try {
+    const r = await fetch('/api/quote-more?lang=' + LANG + '&seen=' + seen,
+                          {headers: {'X-App-Token': APP_TOKEN}});
+    if (r.status === 403){ retryOnStaleToken(); return; }
+    const j = await r.json();
+    if (j.done){ btn.textContent = t('home.more.done', '今天的都喝完了 ☕'); return; }
+    wrap.insertAdjacentHTML('beforeend', j.html);
+    btn.textContent = old;
+    btn.disabled = false;
+    if (j.remain === 0){
+      btn.textContent = t('home.more.done', '今天的都喝完了 ☕');
+      btn.disabled = true;
+    }
+  } catch(e){
+    btn.textContent = old;
+    btn.disabled = false;
+  }
+}
+
 /* ================= 均線扣抵法（/deduction）=================
    ⚠️ 與台股版同一套版面與說法（結論先行、三種結果三種說法、負斜率要另外解釋）。
       兩邊要改就一起改。 */
@@ -5645,6 +5880,12 @@ def article_page(aid):
     a, others = _find_article(aid)
     if not a:
         return _render("articles"), 404
+    # ⚠️ 用舊的檔名網址進來 → **301 導到 slug 版本**（正式網址只有一個）。
+    #    舊網址永遠保持有效（分享出去的連結不能變 404），只是會被導過去。
+    #    ⚠️ 一定要 301 不能 302 —— 302 對搜尋引擎的意思是「原網址才是正式的」。
+    if a["slug"] != aid:
+        from flask import redirect
+        return redirect("/article/" + quote(a["slug"]), code=301)
     url = SITE_URL + "/article/" + quote(a["slug"])
     ld = {"@context": "https://schema.org", "@type": "Article",
           "headline": a["title"], "description": a["summary"], "url": url,
@@ -5700,6 +5941,40 @@ def _compress(resp):
         pass
     return resp
 
+
+
+def _quote_card_html(q, extra=False):
+    """單張名言卡。extra=True 是「再抽一張」抽出來的，加淡入動畫。"""
+    import html as _h
+    if len(q["lines"]) > 1:            # 主題卡：多行條列
+        body = ('<ul class="qlist">'
+                + "".join("<li>" + _h.escape(x) + "</li>" for x in q["lines"])
+                + '</ul>')
+    else:                              # 單句卡
+        body = '<div class="qtext">' + _h.escape(q["lines"][0]) + '</div>'
+    return ('<div class="' + ("qcard qnew" if extra else "qcard")
+            + '" data-no="' + str(q["no"]) + '">'
+            '<span class="qtag">' + _h.escape(q["tag"]) + '</span>' + body
+            + '<div class="qfoot"><span>' + _h.escape(q["author"]) + '</span>'
+            '<span class="qnum">' + str(q["no"]) + ' / ' + str(q["total"]) + '</span>'
+            '</div></div>')
+
+
+def _quotes_html():
+    """首頁名言卡（伺服器端渲染，開啟即顯示、不必等 API）。
+
+    ⚠️ 中英兩份都輸出、用 `.q-zh` / `.q-en` 切換 —— 與市場階段、本日推薦同一套機制，
+       切語言不必重新請求。
+    ⚠️ **只讀市場階段的快取**（`market_phase_cached` 本來就不連網）。
+    """
+    try:
+        phase, _s, _d, _b = market_phase_cached()
+    except Exception:
+        phase = ""
+    zh = "\n".join("  " + _quote_card_html(q) for q in home_quotes("zh", phase))
+    en = "\n".join("  " + _quote_card_html(q) for q in home_quotes("en", phase))
+    return ('<div class="q-zh">\n' + zh + '\n</div>\n'
+            '<div class="q-en" style="display:none">\n' + en + '\n</div>')
 
 
 def _update_note_html():
@@ -5968,6 +6243,15 @@ def _render(slug=None):
     # ⚠️ 只放**公開**金鑰。VAPID_PRIVATE 絕對不能出現在頁面上。
     html = html.replace("__VAPID_PUBLIC__", VAPID_PUBLIC)
     html = html.replace("__ART_LINKS__", _art_links_html())
+    html = html.replace("__QUOTES_HTML__", _quotes_html())
+    import html as _hq
+    _src = "<br>".join(_hq.escape(x) for x in QUOTE_SOURCES)
+    _src_en = "<br>".join(_hq.escape(x) for x in (QUOTE_SOURCES_EN or QUOTE_SOURCES))
+    html = html.replace(
+        "__QUOTE_SRC__",
+        '<span class="q-zh">' + (_src + "<br>" if _src else "") + '每日更新兩則輪替</span>'
+        '<span class="q-en" style="display:none">'
+        + (_src_en + "<br>" if _src_en else "") + 'Two quotes daily, on rotation</span>')
     html = html.replace("__SEO_HEAD__", _seo_head(slug, lang), 1)
     # ⚠️ 這兩個是 JS 字串常值，必須跳脫雙引號，否則標題含 " 就會把 <script> 打斷。
     html = html.replace("__TITLE_ZH__", title_zh.replace('"', '\\"'), 1)
@@ -6159,6 +6443,42 @@ def api_stocklist():
                      "name": u.get("name", ""),
                      "name_zh": zh_company(u.get("symbol", ""), u.get("name", ""))}
                     for u in uni[:300] if u.get("symbol")])
+
+
+@app.route("/api/quote-more")
+def api_quote_more():
+    """再抽一張：從尚未出現過的名言中隨機挑一張，回傳渲染好的卡片 HTML。
+
+    ⚠️⚠️ **抽卡範圍要跟著今天的市場階段**，只限「當前階段 ＋ 通用」。
+       全庫隨機的話，逆風盤可能抽到「順勢而為」「持有贏家」，
+       跟上方的市場階段直接打架 —— 首頁好不容易建立的一致性會破功。
+    ⚠️ 池子一律用**中文**名言算索引（英文檔的主題是英文），否則中英會抽到不同卡。
+    """
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    import random
+    seen = set()
+    for x in (request.args.get("seen", "") or "").split(","):
+        x = x.strip()
+        if x.isdigit():
+            seen.add(int(x))
+    lang = "en" if request.args.get("lang") == "en" else "zh"
+    cards, _ = _quote_set(lang)
+    try:
+        phase, _s, _d, _b = market_phase_cached()
+    except Exception:
+        phase = ""
+    tags = list(REGIME_TAGS.get(phase or "", [])) + list(GENERIC_TAGS)
+    pool = [i for i, c in enumerate(QUOTES)
+            if c[1] in tags and i < len(cards) and (i + 1) not in seen]
+    if not pool:                       # 這個階段抽完了，不再往全庫擴散
+        return jsonify(done=True)
+    idx = random.choice(pool)
+    author, tag, lines = cards[idx]
+    q = {"author": author, "tag": tag, "lines": lines,
+         "no": idx + 1, "total": len(cards)}
+    return jsonify(html=_quote_card_html(q, extra=True), no=q["no"],
+                   remain=len(pool) - 1)
 
 
 @app.route("/api/deduct", methods=["POST"])

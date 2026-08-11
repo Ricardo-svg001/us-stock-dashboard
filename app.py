@@ -1684,6 +1684,107 @@ def screen_pullback(universe_n=150, ma=50, band=3.0, align="strict_bull",
             "ma_name_zh": MA_NAMES_ZH.get(ma, str(ma))}
 
 
+def _std(values):
+    """樣本標準差；整理觀察只需要比例，避免為此增加 pandas/numpy 依賴。"""
+    if len(values) < 2:
+        return 0.0
+    avg = sum(values) / len(values)
+    return math.sqrt(sum((x - avg) ** 2 for x in values) / (len(values) - 1))
+
+
+def _consolidation_snapshot_us(closes, end=None):
+    """美股整理快照，只使用訊號日當時已知的收盤資料。"""
+    x = closes[:end] if end is not None else closes
+    if len(x) < 60:
+        return None
+    close = float(x[-1])
+    ma10, ma20, ma50 = _sma(x, 10), _sma(x, 20), _sma(x, 50)
+    ma20_old = sum(x[-30:-10]) / 20.0
+    hi20, lo20, hi60 = max(x[-20:]), min(x[-20:]), max(x[-60:])
+    mid = (hi20 + lo20) / 2.0
+    changes = [x[i] / x[i - 1] - 1 for i in range(1, len(x)) if x[i - 1] > 0]
+    vol10, vol40 = _std(changes[-10:]), _std(changes[-40:])
+    tests = {
+        "range": bool(mid and (hi20 - lo20) / mid <= 0.12),
+        "volatility": bool(vol40 and vol10 / vol40 <= 0.80),
+        "ma_flat": bool(ma20_old and abs(ma20 / ma20_old - 1) <= 0.02),
+        "structure": bool(close >= ma50 and min(x[-20:]) >= ma50 * 0.97),
+    }
+    return {
+        "close": close, "ma10": ma10, "ma50": ma50, "hi20": hi20,
+        "drawdown": (close / hi60 - 1) * 100,
+        "width": (hi20 - lo20) / mid * 100 if mid else None,
+        "position": (close - lo20) / (hi20 - lo20) * 100 if hi20 > lo20 else 50.0,
+        "vol_ratio": vol10 / vol40 if vol40 else None,
+        "ma20_slope": (ma20 / ma20_old - 1) * 100 if ma20_old else None,
+        "score": sum(tests.values()), "tests": tests,
+    }
+
+
+def screen_consolidation(status_cb=None):
+    """強勢股整理觀察；美股第一版參數待美股自身回測，不沿用台股績效結論。"""
+    universe = get_universe(300)
+    symbols = [u["symbol"] for u in universe]
+    histories = load_histories(symbols, status_cb=status_cb)
+    meta = {u["symbol"]: u for u in universe}
+    ranks = {sym: i + 1 for i, sym in enumerate(symbols)}
+    usable = {sym: h for sym, h in histories.items() if len(h) >= 126}
+    if not usable:
+        raise RuntimeError("沒有足夠股價資料可計算整理狀態")
+
+    def scores(period, offset=0):
+        values = {}
+        for sym, h in usable.items():
+            closes = [float(r[1]) for r in h]
+            end = len(closes) - offset
+            if end >= period + 1 and closes[end - period - 1] > 0:
+                values[sym] = closes[end - 1] / closes[end - period - 1] - 1
+        return _percentile_scores(values) if values else {}
+
+    rs120, rs20, rs20_old = scores(120), scores(20), scores(20, 5)
+    rows, dates = [], []
+    for sym, h in usable.items():
+        if int(rs120.get(sym, 0)) < 80:
+            continue
+        closes = [float(r[1]) for r in h]
+        now = _consolidation_snapshot_us(closes)
+        prev = _consolidation_snapshot_us(closes, -1)
+        if not now or not prev:
+            continue
+        current_base = now["score"] >= 3 and -15 <= now["drawdown"] <= -3
+        previous_base = prev["score"] >= 3 and -15 <= prev["drawdown"] <= -3
+        rs_change = int(rs20.get(sym, 0)) - int(rs20_old.get(sym, 0))
+        breakout = previous_base and now["close"] > prev["hi20"] and now["close"] >= now["ma50"]
+        turning = (current_base and now["close"] >= now["ma10"]
+                   and rs_change >= 5 and now["position"] >= 65)
+        if breakout:
+            state, order = "breakout", 0
+        elif turning:
+            state, order = "turning", 1
+        elif current_base:
+            state, order = "consolidating", 2
+        else:
+            continue
+        u = meta[sym]
+        dates.append(h[-1][0])
+        rows.append({
+            "rank": ranks[sym], "symbol": sym, "name": u.get("name", sym),
+            "name_zh": zh_company(sym, u.get("name", sym)),
+            "sector": u.get("sector", "—"), "sector_zh": zh_sector(u.get("sector", "—")),
+            "state": state, "state_order": order, "price": round(now["close"], 2),
+            "rs120": int(rs120[sym]), "rs20_change": rs_change, "score": now["score"],
+            "width": round(now["width"], 1), "position": round(now["position"], 1),
+            "drawdown": round(now["drawdown"], 1),
+            "vol_ratio": round(now["vol_ratio"], 2) if now["vol_ratio"] is not None else None,
+            "ma20_slope": round(now["ma20_slope"], 1),
+        })
+    rows.sort(key=lambda r: (r["state_order"], -r["rs120"], r["rank"]))
+    as_of = max(set(dates), key=dates.count) if dates else (
+        max((h[-1][0] for h in usable.values()), default=None))
+    return {"rows": rows, "results": rows, "scanned": len(usable), "as_of": as_of,
+            "method": "close_only_watchlist", "market": "US"}
+
+
 # ---------------------------------------------------------------- 專業版試作：創新高／RS
 
 RS_PERIODS = (20, 60, 120, 250)
@@ -3451,6 +3552,7 @@ __SEO_HEAD__
     <summary><i>📋</i><b data-i18n="nav.group">選股菜單</b><small data-i18n="nav.group.sub">強勢股・拉回買點・績效</small></summary>
     <a class="navitem sub" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
     <a class="navitem sub" data-page="p3" href="/pullback"><i>⭐</i><b data-i18n="p3.title">拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
+    <a class="navitem sub" data-page="p11" href="/consolidation"><i>🧭</i><b data-i18n="cons.title">強勢股整理觀察</b><small data-i18n="nav.cons.sub">整理・轉強・突破候選</small></a>
     <a class="navitem sub" data-page="p7" href="/twr"><i>📈</i><b data-i18n="p7.title">我的績效</b><small data-i18n="nav.twr.sub">TWR 報酬率試算</small></a>
   </details>
   <details class="navgroup">
@@ -3655,6 +3757,21 @@ __QUOTES_HTML__
   <button class="gobtn" id="go3" data-i18n="btn.screen">開始篩選</button>
   <div class="status" id="status3"></div>
   <div id="result3"></div>
+</div>
+
+<!-- ============ 強勢股整理觀察 ============ -->
+<div class="page" id="p11">
+  <h2 class="ptitle" data-i18n="cons.title">強勢股整理觀察</h2>
+  <details class="pgintro" open>
+    <summary data-i18n="cons.introT">先建立觀察名單，等整理結束再判斷</summary>
+    <div class="pgintro-b" data-i18n-html="cons.intro"><p>這裡找的是 RS120 位居前 20%、仍守住 50 日線，但近期進入收斂整理的美股。結果分成「整理中、轉強觀察、突破觀察」，<b>都不是買進建議</b>。</p><p>第一版只使用既有收盤快取，因此波動收縮以收盤報酬波動估算，不是 ATR，也沒有成交量確認。條件結構參考台股版，但美股績效尚未回測，不能套用台股結論。</p></div>
+  </details>
+  <div class="card"><h2 data-i18n="cons.rules">固定觀察規則</h2>
+    <div style="font-size:14px;line-height:1.8" data-i18n="cons.rulesBody">RS120 前20%、守住50MA、距60日高點回落3%～15%；區間收斂、波動收縮、20MA走平、守住結構四項至少三項。</div>
+  </div>
+  <button class="gobtn" id="goCons" data-i18n="cons.run">建立今日觀察清單</button>
+  <div class="status" id="statusCons"></div>
+  <div id="resultCons"></div>
 </div>
 
 <!-- ============ 我的績效（TWR）============ -->
@@ -3967,6 +4084,7 @@ const I18N = { en: {
   "nav.group.sub": "Leaders · Pullbacks · Performance",
   "nav.screen.sub": "Find leading stocks",
   "nav.pull.sub": "Close back within ±3% of an MA",
+  "nav.cons.sub": "Consolidating · turning · breakout",
   "nav.twr.sub": "TWR performance calculator",
   "nav.mine": "My Watchlist", "nav.mine.sub": "Risk & price alerts",
   "nav.risk.sub": "ATR · Volatility · Trend · Beta",
@@ -4010,6 +4128,12 @@ const I18N = { en: {
   "home.c2": "Close back within ±3% of a chosen MA",
   "home.c3": "The Taiwan edition — same logic, already live",
   "p1.title": "Find Strong Stocks", "p3.title": "Find Pullback Entries",
+  "cons.title": "Strong-stock Consolidation Watch",
+  "cons.introT": "Build the watchlist first; wait for consolidation to end",
+  "cons.intro": "<p>This list finds top-20% RS120 US leaders still above the 50-day average while price contracts. Results are labelled Consolidating, Turning Up or Breakout Watch; <b>none is a buy recommendation</b>.</p><p>The first version uses close-price history, so contraction is based on close-to-close volatility rather than ATR and has no volume confirmation. The structure is adapted from Taiwan, but US performance has not been backtested and Taiwan results do not transfer.</p>",
+  "cons.rules": "Fixed watch rules",
+  "cons.rulesBody": "Top-20% RS120, above 50MA, 3–15% below the 60-day high; at least three of tight range, lower volatility, flat 20MA and intact structure.",
+  "cons.run": "Build Today's Watchlist",
   "p7.title": "My Performance",
   "p7.introT": "Your return is probably wrong",
   "p7.intro": "<p>Most people compute return as \"current assets ÷ money put in − 1\". That is fine as long as you never added or withdrew funds midway — <b>but a single irregular transfer distorts it</b>.</p><p>An extreme example: you start the year with $1M and lose 20% in the first half, leaving $800k. In July you wire in another $1M and gain 10% in the second half, ending at $1.98M. Assets over contributions gives −1%, which looks like a small loss. But what you actually did was lose 20% and then gain 10% — that is <b>−12%</b>. The gap exists because <b>most of your money arrived after the loss</b>. That is timing, not skill.</p><p><b>Time-weighted return (TWR)</b> removes that effect: each month is treated as its own period, and the monthly returns are chained together. Deposits and withdrawals make no difference to the result. This is the standard for funds and managed accounts, precisely because a manager cannot control when clients wire money in.</p><p><b>How it differs from IRR (money-weighted)</b>: IRR accounts for how much you invested and when, answering \"how did this pot of money do?\" TWR answers \"how good were my picks and my timing of entries and exits?\" Use TWR to judge your process; use IRR to see what actually landed in your pocket.</p><p><b>What to enter</b>: just two columns per month — <b>net deposit</b> (deposits minus withdrawals; use a negative number for withdrawals) and <b>month-end total assets</b> (cash plus the market value of all holdings). Leave future months blank; only the months you fill are used, and you get both cumulative and annualised figures.</p><p><b>Everything stays in this browser</b> (localStorage). Nothing is uploaded and there is no account system. The upside is no sign-up; the cost is that changing device or clearing site data loses it — worth saying plainly rather than pretending there is sync.</p>",
@@ -4611,6 +4735,59 @@ function render3(res){
 
 function applyFilter3(){ applyAll("tb3", "cd3", lastRows3, "secFilter3", "epsFilter3", "alignFilter3", "nhFilter3"); }
 
+/* ---- 強勢股整理觀察 ---- */
+let consRows = [];
+function consStateName(s){
+  const zh={consolidating:"整理中",turning:"轉強觀察",breakout:"突破觀察"};
+  const en={consolidating:"Consolidating",turning:"Turning Up",breakout:"Breakout Watch"};
+  return (LANG==="en"?en:zh)[s]||s;
+}
+function applyConsFilter(){
+  const state=$("#consState")?$("#consState").value:"";
+  const sector=$("#consSector")?$("#consSector").value:"";
+  document.querySelectorAll("#resultCons [data-cons-row]").forEach(el=>{
+    const i=parseInt(el.getAttribute("data-i"),10), r=consRows[i];
+    el.style.display=(!state||r.state===state)&&(!sector||sectorKey(r)===sector)?"":"none";
+  });
+}
+if ($("#goCons")) $("#goCons").onclick=()=>{
+  $("#goCons").disabled=true; $("#resultCons").innerHTML=""; $("#statusCons").textContent="";
+  brewOpen(t("st.send","送出篩選條件…"));
+  fetch("/api/consolidation",{method:"POST",headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},body:"{}"})
+    .then(r=>r.json()).then(j=>{
+      if(!j.job){brewClose();$("#goCons").disabled=false;if(retryOnStaleToken(j))return;$("#statusCons").textContent=j.error||t("st.nojob","無法建立工作");return;}
+      pollCons(j.job);
+    }).catch(e=>{brewClose();$("#goCons").disabled=false;$("#statusCons").textContent=t("st.conn","連線失敗：")+e;});
+};
+function pollCons(id){
+  fetch("/api/job/"+id).then(r=>r.json()).then(j=>{
+    if(!j.done){brewProgress(j.progress,j.status);setTimeout(()=>pollCons(id),900);return;}
+    brewClose();$("#goCons").disabled=false;
+    if(j.error){$("#statusCons").textContent=t("st.failed","篩選失敗：")+j.error;return;}
+    renderCons(j.result);
+  }).catch(e=>{brewClose();$("#goCons").disabled=false;$("#statusCons").textContent=t("st.lost","連線中斷：")+e;});
+}
+function renderCons(res){
+  consRows=res.rows||[];
+  $("#statusCons").innerHTML=t("st.asof","資料日期")+" "+(res.as_of||"—")+"｜"+
+    (LANG==="en"?"On watch ":"今日觀察 ")+`<span class="count">${consRows.length}</span> `+t("st.unit","檔");
+  if(!consRows.length){$("#resultCons").innerHTML="<div class='status'>"+t("st.none","沒有符合條件的股票。")+"</div>";return;}
+  const states={}, sectors={}, sectorLabels={};
+  consRows.forEach(r=>{states[r.state]=(states[r.state]||0)+1;const k=sectorKey(r);sectors[k]=(sectors[k]||0)+1;sectorLabels[k]=coSector(r);});
+  let stateOpts=`<option value="">${LANG==="en"?"All states":"全部狀態"}（${consRows.length}）</option>`;
+  Object.keys(states).forEach(k=>stateOpts+=`<option value="${k}">${consStateName(k)}（${states[k]}）</option>`);
+  let sectorOpts=`<option value="">${t("flt.allSector","全部產業")}（${consRows.length}）</option>`;
+  Object.keys(sectors).sort((a,b)=>sectors[b]-sectors[a]).forEach(k=>sectorOpts+=`<option value="${k}">${sectorLabels[k]}（${sectors[k]}）</option>`);
+  let trs="",cards="";
+  consRows.forEach((r,i)=>{
+    const ch=(r.rs20_change>=0?"+":"")+r.rs20_change;
+    trs+=`<tr data-cons-row data-i="${i}"><td>${r.rank}</td><td>${r.symbol}</td><td>${coName(r)}</td><td>${coSector(r)}</td><td><span class="badge">${consStateName(r.state)}</span></td><td>${r.rs120}</td><td>${ch}</td><td>${r.width}%</td><td>${r.position}%</td><td>${r.drawdown}%</td><td>${r.score}/4</td></tr>`;
+    cards+=`<details class="scard" data-cons-row data-i="${i}"><summary><span class="sc-l"><b>${r.symbol}</b> ${coName(r)}</span><span class="sc-r">${consStateName(r.state)}</span></summary><div class="scard-body"><div class="kv"><span>${t("th.sector","產業")}</span><b>${coSector(r)}</b></div><div class="kv"><span>RS120</span><b>${r.rs120}</b></div><div class="kv"><span>RS20 Δ5d</span><b>${ch}</b></div><div class="kv"><span>${LANG==="en"?"Range width":"區間寬度"}</span><b>${r.width}%</b></div><div class="kv"><span>${LANG==="en"?"Range position":"區間位置"}</span><b>${r.position}%</b></div><div class="kv"><span>${LANG==="en"?"From 60d high":"距60日高點"}</span><b>${r.drawdown}%</b></div><div class="kv"><span>${LANG==="en"?"Conditions":"整理條件"}</span><b>${r.score}/4</b></div></div></details>`;
+  });
+  $("#resultCons").innerHTML=`<div class="resfilter"><span class="rflabel">${LANG==="en"?"Filter":"結果篩選"}</span><select id="consState">${stateOpts}</select><select id="consSector">${sectorOpts}</select></div><div class="tblwrap res-wide"><table><thead><tr><th>${t("th.rank","市值排名")}</th><th>${t("th.sym","代號")}</th><th>${t("th.name","公司名稱")}</th><th>${t("th.sector","產業")}</th><th>${LANG==="en"?"State":"狀態"}</th><th>RS120</th><th>RS20 Δ5d</th><th>${LANG==="en"?"Range width":"區間寬度"}</th><th>${LANG==="en"?"Range position":"區間位置"}</th><th>${LANG==="en"?"From 60d high":"距60日高點"}</th><th>${LANG==="en"?"Conditions":"整理條件"}</th></tr></thead><tbody>${trs}</tbody></table></div><div class="res-cards">${cards}</div>`;
+  $("#consState").onchange=applyConsFilter;$("#consSector").onchange=applyConsFilter;
+}
+
 /* 三個條件同時成立才顯示（AND）。用列的索引對回原始資料，
    避免從 DOM 反推數值時被格式化字串（「—」「+12.3%」）搞混。
 
@@ -5205,7 +5382,11 @@ if ($("#alList")) loadAlerts();
 async function clearUsPushBadge(){
   if (navigator.clearAppBadge){ try { await navigator.clearAppBadge(); } catch(_){} }
   if ("caches" in window){
-    try { const c = await caches.open("us-push-state"); await c.delete("/__us_badge"); }
+    try {
+      const c = await caches.open("us-push-state");
+      await c.delete("/api/__us_badge");
+      await c.delete("/__us_badge");        // 舊鍵（2026-08-07 前）順手清掉
+    }
     catch(_){}
   }
 }
@@ -5665,6 +5846,15 @@ PAGE_ROUTES = {
         "en": ("Pullback Buy Points｜US Stocks Back Within ±3% of an MA",
                "Find US stocks whose close has returned to within ±3% of the 10/20/50/150-day "
                "moving average, sorted by absolute deviation — for timing entries on pullbacks."),
+    },
+    "consolidation": {
+        "page": "p11", "index": True,
+        "zh": ("強勢股整理觀察｜美股整理、轉強與突破候選",
+               "從市值前 300 大美股找出 RS120 前 20%、守住 50 日線且價格收斂的強勢股，"
+               "分成整理中、轉強觀察與突破觀察。研究候選清單，不是買進建議。"),
+        "en": ("Strong-stock Consolidation Watch｜US Turning and Breakout Candidates",
+               "Find top-20% RS120 US leaders above the 50-day average with contracting price action, "
+               "labelled Consolidating, Turning Up or Breakout Watch. A research list, not a buy signal."),
     },
     "twr": {
         "page": "p7", "index": True,
@@ -6737,10 +6927,15 @@ async function pushHandler(e){
   // 使用者打開 App 時，前端 clearUsPushBadge() 會清為 0。
   try {
     const cache = await caches.open('us-push-state');
-    const prev = await cache.match('/__us_badge');
+    /* ⚠️⚠️ 這是 Cache API 的**鍵**，不是網頁。
+       但 Googlebot 執行 JS 時會把字串當成網址去抓 ——
+       台股版 2026-08-07 就被 Search Console 報了 `/__unread` 404。
+       移到 `/api/` 底下，robots.txt 的 `Disallow: /api/` 就會擋住。
+       📌 404 本身不影響排名，這純粹是把報表清乾淨。 */
+    const prev = await cache.match('/api/__us_badge');
     let count = prev ? parseInt(await prev.text(), 10) || 0 : 0;
     count += 1;
-    await cache.put('/__us_badge', new Response(String(count)));
+    await cache.put('/api/__us_badge', new Response(String(count)));
     if (self.navigator && self.navigator.setAppBadge){
       try { await self.navigator.setAppBadge(count); } catch(_){}
     }
@@ -7180,6 +7375,13 @@ def api_pullback():
     if params["align"] not in ALIGN_NAMES:
         return jsonify(error="均線排列條件不支援"), 400
     return jsonify(job=start_job(screen_pullback, params))
+
+
+@app.route("/api/consolidation", methods=["POST"])
+def api_consolidation():
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    return jsonify(job=start_job(screen_consolidation, {}))
 
 
 @app.route("/api/pro/new-high", methods=["POST"])

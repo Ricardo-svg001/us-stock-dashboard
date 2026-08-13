@@ -1970,7 +1970,9 @@ BREADTH_SEED_FILE = os.path.join(BASE_DIR, "breadth_5y_seed.json")
 # 存活者偏誤，門檻只應保守解讀。
 
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
-MACRO_CACHE_FILE = "us_rate_inflation_v1.json"
+MACRO_CACHE_FILE = "us_rate_inflation_v2.json"   # v2: 新增近五年累積 CPI
+# ⚠️ 新增欄位一定要換快取檔名。沿用舊檔會讓新那一格永遠讀到沒有它的舊快取，
+#    畫面上少一列、卻不會報錯 —— 這是 5.5「看起來正常才最危險」的同一類。
 
 
 def _treasury_yields():
@@ -2092,6 +2094,7 @@ def _us_rate_inflation_data():
         latest_dt = datetime.strptime(latest_date, "%Y-%m-%d")
         by_date = {date: value for date, value in cpi}
         prev_dec = "%04d-12-01" % (latest_dt.year - 1)
+        five_year = "%04d-%02d-01" % (latest_dt.year - 5, latest_dt.month)
         ten_year = "%04d-%02d-01" % (latest_dt.year - 10, latest_dt.month)
 
         def cumulative(key, label, base_date):
@@ -2102,7 +2105,12 @@ def _us_rate_inflation_data():
                               "value": round(value, 2), "date": latest_date,
                               "base_date": base_date})
 
+        # ⚠️⚠️ **五年是 2026-08-13 新增的，而且它不是裝飾。**
+        #    五年窗口把 2021~2023 那波通膨算滿，十年窗口把它稀釋掉，
+        #    兩者年化可以差快一個百分點 —— **同一筆投資會得到不同的實質報酬結論**。
+        #    所以三個期間都給，讓使用者自己跟持有期間對齊。
         cumulative("cpi_ytd", "本年度累積 CPI", prev_dec)
+        cumulative("cpi_5y", "近五年累積 CPI", five_year)
         cumulative("cpi_10y", "近十年累積 CPI", ten_year)
 
     data = {"items": items, "updated": now.strftime("%Y-%m-%d")}
@@ -3921,7 +3929,7 @@ __QUOTES_HTML__
     <summary data-i18n="pmac.introT">投資報酬要先跨過利率與通膨</summary>
     <div class="pgintro-b" data-i18n-html="pmac.intro">
       <p>投資賺 10%，不代表購買力增加 10%。美國公債殖利率代表美元資金在低信用風險下可取得的報酬門檻；投資報酬減去相近期間的公債利率，才是承擔市場風險換來的粗略超額報酬。</p>
-      <p><b>本年度累積 CPI</b>比較最新 CPI 與去年 12 月，回答今年以來物價漲了多少；<b>近十年累積 CPI</b>比較最新月份與十年前同月，回答十年間美元購買力被物價侵蝕多少。</p>
+      <p><b>本年度累積 CPI</b>比較最新 CPI 與去年 12 月，回答今年以來物價漲了多少；<b>近五年</b>與<b>近十年累積 CPI</b>比較最新月份與五年／十年前同月。<b>兩個期間都要看</b>：五年窗口把 2021～2023 那波通膨算滿，十年窗口把它稀釋掉，兩者年化可以差快一個百分點——<b>用哪一個當基準會得到不同的實質報酬結論</b>，請挑跟你持有期間相近的那一個。</p>
       <p>實質報酬應用「(1＋名目報酬) ÷ (1＋同期通膨率) − 1」計算。公債利率是機會成本，CPI 才是購買力調整，兩者不能混為一談。</p>
     </div>
   </details>
@@ -3933,7 +3941,7 @@ __QUOTES_HTML__
     <h2 data-i18n="pmac.src">資料來源與算法</h2>
     <div style="font-size:13px;color:#555;line-height:1.85" data-i18n-html="pmac.source">
       美國 2 年期與 10 年期使用美國財政部 Daily Treasury Par Yield Curve Rates；CPI 使用美國勞工統計局經季節調整的全城市消費者物價指數 CUSR0000SA0。<br><br>
-      本年度累積 CPI＝最新指數 ÷ 去年 12 月指數 − 1；近十年累積 CPI＝最新指數 ÷ 十年前同月指數 − 1。<br><br>
+      本年度累積 CPI＝最新指數 ÷ 去年 12 月指數 − 1；近五年／近十年累積 CPI＝最新指數 ÷ 五年／十年前同月指數 − 1。皆為期間累積漲幅，不是年化值。<br><br>
       Source: U.S. Department of the Treasury and U.S. Bureau of Labor Statistics
       （<a href="https://home.treasury.gov/resource-center/data-chart-center/interest-rates" target="_blank" rel="noopener" style="color:var(--primary)">U.S. Treasury</a>；
       <a href="https://www.bls.gov/cpi/" target="_blank" rel="noopener" style="color:var(--primary)">BLS CPI</a>）。
@@ -5965,7 +5973,8 @@ if ($("#rkBtn")){
 /* ---- 美國利率與購買力 ---- */
 const MACRO_EN = {
   us2y:"US 2Y Treasury", us10y:"US 10Y Treasury",
-  cpi_ytd:"YTD Cumulative CPI", cpi_10y:"10-Year Cumulative CPI"
+  cpi_ytd:"YTD Cumulative CPI", cpi_5y:"5-Year Cumulative CPI",
+  cpi_10y:"10-Year Cumulative CPI"
 };
 function macroTile(it){
   const name = (LANG === "en" && MACRO_EN[it.key]) ? MACRO_EN[it.key] : it.label;
@@ -5989,7 +5998,7 @@ async function loadMacro(){
     (data.items || []).forEach(it => byKey[it.key] = it);
     const groups = [
       [t("pmac.bonds", "美國公債殖利率"), ["us2y", "us10y"]],
-      [t("pmac.cpi", "累積物價漲幅"), ["cpi_ytd", "cpi_10y"]]
+      [t("pmac.cpi", "累積物價漲幅"), ["cpi_ytd", "cpi_5y", "cpi_10y"]]
     ];
     let html = "";
     groups.forEach(group => {
@@ -6125,7 +6134,7 @@ PAGE_ROUTES = {
     "macro": {
         "page": "pmac", "index": True,
         "zh": ("美國利率與購買力｜2 年期、10 年期公債與累積 CPI",
-               "查看美國 2 年期、10 年期公債殖利率，以及本年度與近十年累積 CPI 漲幅，"
+               "查看美國 2 年期、10 年期公債殖利率，以及本年度、近五年與近十年累積 CPI 漲幅，"
                "比較投資報酬門檻、超額報酬與美元實質購買力。"),
         "en": ("US Rates & Purchasing Power｜2Y, 10Y Treasuries and Cumulative CPI",
                "View US 2-year and 10-year Treasury yields plus year-to-date and 10-year "

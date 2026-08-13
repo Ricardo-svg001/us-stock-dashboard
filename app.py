@@ -5362,7 +5362,7 @@ if ($("#twCalc")) $("#twCalc").onclick = () => {
     </div>`;
 };
 
-$("#twMarket").onclick = async () => {
+if ($("#twMarket")) $("#twMarket").onclick = async () => {
   const status = $("#statusMkt"), out = $("#mktResult");
   status.textContent = LANG === "en" ? "Loading…" : "讀取大盤與 CPI 資料中…";
   out.innerHTML = "";

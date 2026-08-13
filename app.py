@@ -6254,15 +6254,27 @@ def _md_to_html(md):
     return "\n".join(out)
 
 
-def _load_articles():
+def _load_articles(lang="zh"):
+    """讀文章並解析 front-matter。
+
+    lang="zh" → `articles/*.md`；lang="en" → `articles/en/*.md`（**同檔名對應同一篇**）。
+
+    ⚠️⚠️ **英文版缺檔時整批退回中文**，不會空白也不會半中半英。
+    因為文章是靠「檔名」配對的，只補一半會讓兩種語言的清單長度不同 ——
+    而 sitemap 的 hreflang 要求兩邊互指，數量對不上 Search Console 會整組忽略。
+    📌 所以要嘛整批補齊，要嘛整批沒有，**不要只補幾篇**。
+    """
+    base = ARTICLES_DIR if lang == "zh" else os.path.join(ARTICLES_DIR, "en")
+    if lang == "en" and not os.path.isdir(base):
+        return _load_articles("zh")
     items = []
-    if not os.path.isdir(ARTICLES_DIR):
+    if not os.path.isdir(base):
         return items
-    for fn in sorted(os.listdir(ARTICLES_DIR)):
+    for fn in sorted(os.listdir(base)):
         if not fn.endswith(".md"):
             continue
         try:
-            with open(os.path.join(ARTICLES_DIR, fn), "r", encoding="utf-8") as f:
+            with open(os.path.join(base, fn), "r", encoding="utf-8") as f:
                 raw = f.read()
         except Exception:
             continue
@@ -6285,31 +6297,40 @@ def _load_articles():
     return items
 
 
-def _art_links_html():
+def _art_links_html(lang="zh"):
+    """⚠️ 這段會被塞進 `<ul class="alinks">` 裡，**只能產生 `<li>`**。
+
+    語言切換的 class 必須掛在 `<li>` 自己身上，不可以在外面包一層 `<span>` ——
+    `<ul>` 的合法子元素只有 `<li>`，包 span 會被瀏覽器搬出清單，版面直接垮掉，
+    而且 Python 與 JS 的語法檢查都抓不到（見 5.5 的同類教訓）。
+    """
     import html as _h
+    pre = "/en" if lang == "en" else ""
+    cls = 'q-en" style="display:none' if lang == "en" else "q-zh"
     rows = []
-    for a in _load_articles():
+    for a in _load_articles(lang):
         rows.append(
-            '<li><a href="/article/%s"><span class="atag">%s</span>'
+            '<li class="%s"><a href="%s/article/%s"><span class="atag">%s</span>'
             '<div class="atitle">%s</div><p class="asum">%s</p>'
             '<span class="adate">%s</span></a></li>' %
-            (quote(a["slug"]), _h.escape(a["tag"]), _h.escape(a["title"]),
+            (cls, pre, quote(a["slug"]), _h.escape(a["tag"]), _h.escape(a["title"]),
              _h.escape(a["summary"]), _h.escape(a["date"])))
     return "".join(rows)
 
 
-def _find_article(aid):
-    items = _load_articles()
+def _find_article(aid, lang="zh"):
+    items = _load_articles(lang)
     for a in items:
         if aid in (a["id"], a["slug"]):
             return a, [x for x in items if x["id"] != a["id"]][:5]
     return None, items[:5]
 
 
-ARTICLE_PAGE = r"""<!doctype html><html lang="zh-Hant-TW"><head>
+ARTICLE_PAGE = r"""<!doctype html><html lang="__HTMLLANG__"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>__TITLE__｜美股咖啡館 US Stock Coffee</title>
 <meta name="description" content="__DESC__"><link rel="canonical" href="__URL__">
+__ALTS__
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="article"><meta property="og:site_name" content="美股咖啡館 US Stock Coffee">
 <meta property="og:title" content="__TITLE__"><meta property="og:description" content="__DESC__">
@@ -6323,41 +6344,100 @@ main{max-width:760px;margin:auto;padding:24px 18px 60px}.crumb{font-size:13px;co
 h1{font-size:28px;line-height:1.45;margin:12px 0 5px}.meta{font-size:12px;color:var(--mocha)}.summary{margin:18px 0 28px;background:var(--foam);border:1px solid var(--grounds);border-left:4px solid var(--caramel);border-radius:0 12px 12px 0;padding:12px 16px;color:var(--mocha)}
 article{font-size:16.5px}article h2{font-size:20px;margin:34px 0 10px;border-left:4px solid var(--caramel);padding-left:10px}article h3{font-size:17px;color:var(--caramel2);margin:26px 0 8px}article p{margin:12px 0}article li{margin:7px 0}article strong{color:var(--espresso)}
 .cta{display:block;margin-top:36px;padding:13px;text-align:center;background:var(--caramel);color:white;border-radius:999px;text-decoration:none;font-weight:800}.more{margin-top:35px;border-top:1px solid var(--grounds);padding-top:18px}.more a{color:var(--caramel2);text-decoration:none}
-</style></head><body><div class="top"><a href="/">☕ 美股咖啡館</a><a class="go" href="/">開啟選股工具</a></div>
-<main><nav class="crumb"><a href="/">首頁</a> › <a href="/articles">文章區</a> › __TITLE__</nav>
+</style></head><body><div class="top"><a href="__HOME__">☕ 美股咖啡館</a><a class="go" href="__HOME__">__CTA_TOP__</a></div>
+<main><nav class="crumb"><a href="__HOME__">__S_HOME__</a> › <a href="__PRE__/articles">__S_ARTS__</a> › __TITLE__</nav>
 <span class="tag">__TAG__</span><h1>__TITLE__</h1><div class="meta">__DATE__</div>
 <div class="summary">__DESC__</div><article>__BODY__</article>
-<a class="cta" href="/">免費使用美股選股工具，免註冊 →</a><div class="more"><b>其他文章</b><ul>__MORE__</ul></div></main></body></html>"""
+<a class="cta" href="__HOME__">__CTA__</a><div class="more"><b>__S_MORE__</b><ul>__MORE__</ul></div></main></body></html>"""
+
+ARTICLE_STRINGS = {
+    "zh": {"home": "首頁", "arts": "文章區", "more": "其他文章",
+           "cta_top": "開啟選股工具", "cta": "免費使用美股選股工具，免註冊 →",
+           "htmllang": "zh-Hant-TW"},
+    "en": {"home": "Home", "arts": "Articles", "more": "More articles",
+           "cta_top": "Open the screener", "cta": "Use the free US stock screener — no sign-up →",
+           "htmllang": "en"},
+}
 
 
-@app.route("/article/<path:aid>")
-def article_page(aid):
+def _render_article(a, lang, others):
+    """單篇文章頁。中英各有自己的網址：`/article/<slug>` 與 `/en/article/<slug>`。
+
+    ⚠️⚠️ **canonical 與 hreflang 必須互相對應**：中文頁要指到英文頁、英文頁也要指回
+    中文頁，兩邊都要列出自己。少一邊 Search Console 會報「沒有回傳連結」，
+    然後**整組忽略**（不是只忽略缺的那一邊）。
+    """
     import html as _h
-    a, others = _find_article(aid)
-    if not a:
-        return _render("articles"), 404
-    # ⚠️ 用舊的檔名網址進來 → **301 導到 slug 版本**（正式網址只有一個）。
-    #    舊網址永遠保持有效（分享出去的連結不能變 404），只是會被導過去。
-    #    ⚠️ 一定要 301 不能 302 —— 302 對搜尋引擎的意思是「原網址才是正式的」。
-    if a["slug"] != aid:
-        from flask import redirect
-        return redirect("/article/" + quote(a["slug"]), code=301)
-    url = SITE_URL + "/article/" + quote(a["slug"])
+    S = ARTICLE_STRINGS[lang]
+    pre = "/en" if lang == "en" else ""
+    zh_url = SITE_URL + "/article/" + quote(a["slug"])
+    en_url = SITE_URL + "/en/article/" + quote(a["slug"])
+    url = en_url if lang == "en" else zh_url
+    alts = ('<link rel="alternate" hreflang="zh-Hant" href="' + zh_url + '">\n'
+            '<link rel="alternate" hreflang="en" href="' + en_url + '">\n'
+            '<link rel="alternate" hreflang="x-default" href="' + zh_url + '">')
     ld = {"@context": "https://schema.org", "@type": "Article",
           "headline": a["title"], "description": a["summary"], "url": url,
           "datePublished": a["date"], "dateModified": a["date"],
-          "inLanguage": "zh-Hant-TW", "isAccessibleForFree": True,
+          "inLanguage": S["htmllang"], "isAccessibleForFree": True,
           "author": {"@type": "Organization", "name": "美股咖啡館 US Stock Coffee"}}
-    more = "".join('<li><a href="/article/%s">%s</a></li>' %
-                   (quote(x["slug"]), _h.escape(x["title"])) for x in others)
+    more = "".join('<li><a href="%s/article/%s">%s</a></li>' %
+                   (pre, quote(x["slug"]), _h.escape(x["title"])) for x in others)
     out = ARTICLE_PAGE
     vals = {"__TITLE__": _h.escape(a["title"]), "__DESC__": _h.escape(a["summary"]),
             "__TAG__": _h.escape(a["tag"]), "__DATE__": _h.escape(a["date"]),
             "__BODY__": a["html"], "__MORE__": more, "__URL__": url,
+            "__ALTS__": alts, "__HTMLLANG__": S["htmllang"], "__PRE__": pre,
+            "__HOME__": "/?lang=en" if lang == "en" else "/",
+            "__S_HOME__": S["home"], "__S_ARTS__": S["arts"], "__S_MORE__": S["more"],
+            "__CTA_TOP__": S["cta_top"], "__CTA__": S["cta"],
             "__SITE__": SITE_URL, "__JSONLD__": json.dumps(ld, ensure_ascii=False)}
     for k, v in vals.items():
         out = out.replace(k, v)
     return out
+
+
+def _article_slug_redirect(a, aid, pre):
+    """用舊的檔名網址進來 → **301 導到 slug 版本**（正式網址只有一個）。
+
+    ⚠️ 舊網址永遠保持有效（分享出去的連結不能變 404），只是會被導過去。
+    ⚠️ 一定要 301 不能 302 —— 302 對搜尋引擎的意思是「原網址才是正式的」，正好相反。
+    """
+    if a["slug"] != aid:
+        from flask import redirect
+        return redirect(pre + "/article/" + quote(a["slug"]), code=301)
+    return None
+
+
+@app.route("/article/<path:aid>")
+def article_page(aid):
+    a, others = _find_article(aid, "zh")
+    if not a:
+        return _render("articles"), 404
+    r = _article_slug_redirect(a, aid, "")
+    return r if r else _render_article(a, "zh", others)
+
+
+@app.route("/en/article/<path:aid>")
+def article_page_en(aid):
+    a, others = _find_article(aid, "en")
+    if not a:
+        return _render("articles"), 404
+    r = _article_slug_redirect(a, aid, "/en")
+    return r if r else _render_article(a, "en", others)
+
+
+@app.route("/en/articles")
+def articles_index_en():
+    """`/en/articles` → 301 到 `/articles?lang=en`。
+
+    ⚠️ **文章索引與單篇文章刻意用不同的網址形式**，這不是不一致，是遷就既有架構：
+      ・索引頁是主站 PAGE 的一個分頁 → 沿用全站的 `?lang=en` 參數式（見 sitemap 的 `pair()`）
+      ・單篇文章是獨立的 HTML 模板 → 用路徑式 `/en/article/<slug>`
+    這裡只是給猜網址的人一個入口，並用 301 明確指向正式版本。
+    """
+    from flask import redirect
+    return redirect("/articles?lang=en", code=301)
 
 
 @app.after_request
@@ -6698,7 +6778,11 @@ def _render(slug=None):
     html = html.replace("__HOME_SCREEN__", _home_screen_html())
     # ⚠️ 只放**公開**金鑰。VAPID_PRIVATE 絕對不能出現在頁面上。
     html = html.replace("__VAPID_PUBLIC__", VAPID_PUBLIC)
-    html = html.replace("__ART_LINKS__", _art_links_html())
+    # ⚠️ 中英兩份都送出，用 q-zh／q-en 包起來讓 applyLang() 能即時切換。
+    #    只送當前語言的話，使用者在頁面上按語言鈕時文章清單不會跟著換
+    #    （applyLang 是純前端，不會回頭跟伺服器要資料）。
+    html = html.replace("__ART_LINKS__",
+                        _art_links_html("zh") + _art_links_html("en"))
     html = html.replace("__QUOTES_HTML__", _quotes_html())
     import html as _hq
     _src = "<br>".join(_hq.escape(x) for x in QUOTE_SOURCES)
@@ -7284,11 +7368,20 @@ def sitemap_xml():
     if arts:
         loc = SITE_URL + "/articles"
         parts.append(url(loc, today, "0.8", "weekly", pair(loc)))
+        # ⚠️⚠️ 只有 `articles/en/` 真的存在時才列英文版本。
+        #    `_load_articles("en")` 在缺資料夾時會**退回中文**，直接拿它的長度判斷會誤判成
+        #    「有英文版」，然後 sitemap 送出一批指向 /en/article/... 但內容是中文的網址。
+        has_en = os.path.isdir(os.path.join(ARTICLES_DIR, "en"))
         for a in arts:
-            # 文章頁目前只有中文（沒有 articles/en），所以不列 en 版本。
             aloc = SITE_URL + "/article/" + quote(a["slug"])
-            parts.append(url(aloc, a.get("date") or today, "0.7", "monthly",
-                             [("zh-Hant", aloc), ("x-default", aloc)]))
+            if has_en:
+                eloc = SITE_URL + "/en/article/" + quote(a["slug"])
+                alts = [("zh-Hant", aloc), ("en", eloc), ("x-default", aloc)]
+                parts.append(url(aloc, a.get("date") or today, "0.7", "monthly", alts))
+                parts.append(url(eloc, a.get("date") or today, "0.7", "monthly", alts))
+            else:
+                parts.append(url(aloc, a.get("date") or today, "0.7", "monthly",
+                                 [("zh-Hant", aloc), ("x-default", aloc)]))
     parts.append("</urlset>")
     return app.response_class("\n".join(parts), mimetype="application/xml")
 

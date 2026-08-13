@@ -1970,6 +1970,145 @@ BREADTH_SEED_FILE = os.path.join(BASE_DIR, "breadth_5y_seed.json")
 # 存活者偏誤，門檻只應保守解讀。
 
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
+MACRO_CACHE_FILE = "us_rate_inflation_v1.json"
+
+
+def _treasury_yields():
+    """美國財政部當年度 Daily Treasury Par Yield Curve Rates。"""
+    import xml.etree.ElementTree as ET
+    year = datetime.utcnow().year
+    r = requests.get(
+        "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml",
+        params={"data": "daily_treasury_yield_curve", "field_tdr_date_value": year},
+        headers=HEADERS, timeout=30,
+    )
+    r.raise_for_status()
+    rows = []
+    root = ET.fromstring(r.content)
+    for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
+        values = {node.tag.split("}")[-1]: (node.text or "").strip()
+                  for node in entry.iter()}
+        try:
+            rows.append((values["NEW_DATE"][:10], float(values["BC_2YEAR"]),
+                         float(values["BC_10YEAR"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    rows.sort()
+    return rows
+
+
+def _bls_cpi_series():
+    """BLS 經季節調整全城市 CPI（CUSR0000SA0），涵蓋至少最近十年。"""
+    year = datetime.utcnow().year
+    ranges = ((year - 11, year - 6), (year - 5, year))
+    rows = {}
+    for start, end in ranges:
+        r = requests.get(
+            "https://api.bls.gov/publicAPI/v2/timeseries/data/CUSR0000SA0",
+            params={"startyear": start, "endyear": end}, headers=HEADERS, timeout=25,
+        )
+        r.raise_for_status()
+        payload = r.json()
+        if payload.get("status") != "REQUEST_SUCCEEDED":
+            continue
+        for series in payload.get("Results", {}).get("series", []):
+            for item in series.get("data", []):
+                period = str(item.get("period") or "")
+                if not re.fullmatch(r"M\d{2}", period) or period == "M13":
+                    continue
+                try:
+                    date = "%s-%s-01" % (item["year"], period[1:])
+                    rows[date] = float(item["value"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+    return sorted(rows.items())
+
+
+def _cached_bls_cpi_series():
+    """共用 BLS CPI 快取，避免總經頁與績效比較重複請求 BLS。"""
+    cached = _load_cache("us_cpi_index_v1.json", 24)
+    if cached is not None:
+        return [(str(date), float(value)) for date, value in cached]
+    rows = _bls_cpi_series()
+    if rows:
+        _save_cache("us_cpi_index_v1.json", rows)
+    return rows
+
+
+def _us_cpi_for_years(years):
+    """各年度 CPI：12 月對前一年 12 月；未完年度用最新月份。"""
+    rows = _cached_bls_cpi_series()
+    by_date = {date: value for date, value in rows}
+    answer = {}
+    for year in years:
+        candidates = [(date, value) for date, value in rows
+                      if date.startswith("%04d-" % year)]
+        base = by_date.get("%04d-12-01" % (year - 1))
+        if not candidates or not base:
+            continue
+        date, value = candidates[-1]
+        month = int(date[5:7])
+        answer[str(year)] = {
+            "value": round((value / base - 1) * 100, 2),
+            "period": date[:7],
+            "full_year": month == 12,
+        }
+    return answer
+
+
+def _us_rate_inflation_data():
+    """美國 2Y／10Y 公債與今年、近十年累積 CPI 漲幅。"""
+    cached = _load_cache(MACRO_CACHE_FILE, 6)
+    if cached is not None:
+        return cached
+
+    now = datetime.utcnow()
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        treasury_future = ex.submit(_treasury_yields)
+        cpi_future = ex.submit(_cached_bls_cpi_series)
+        try:
+            treasury = treasury_future.result(timeout=40)
+        except Exception:
+            treasury = []
+        try:
+            cpi = cpi_future.result(timeout=60)
+        except Exception:
+            cpi = []
+
+    items = []
+    if treasury:
+        date, value2, value10 = treasury[-1]
+        previous = treasury[-2] if len(treasury) > 1 else None
+        for key, label, value, col in (("us2y", "美國 2 年期公債", value2, 1),
+                                       ("us10y", "美國 10 年期公債", value10, 2)):
+            item = {"key": key, "label": label, "unit": "%",
+                    "value": round(value, 2), "date": date}
+            if previous:
+                item["chg"] = round(value - previous[col], 2)
+            items.append(item)
+
+    if cpi:
+        latest_date, latest_value = cpi[-1]
+        latest_dt = datetime.strptime(latest_date, "%Y-%m-%d")
+        by_date = {date: value for date, value in cpi}
+        prev_dec = "%04d-12-01" % (latest_dt.year - 1)
+        ten_year = "%04d-%02d-01" % (latest_dt.year - 10, latest_dt.month)
+
+        def cumulative(key, label, base_date):
+            base = by_date.get(base_date)
+            if base:
+                value = (latest_value / base - 1) * 100
+                items.append({"key": key, "label": label, "unit": "%",
+                              "value": round(value, 2), "date": latest_date,
+                              "base_date": base_date})
+
+        cumulative("cpi_ytd", "本年度累積 CPI", prev_dec)
+        cumulative("cpi_10y", "近十年累積 CPI", ten_year)
+
+    data = {"items": items, "updated": now.strftime("%Y-%m-%d")}
+    if items:
+        _save_cache(MACRO_CACHE_FILE, data)
+    return data
 
 
 def _idx_from_fred():
@@ -3549,14 +3688,15 @@ __SEO_HEAD__
   <div class="sbTitle">☕ <span data-i18n="brand.name">美股咖啡館</span></div>
   <a class="navitem active" data-page="home" href="/"><i>☕</i><b data-i18n="nav.home">菜單首頁</b><small data-i18n="nav.home.sub">今天適合出手嗎</small></a>
   <details class="navgroup">
-    <summary><i>📋</i><b data-i18n="nav.group">選股菜單</b><small data-i18n="nav.group.sub">強勢股・拉回買點・績效</small></summary>
+    <summary><i>📋</i><b data-i18n="nav.group">選股菜單</b><small data-i18n="nav.group.sub">強勢股・拉回買點・利率</small></summary>
     <a class="navitem sub" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
     <a class="navitem sub" data-page="p3" href="/pullback"><i>⭐</i><b data-i18n="p3.title">拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
     <a class="navitem sub" data-page="p11" href="/consolidation"><i>🧭</i><b data-i18n="cons.title">強勢股整理觀察</b><small data-i18n="nav.cons.sub">整理・轉強・突破候選</small></a>
-    <a class="navitem sub" data-page="p7" href="/twr"><i>📈</i><b data-i18n="p7.title">我的績效</b><small data-i18n="nav.twr.sub">TWR 報酬率試算</small></a>
+    <a class="navitem sub" data-page="pmac" href="/macro"><i>🏦</i><b data-i18n="pmac.title">利率與購買力</b><small data-i18n="nav.macro.sub">美債 2Y・10Y・CPI</small></a>
   </details>
   <details class="navgroup">
-    <summary><i>⭐</i><b data-i18n="nav.mine">我的自選股</b><small data-i18n="nav.mine.sub">風控管理・到價提醒・扣抵法</small></summary>
+    <summary><i>⭐</i><b data-i18n="nav.mine">我的自選股</b><small data-i18n="nav.mine.sub">績效・風控・提醒・扣抵法</small></summary>
+    <a class="navitem sub" data-page="p7" href="/twr"><i>📈</i><b data-i18n="p7.title">我的績效</b><small data-i18n="nav.twr.sub">TWR 報酬率試算</small></a>
     <a class="navitem sub" data-page="p8" href="/risk"><i>🛡️</i><b data-i18n="p8.title">風控管理</b><small data-i18n="nav.risk.sub">ATR・波動率・趨勢・Beta</small></a>
     <a class="navitem sub" data-page="p4" href="/alerts"><i>🔔</i><b data-i18n="p4.title">推播通知</b><small data-i18n="nav.alert.sub">收盤到價提醒（測試中）</small></a>
     <a class="navitem sub" data-page="p10" href="/deduction"><i>📐</i><b data-i18n="nav.deduct">均線扣抵法</b><small data-i18n="nav.deduct.sub">50／100／150MA 何時追上</small></a>
@@ -3774,6 +3914,33 @@ __QUOTES_HTML__
   <div id="resultCons"></div>
 </div>
 
+<!-- ============ 美國利率與購買力 ============ -->
+<div class="page" id="pmac">
+  <h2 class="ptitle" data-i18n="pmac.title">利率與購買力</h2>
+  <details class="pgintro" open>
+    <summary data-i18n="pmac.introT">投資報酬要先跨過利率與通膨</summary>
+    <div class="pgintro-b" data-i18n-html="pmac.intro">
+      <p>投資賺 10%，不代表購買力增加 10%。美國公債殖利率代表美元資金在低信用風險下可取得的報酬門檻；投資報酬減去相近期間的公債利率，才是承擔市場風險換來的粗略超額報酬。</p>
+      <p><b>本年度累積 CPI</b>比較最新 CPI 與去年 12 月，回答今年以來物價漲了多少；<b>近十年累積 CPI</b>比較最新月份與十年前同月，回答十年間美元購買力被物價侵蝕多少。</p>
+      <p>實質報酬應用「(1＋名目報酬) ÷ (1＋同期通膨率) − 1」計算。公債利率是機會成本，CPI 才是購買力調整，兩者不能混為一談。</p>
+    </div>
+  </details>
+  <div class="card" style="padding:14px 16px">
+    <div style="font-size:13px;color:#555;line-height:1.8" data-i18n="pmac.disc">殖利率為年率；CPI 為期間累積漲幅，並非年化數字。資料是最近可用值、非即時報價，不構成投資建議。</div>
+  </div>
+  <div id="macroBox"></div>
+  <div class="card">
+    <h2 data-i18n="pmac.src">資料來源與算法</h2>
+    <div style="font-size:13px;color:#555;line-height:1.85" data-i18n-html="pmac.source">
+      美國 2 年期與 10 年期使用美國財政部 Daily Treasury Par Yield Curve Rates；CPI 使用美國勞工統計局經季節調整的全城市消費者物價指數 CUSR0000SA0。<br><br>
+      本年度累積 CPI＝最新指數 ÷ 去年 12 月指數 − 1；近十年累積 CPI＝最新指數 ÷ 十年前同月指數 − 1。<br><br>
+      Source: U.S. Department of the Treasury and U.S. Bureau of Labor Statistics
+      （<a href="https://home.treasury.gov/resource-center/data-chart-center/interest-rates" target="_blank" rel="noopener" style="color:var(--primary)">U.S. Treasury</a>；
+      <a href="https://www.bls.gov/cpi/" target="_blank" rel="noopener" style="color:var(--primary)">BLS CPI</a>）。
+    </div>
+  </div>
+</div>
+
 <!-- ============ 我的績效（TWR）============ -->
 <div class="page" id="p7">
   <h2 class="ptitle" data-i18n="p7.title">我的績效</h2>
@@ -3837,6 +4004,14 @@ __QUOTES_HTML__
   </div>
   <div class="status" id="statusTw"></div>
   <div id="twResult"></div>
+
+  <div class="card" style="margin-top:16px">
+    <h2 data-i18n="twr.vs">挑戰大盤</h2>
+    <div style="font-size:12px;color:#888;line-height:1.7;margin-bottom:10px" data-i18n="twr.vsNote">查看納斯達克綜合指數最近兩年的每月漲跌幅、年度報酬率與當年度 CPI，和你的績效放在同一尺度比較。</div>
+    <button class="gobtn" id="twMarket" data-i18n="twr.vsBtn">查看大盤近兩年表現</button>
+    <div class="status" id="statusMkt"></div>
+    <div id="mktResult"></div>
+  </div>
 </div>
 
 <!-- ============ 我的自選股：風控管理 ============ -->
@@ -4081,12 +4256,13 @@ const I18N = { en: {
   "brand.name": "US Stock Coffee",
   "nav.home": "Menu", "nav.home.sub": "Is today a good day to act?",
   "nav.group": "Stock Screeners",
-  "nav.group.sub": "Leaders · Pullbacks · Performance",
+  "nav.group.sub": "Leaders · Pullbacks · Rates",
   "nav.screen.sub": "Find leading stocks",
   "nav.pull.sub": "Close back within ±3% of an MA",
   "nav.cons.sub": "Consolidating · turning · breakout",
   "nav.twr.sub": "TWR performance calculator",
-  "nav.mine": "My Watchlist", "nav.mine.sub": "Risk & price alerts",
+  "nav.macro.sub": "US 2Y · 10Y · CPI",
+  "nav.mine": "My Watchlist", "nav.mine.sub": "Performance · Risk · Alerts · MA deduction",
   "nav.risk.sub": "ATR · Volatility · Trend · Beta",
   "nav.alert.sub": "Close-price alerts (beta)",
   "nav.pro": "Upgrade to Pro", "nav.pro.sub": "New highs · RS ranking",
@@ -4208,6 +4384,14 @@ const I18N = { en: {
   "p3.introT": "Wait for a strong stock to come back, instead of chasing the high",
   "p3.intro": "<p>Leading stocks don't rise every day. After a run they consolidate, and that consolidation often stalls near a moving average — because that line is a group's average cost, which becomes psychological support.</p><p>This screen finds stocks whose <b>latest close has returned to within ±3% of the moving average you choose</b>. The point isn't to call the bottom; it's an entry with controlled risk — you're not buying the high, and if you're wrong the stop is obvious (a break of that line).</p><p>Which average to use depends on your holding period — the 20-day for shorter trades, the 50 or 150-day for swings. Combined with the <b>MA alignment</b> filter, you can look only for stocks whose trend is intact and merely resting.</p><p>Results are sorted by <b>absolute deviation</b> (how many percent the close sits from the line), so the top of the list pulled back the most precisely. A positive deviation means price is still above the line, negative means it has dipped slightly below — both can be within ±3%, but they do not mean the same thing.</p><p><b>This page uses closing prices, not intraday quotes.</b> The definition has to be stable: computed on live prices, the same stock would give different answers at 10am and 3pm and the list would churn all day. The intraday quote appears in the results table for reference only and never affects the screen.</p><p><b>Telling a healthy pullback from a failing trend</b>: if the MA alignment is still bullish when price reaches the line, it is usually just a rest. If the shorter average has already crossed below the longer one (alignment turned bearish or squeezed), that is not a pullback — the trend is changing direction. This is why pairing the alignment filter with this screen is worth the extra click.</p><p><b>What this page does not answer</b>: it tells you who is currently near a moving average, not whether a stock is worth owning. You need a candidate first and an entry second — find candidates with <b>Find Leading Stocks</b>.</p>",
   "twr.intro": "Time-weighted return (TWR) removes the effect of deposits and withdrawals, giving a clearer view of your investing performance. Enter each month's net cash flow and ending portfolio value. Data stays in this browser on this device.",
+  "pmac.title": "Rates & Purchasing Power",
+  "pmac.introT": "Returns must first clear interest rates and inflation",
+  "pmac.intro": "<p>A 10% investment return does not mean 10% more purchasing power. US Treasury yields are the return hurdle available to dollar capital at low credit risk. Your return minus a similar-maturity Treasury yield is a rough estimate of the excess return earned for accepting market risk.</p><p><b>Year-to-date cumulative CPI</b> compares the latest CPI with last December; <b>10-year cumulative CPI</b> compares the latest month with the same month ten years earlier. They show how much prices have risen over each period.</p><p>Real return is calculated as “(1 + nominal return) ÷ (1 + inflation) − 1”. Treasury yields measure opportunity cost; CPI adjusts purchasing power. They are not interchangeable.</p>",
+  "pmac.disc": "Yields are annualized; CPI figures are cumulative period changes, not annualized rates. Data is the latest available, not real-time, and is not investment advice.",
+  "pmac.src": "Sources & Methodology",
+  "pmac.loading": "Loading US rates and CPI…", "pmac.none": "Data is temporarily unavailable. Please try again later.",
+  "pmac.bonds": "US Treasury Yields", "pmac.cpi": "Cumulative Price Increase",
+  "pmac.source": "US 2-year and 10-year yields use the U.S. Treasury's Daily Treasury Par Yield Curve Rates. CPI uses the Bureau of Labor Statistics seasonally adjusted all-urban consumer price index, CUSR0000SA0.<br><br>YTD cumulative CPI = latest index ÷ prior December index − 1. Ten-year cumulative CPI = latest index ÷ the same month ten years earlier − 1.<br><br>Source: <a href=\"https://home.treasury.gov/resource-center/data-chart-center/interest-rates\" target=\"_blank\" rel=\"noopener\" style=\"color:var(--primary)\">U.S. Treasury</a> and <a href=\"https://www.bls.gov/cpi/\" target=\"_blank\" rel=\"noopener\" style=\"color:var(--primary)\">U.S. Bureau of Labor Statistics</a>.",
   "twr.basic": "Basic settings", "twr.year": "Year",
   "twr.start": "Starting portfolio value (cash + holdings)",
   "twr.monthly": "Monthly entries",
@@ -4215,6 +4399,9 @@ const I18N = { en: {
   "twr.col.m": "Month", "twr.col.in": "Net deposit", "twr.col.tot": "Ending value",
   "twr.col.ret": "Monthly return", "twr.col.cum": "Cumulative return",
   "twr.calc": "Calculate performance", "twr.clear": "Clear all data",
+  "twr.vs": "Challenge the Market",
+  "twr.vsNote": "Compare your performance with the Nasdaq Composite's monthly returns, annual return and CPI for each of the latest two years.",
+  "twr.vsBtn": "View the market's latest two years",
   "step.universe": "Universe", "step.days": "Days checked",
   "step.mode": "Match mode (3 days)", "step.ma": "Moving average",
   "step.dir": "Direction", "step.align": "MA alignment",
@@ -5175,6 +5362,33 @@ if ($("#twCalc")) $("#twCalc").onclick = () => {
     </div>`;
 };
 
+$("#twMarket").onclick = async () => {
+  const status = $("#statusMkt"), out = $("#mktResult");
+  status.textContent = LANG === "en" ? "Loading…" : "讀取大盤與 CPI 資料中…";
+  out.innerHTML = "";
+  try {
+    const r = await fetch("/api/market-years");
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "request failed");
+    out.innerHTML = (data.years || []).map(y => {
+      const cpiPeriod = y.cpi_period || "";
+      const cpiNote = y.cpi_full_year ? "" : (LANG === "en"
+        ? ` (through ${cpiPeriod})` : `（截至 ${parseInt(cpiPeriod.slice(5), 10)} 月）`);
+      const months = (y.monthly || []).map(m =>
+        `<tr><td>${twMonth(m.month-1)}</td><td>${twPct(m.return)}</td></tr>`).join("");
+      return `<div class="card" style="margin-top:12px">
+        <h2>${y.year}</h2>
+        <div class="baro-row"><span>${LANG === "en" ? "Nasdaq Composite annual return" : "納斯達克綜合指數年度報酬"}</span><b>${twPct(y.annual_return)}</b></div>
+        <div class="baro-row"><span>${LANG === "en" ? "Annual CPI" : "當年度 CPI"}${cpiNote}</span><b>${y.cpi == null ? "—" : twPct(y.cpi)}</b></div>
+        <div style="overflow-x:auto;margin-top:8px"><table style="font-size:13px"><tr><th>${LANG === "en" ? "Month" : "月份"}</th><th>${LANG === "en" ? "Nasdaq return" : "大盤漲跌幅"}</th></tr>${months}</table></div>
+      </div>`;
+    }).join("");
+    status.textContent = LANG === "en" ? "Official Nasdaq and BLS data" : "納斯達克綜合指數與 BLS 官方 CPI";
+  } catch (e) {
+    status.textContent = (LANG === "en" ? "Unable to load: " : "讀取失敗：") + e.message;
+  }
+};
+
 /* ================= 到價提醒（推播）=================
    自台股版移植。⚠️ 沒有帳號：用 localStorage 的 cid 認人，
    訂閱資訊存在伺服器（因為推播必須由伺服器發起）。 */
@@ -5748,6 +5962,48 @@ if ($("#rkBtn")){
   });
 }
 
+/* ---- 美國利率與購買力 ---- */
+const MACRO_EN = {
+  us2y:"US 2Y Treasury", us10y:"US 10Y Treasury",
+  cpi_ytd:"YTD Cumulative CPI", cpi_10y:"10-Year Cumulative CPI"
+};
+function macroTile(it){
+  const name = (LANG === "en" && MACRO_EN[it.key]) ? MACRO_EN[it.key] : it.label;
+  const unit = it.unit ? `<small>${it.unit}</small>` : "";
+  let sub = it.date || "";
+  if (it.base_date){
+    sub += (LANG === "en" ? " · base " : " · 基期 ") + it.base_date;
+  } else if (it.chg !== undefined){
+    const arrow = it.chg > 0 ? "▲ +" : (it.chg < 0 ? "▼ " : "・");
+    sub += ` · ${arrow}${Math.abs(it.chg)}`;
+  }
+  return `<div class="mstat"><div class="ml">${name}</div><div class="mv">${it.value}${unit}</div><div class="msub">${sub}</div></div>`;
+}
+async function loadMacro(){
+  const box = $("#macroBox");
+  if (!box) return;
+  box.innerHTML = `<div class="status">${t("pmac.loading", "讀取美國利率與 CPI…")}</div>`;
+  try {
+    const data = await (await fetch("/api/macro")).json();
+    const byKey = {};
+    (data.items || []).forEach(it => byKey[it.key] = it);
+    const groups = [
+      [t("pmac.bonds", "美國公債殖利率"), ["us2y", "us10y"]],
+      [t("pmac.cpi", "累積物價漲幅"), ["cpi_ytd", "cpi_10y"]]
+    ];
+    let html = "";
+    groups.forEach(group => {
+      const tiles = group[1].filter(k => byKey[k]).map(k => macroTile(byKey[k])).join("");
+      if (tiles) html += `<div class="card"><h2>${group[0]}</h2><div class="macro-grid">${tiles}</div></div>`;
+    });
+    if (!html) html = `<div class="status">${t("pmac.none", "暫時無法取得資料，請稍後再試。")}</div>`;
+    else html += `<div class="status">${LANG === "en" ? "Checked" : "資料檢查日"}：${data.updated || "—"}</div>`;
+    box.innerHTML = html;
+  } catch(e){
+    box.innerHTML = `<div class="status">${t("pmac.none", "暫時無法取得資料，請稍後再試。")}</div>`;
+  }
+}
+
 /* ---- 依網址開對應分頁 ---- */
 if (START_PAGE && $("#" + START_PAGE)){
   document.querySelectorAll(".page").forEach(p => p.classList.remove("show"));
@@ -5758,6 +6014,7 @@ if (START_PAGE && $("#" + START_PAGE)){
   if (activeNav && activeNav.closest("details")) activeNav.closest("details").open = true;
 }
 if (START_PAGE === "p7") buildTwTable();
+if (START_PAGE === "pmac") loadMacro();
 applyLang();
 </script>
 </body>
@@ -5864,6 +6121,15 @@ PAGE_ROUTES = {
         "en": ("My Performance｜Time-Weighted Return (TWR) Calculator",
                "Enter monthly net deposits and month-end balances to get cumulative and annualised "
                "returns unaffected by deposits and withdrawals. Stored only in your browser."),
+    },
+    "macro": {
+        "page": "pmac", "index": True,
+        "zh": ("美國利率與購買力｜2 年期、10 年期公債與累積 CPI",
+               "查看美國 2 年期、10 年期公債殖利率，以及本年度與近十年累積 CPI 漲幅，"
+               "比較投資報酬門檻、超額報酬與美元實質購買力。"),
+        "en": ("US Rates & Purchasing Power｜2Y, 10Y Treasuries and Cumulative CPI",
+               "View US 2-year and 10-year Treasury yields plus year-to-date and 10-year "
+               "cumulative CPI changes to compare return hurdles and real purchasing power."),
     },
     "articles": {
         "page": "pm", "index": True,
@@ -7412,6 +7678,55 @@ def api_pro_rs():
     if threshold not in (80, 90, 95):
         return jsonify(error="RS 門檻只支援 80、90 或 95"), 400
     return jsonify(job=start_job(screen_pro_rs, {"period": period, "threshold": threshold}))
+
+
+@app.route("/api/macro")
+def api_macro():
+    """美國公債殖利率與累積 CPI；公開唯讀資料，快取 6 小時。"""
+    try:
+        return jsonify(_us_rate_inflation_data())
+    except Exception as exc:
+        return jsonify(error=str(exc), items=[]), 503
+
+
+@app.route("/api/market-years")
+def api_market_years():
+    """我的績效：納斯達克綜合指數最近兩年報酬與同期 CPI。"""
+    try:
+        daily = get_nasdaq_index()
+        points = sorted((date, float(value)) for date, value in daily.items())
+        if not points:
+            raise ValueError("查無納斯達克綜合指數資料")
+        latest_year = int(points[-1][0][:4])
+        years = [latest_year - 1, latest_year]
+        month_end = {}
+        for date, value in points:
+            month_end[date[:7]] = (date, value)
+        cpi = _us_cpi_for_years(years)
+        output = []
+        for year in years:
+            prev = month_end.get("%04d-12" % (year - 1))
+            monthly, prior = [], prev
+            for month in range(1, 13):
+                current = month_end.get("%04d-%02d" % (year, month))
+                if current and prior:
+                    monthly.append({"month": month,
+                                    "return": round((current[1] / prior[1] - 1) * 100, 2)})
+                if current:
+                    prior = current
+            year_points = [point for key, point in month_end.items()
+                           if key.startswith("%04d-" % year)]
+            if not prev or not year_points:
+                continue
+            last = year_points[-1]
+            c = cpi.get(str(year), {})
+            output.append({"year": year, "monthly": monthly,
+                           "annual_return": round((last[1] / prev[1] - 1) * 100, 2),
+                           "cpi": c.get("value"), "cpi_period": c.get("period"),
+                           "cpi_full_year": c.get("full_year", False)})
+        return jsonify(years=output, index="Nasdaq Composite")
+    except Exception as exc:
+        return jsonify(error=str(exc), years=[]), 503
 
 
 @app.route("/api/job/<job_id>")

@@ -2312,6 +2312,19 @@ def get_nasdaq_index():
             errs.append("%s: %s" % (name, str(e)[:60]))
             continue
         if len(out) >= 300:          # 至少要能算 50MA 還有餘裕
+            # ⚠️⚠️ **合併，不要覆寫。**
+            #   2026-08-13 實際發生：備援來源只回 618 筆（2024 起），
+            #   通過了「>= 300」這道門檻，然後把快取裡 **13,992 筆（1971 起）**
+            #   整個蓋掉 —— **不報錯、不留痕跡，55 年歷史就這樣沒了。**
+            #   「>= 300」只擋得住「太少」，擋不住「比原本少很多」。
+            #   合併之後，新資料只會延長尾端，永遠不會砍掉頭部。
+            # ⚠️ 這裡不能用上面的 `cached` —— 它只在快取**沒過期**時才有值，
+            #    而覆寫正好發生在過期的時候。要讀「不限年齡」的那份才擋得住。
+            merged = dict(_load_cache("nasdaq_index.json", None) or {})
+            merged.update(out)
+            if len(merged) > len(out):
+                _INDEX_SRC["merged_from_cache"] = len(merged) - len(out)
+            out = merged
             _save_cache("nasdaq_index.json", out)
             _INDEX_SRC.update({"name": name, "n": len(out), "errs": errs})
             return _idx_topup(out)

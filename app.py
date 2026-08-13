@@ -4960,7 +4960,10 @@ if ($("#goLev")) $("#goLev").onclick = async () => {
       headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},body:"{}"});
     const j = await r.json();
     if(r.status===403){ if(retryOnStaleToken(j)) return; }
-    if(!j.rows || !j.rows.length){ st.textContent = j.error || (LANG==="en"?"No data":"目前沒有資料"); return; }
+    /* ⚠️ 還沒好的時候要說「在準備」，不要說「沒有資料」——後者聽起來像壞掉。 */
+    if(!j.rows || !j.rows.length){
+      st.textContent = j.error || (LANG==="en"?"No data":"目前沒有資料"); return;
+    }
     st.innerHTML = (LANG==="en"
       ? `Complete months: <span class="count">${j.months}</span> · data through ${j.data_date}`
       : `完整月份 <span class="count">${j.months}</span> 個 · 資料截至 ${j.data_date}`);
@@ -7770,9 +7773,15 @@ def api_leverage():
     if not _valid_app_token(request.headers.get("X-App-Token")):
         return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
     try:
-        return jsonify(get_leverage_monthly())
+        data = get_leverage_monthly()
     except Exception as e:
         return jsonify(error=str(e)), 500
+    if not data.get("rows"):
+        # ⚠️ 沒資料時說「在準備」並回 200，不要回 500 —— 後者看起來像壞掉。
+        #    （雖然這裡只打 1 次 Nasdaq，風險比台股的 28 次低很多，
+        #      但回應語意要一致，見 PROJECT_CONTEXT「外部 API 不能掛在請求上」。）
+        return jsonify(pending=True, error="資料準備中，請稍後重新整理")
+    return jsonify(data)
 
 
 # ⚠️ 舊路由保留回 410，讓還開著舊頁面的瀏覽器拿到明確答案，而不是 404 或靜默失敗。

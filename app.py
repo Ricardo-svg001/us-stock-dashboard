@@ -1692,103 +1692,130 @@ def _std(values):
     return math.sqrt(sum((x - avg) ** 2 for x in values) / (len(values) - 1))
 
 
-def _consolidation_snapshot_us(closes, end=None):
-    """美股整理快照，只使用訊號日當時已知的收盤資料。"""
-    x = closes[:end] if end is not None else closes
-    if len(x) < 60:
-        return None
-    close = float(x[-1])
-    ma10, ma20, ma50 = _sma(x, 10), _sma(x, 20), _sma(x, 50)
-    ma20_old = sum(x[-30:-10]) / 20.0
-    hi20, lo20, hi60 = max(x[-20:]), min(x[-20:]), max(x[-60:])
-    mid = (hi20 + lo20) / 2.0
-    changes = [x[i] / x[i - 1] - 1 for i in range(1, len(x)) if x[i - 1] > 0]
-    vol10, vol40 = _std(changes[-10:]), _std(changes[-40:])
-    tests = {
-        "range": bool(mid and (hi20 - lo20) / mid <= 0.12),
-        "volatility": bool(vol40 and vol10 / vol40 <= 0.80),
-        "ma_flat": bool(ma20_old and abs(ma20 / ma20_old - 1) <= 0.02),
-        "structure": bool(close >= ma50 and min(x[-20:]) >= ma50 * 0.97),
-    }
-    return {
-        "close": close, "ma10": ma10, "ma50": ma50, "hi20": hi20,
-        "drawdown": (close / hi60 - 1) * 100,
-        "width": (hi20 - lo20) / mid * 100 if mid else None,
-        "position": (close - lo20) / (hi20 - lo20) * 100 if hi20 > lo20 else 50.0,
-        "vol_ratio": vol10 / vol40 if vol40 else None,
-        "ma20_slope": (ma20 / ma20_old - 1) * 100 if ma20_old else None,
-        "score": sum(tests.values()), "tests": tests,
-    }
+LEV_SYMBOL = "QLD"
+LEV_NAME = "ProShares Ultra QQQ"
 
 
-def screen_consolidation(status_cb=None):
-    """強勢股整理觀察；美股第一版參數待美股自身回測，不沿用台股績效結論。"""
-    universe = get_universe(300)
-    symbols = [u["symbol"] for u in universe]
-    histories = load_histories(symbols, status_cb=status_cb)
-    meta = {u["symbol"]: u for u in universe}
-    ranks = {sym: i + 1 for i, sym in enumerate(symbols)}
-    usable = {sym: h for sym, h in histories.items() if len(h) >= 126}
-    if not usable:
-        raise RuntimeError("沒有足夠股價資料可計算整理狀態")
+def get_leverage_monthly(months=24):
+    """QLD（2 倍納斯達克100）與納斯達克綜合指數的逐月報酬。
 
-    def scores(period, offset=0):
-        values = {}
-        for sym, h in usable.items():
-            closes = [float(r[1]) for r in h]
-            end = len(closes) - offset
-            if end >= period + 1 and closes[end - period - 1] > 0:
-                values[sym] = closes[end - 1] / closes[end - period - 1] - 1
-        return _percentile_scores(values) if values else {}
+    ⚠️⚠️ **這個檔案沒有 pandas，也不要為了這個功能加。**
+    美股版刻意只裝 flask / requests / gunicorn（＋推播用的兩個），
+    見 PROJECT_CONTEXT 5.2。第一版我用 pandas 寫，線上直接
+    `name 'pd' is not defined` —— 純 Python 做逐月彙總並不難，寫在下面。
 
-    rs120, rs20, rs20_old = scores(120), scores(20), scores(20, 5)
-    rows, dates = [], []
-    for sym, h in usable.items():
-        if int(rs120.get(sym, 0)) < 80:
-            continue
-        closes = [float(r[1]) for r in h]
-        now = _consolidation_snapshot_us(closes)
-        prev = _consolidation_snapshot_us(closes, -1)
-        if not now or not prev:
-            continue
-        current_base = now["score"] >= 3 and -15 <= now["drawdown"] <= -3
-        previous_base = prev["score"] >= 3 and -15 <= prev["drawdown"] <= -3
-        rs_change = int(rs20.get(sym, 0)) - int(rs20_old.get(sym, 0))
-        breakout = previous_base and now["close"] > prev["hi20"] and now["close"] >= now["ma50"]
-        turning = (current_base and now["close"] >= now["ma10"]
-                   and rs_change >= 5 and now["position"] >= 65)
-        if breakout:
-            state, order = "breakout", 0
-        elif turning:
-            state, order = "turning", 1
-        elif current_base:
-            state, order = "consolidating", 2
-        else:
-            continue
-        u = meta[sym]
-        dates.append(h[-1][0])
-        rows.append({
-            "rank": ranks[sym], "symbol": sym, "name": u.get("name", sym),
-            "name_zh": zh_company(sym, u.get("name", sym)),
-            "sector": u.get("sector", "—"), "sector_zh": zh_sector(u.get("sector", "—")),
-            "state": state, "state_order": order, "price": round(now["close"], 2),
-            "rs120": int(rs120[sym]), "rs20_change": rs_change, "score": now["score"],
-            "width": round(now["width"], 1), "position": round(now["position"], 1),
-            "drawdown": round(now["drawdown"], 1),
-            "vol_ratio": round(now["vol_ratio"], 2) if now["vol_ratio"] is not None else None,
-            "ma20_slope": round(now["ma20_slope"], 1),
+    ⚠️⚠️ **選 QLD 不是 SSO**：全站大盤基準是納斯達克綜合指數，不是標普。
+    （SSO 是 2 倍標普 500、TQQQ 是 3 倍，都不對應本站。）
+
+    ⚠️ **QLD 追蹤納斯達克100，不是綜合指數** —— 前者非金融前 100 大、
+    後者三千多檔。所以「實際倍數」本來就不會乾淨，這不是資料錯誤。
+    📌 台股的 00631L 對加權指數也是同一個問題。
+
+    ⚠️ Nasdaq 的 `/historical` 回的是**已還原**價格（拆股／配息都處理過），
+    所以不需要像台股那樣自己做公司行為還原。
+    """
+    cached = _load_cache("leverage_monthly_v2.json", 12)   # ⚠️ v2: 新增 years 年度分組
+    if cached is not None:
+        return cached
+
+    end = _utcnow()
+    start = end - timedelta(days=int(365 * (months / 12.0) + 150))
+    url = ("https://api.nasdaq.com/api/quote/%s/historical"
+           "?assetclass=etf&fromdate=%s&todate=%s&limit=9999"
+           % (LEV_SYMBOL, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")))
+    etf_daily = {}
+    try:
+        r = _get(url)
+        rows = ((r.json().get("data") or {}).get("tradesTable", {}) or {}).get("rows", [])
+        for row in rows:
+            try:
+                d = datetime.strptime(row["date"], "%m/%d/%Y").strftime("%Y-%m-%d")
+                v = _num(row["close"])
+                if v:
+                    etf_daily[d] = v
+            except Exception:
+                continue
+    except Exception:
+        return {}
+    idx_daily = {k: float(v) for k, v in (get_nasdaq_index() or {}).items() if v}
+    if not etf_daily or not idx_daily:
+        return {}
+
+    def month_end_closes(daily):
+        """每月最後一個交易日的收盤 → {"YYYY-MM": close}。純 Python，不用 pandas。"""
+        out = {}
+        for d in sorted(daily):
+            out[d[:7]] = daily[d]        # 後面的日期會覆蓋前面的 → 留下該月最後一筆
+        return out
+
+    last = min(max(etf_daily), max(idx_daily))          # 兩邊都有資料的最後一天
+    me = month_end_closes({k: v for k, v in etf_daily.items() if k <= last})
+    mi = month_end_closes({k: v for k, v in idx_daily.items() if k <= last})
+    ms = sorted(set(me) & set(mi))[-(months + 1):]
+    if len(ms) < 2:
+        return {}
+
+    rows_out = []
+    for i in range(1, len(ms)):
+        pm, cm = ms[i - 1], ms[i]
+        er = me[cm] / me[pm] - 1
+        ir = mi[cm] / mi[pm] - 1
+        rows_out.append({"m": cm, "etf": round(er * 100, 2), "idx": round(ir * 100, 2),
+                         "ratio": (round(er / ir, 2) if abs(ir) > 0.002 else None),
+                         "_er": er, "_ir": ir,
+                         # ⚠️ 最後一個月幾乎一定沒過完 —— 半個月跟整月放同一欄最容易被誤讀
+                         "partial": (cm == last[:7])})
+    full = [r for r in rows_out if not r["partial"]]
+    if not full:
+        return {}
+
+    def cum(rs, key):
+        v = 1.0
+        for r in rs:
+            v *= 1 + r[key]
+        return v - 1
+
+    def stdev(vals):
+        if len(vals) < 2:
+            return 0.0
+        m = sum(vals) / len(vals)
+        return (sum((x - m) ** 2 for x in vals) / (len(vals) - 1)) ** 0.5
+
+    # ---- 按年度分組：每年一個彙總，月份收在底下 ----
+    # ⚠️ 年度彙總只用**完整月份**算。把未完月混進年度報酬，
+    #    會讓「今年到目前為止」看起來像一個完整年度，是最容易誤讀的呈現。
+    years = []
+    for y in sorted({r["m"][:4] for r in rows_out}, reverse=True):
+        gm = [r for r in rows_out if r["m"].startswith(y)]
+        gf = [r for r in gm if not r["partial"]]
+        ye = cum(gf, "_er") if gf else None
+        yi = cum(gf, "_ir") if gf else None
+        years.append({
+            "y": int(y), "months": [{k: v for k, v in r.items() if not k.startswith("_")}
+                                    for r in gm],
+            "etf": round(ye * 100, 2) if ye is not None else None,
+            "idx": round(yi * 100, 2) if yi is not None else None,
+            "ratio": (round(ye / yi, 2) if (ye is not None and yi and abs(yi) > 0.002) else None),
+            "n": len(gf),
+            "partial": len(gf) < 12,      # 不足 12 個完整月 → 不要跟完整年度直接比
         })
-    rows.sort(key=lambda r: (r["state_order"], -r["rs120"], r["rank"]))
-    as_of = max(set(dates), key=dates.count) if dates else (
-        max((h[-1][0] for h in usable.values()), default=None))
-    return {"rows": rows, "results": rows, "scanned": len(usable), "as_of": as_of,
-            "method": "close_only_watchlist", "market": "US"}
 
+    ce, ci = cum(full, "_er"), cum(full, "_ir")
+    ve = stdev([r["_er"] for r in full])
+    vi = stdev([r["_ir"] for r in full])
+    out = {"rows": [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows_out],
+           "years": years, "code": LEV_SYMBOL, "name": LEV_NAME, "data_date": last,
+           "cum_etf": round(ce * 100, 1), "cum_idx": round(ci * 100, 1),
+           "cum_ratio": round(ce / ci, 2) if ci else None,
+           "up": sum(1 for r in full if r["_er"] > 0),
+           "down": sum(1 for r in full if r["_er"] <= 0),
+           "best": round(max(r["_er"] for r in full) * 100, 2),
+           "worst": round(min(r["_er"] for r in full) * 100, 2),
+           "vol_etf": round(ve * 100, 2), "vol_idx": round(vi * 100, 2),
+           "months": len(full)}
+    _save_cache("leverage_monthly_v2.json", out)
+    return out
 
-# ---------------------------------------------------------------- 專業版試作：創新高／RS
-
-RS_PERIODS = (20, 60, 120, 250)
-RS_CACHE_FILE = "rs_scores_v1.json"
 
 
 def _percentile_scores(values):
@@ -3699,7 +3726,7 @@ __SEO_HEAD__
     <summary><i>📋</i><b data-i18n="nav.group">選股菜單</b><small data-i18n="nav.group.sub">強勢股・拉回買點・利率</small></summary>
     <a class="navitem sub" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
     <a class="navitem sub" data-page="p3" href="/pullback"><i>⭐</i><b data-i18n="p3.title">拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
-    <a class="navitem sub" data-page="p11" href="/consolidation"><i>🧭</i><b data-i18n="cons.title">強勢股整理觀察</b><small data-i18n="nav.cons.sub">整理・轉強・突破候選</small></a>
+    <a class="navitem sub" data-page="p11" href="/consolidation"><i>🧭</i><b data-i18n="lev.title">正2 逐月績效</b><small data-i18n="nav.lev.sub">QLD・實際倍數</small></a>
     <a class="navitem sub" data-page="pmac" href="/macro"><i>🏦</i><b data-i18n="pmac.title">利率與購買力</b><small data-i18n="nav.macro.sub">美債 2Y・10Y・CPI</small></a>
   </details>
   <details class="navgroup">
@@ -3909,20 +3936,16 @@ __QUOTES_HTML__
 
 <!-- ============ 強勢股整理觀察 ============ -->
 <div class="page" id="p11">
-  <h2 class="ptitle" data-i18n="cons.title">強勢股整理觀察</h2>
+  <h2 class="ptitle" data-i18n="lev.title">正2 逐月績效</h2>
   <details class="pgintro" open>
-    <summary data-i18n="cons.introT">先建立觀察名單，等整理結束再判斷</summary>
-    <div class="pgintro-b" data-i18n-html="cons.intro"><p>這裡找的是 RS120 位居前 20%、仍守住 50 日線，但近期進入收斂整理的美股。結果分成「整理中、轉強觀察、突破觀察」，<b>都不是買進建議</b>。</p><p>第一版只使用既有收盤快取，因此波動收縮以收盤報酬波動估算，不是 ATR，也沒有成交量確認。條件結構參考台股版，但美股績效尚未回測，不能套用台股結論。</p></div>
+    <summary data-i18n="lev.introT">槓桿的實際倍數，不會等於 2</summary>
+    <div class="pgintro-b" data-i18n-html="lev.intro"><p>這裡列出 <b>QLD（ProShares Ultra QQQ，2 倍納斯達克100）</b>最近兩年的逐月報酬，對照納斯達克綜合指數，並算出每個月的<b>實際倍數</b>。</p><p><b>累積報酬的倍數不會剛好是 2。</b>槓桿 ETF 每日再平衡，趨勢順的時候大於 2、來回震盪的時候小於 2——這叫路徑依賴。連續兩個月 +10%／−10%，大盤累積 −1%，兩倍卻是 −4%。</p><p>⚠️ QLD 追蹤的是<b>納斯達克100</b>（非金融前 100 大）的單日正向兩倍，<b>不是綜合指數</b>（三千多檔）。所以「實際倍數」那一欄本來就不會乾淨；大盤月報酬接近 0 時分母太小，數字沒有意義，以「—」略過。</p></div>
   </details>
-  <div class="card"><h2 data-i18n="cons.rules">固定觀察規則</h2>
-    <div style="font-size:14px;line-height:1.8" data-i18n="cons.rulesBody">RS120 前20%、守住50MA、距60日高點回落3%～15%；區間收斂、波動收縮、20MA走平、守住結構四項至少三項。</div>
-  </div>
-  <button class="gobtn" id="goCons" data-i18n="cons.run">建立今日觀察清單</button>
-  <div class="status" id="statusCons"></div>
-  <div id="resultCons"></div>
+  <button class="gobtn" id="goLev" data-i18n="lev.run">查看逐月績效</button>
+  <div class="status" id="statusLev"></div>
+  <div id="resultLev"></div>
 </div>
 
-<!-- ============ 美國利率與購買力 ============ -->
 <div class="page" id="pmac">
   <h2 class="ptitle" data-i18n="pmac.title">利率與購買力</h2>
   <details class="pgintro" open>
@@ -4267,7 +4290,11 @@ const I18N = { en: {
   "nav.group.sub": "Leaders · Pullbacks · Rates",
   "nav.screen.sub": "Find leading stocks",
   "nav.pull.sub": "Close back within ±3% of an MA",
-  "nav.cons.sub": "Consolidating · turning · breakout",
+  "nav.lev.sub": "QLD · realised multiple",
+  "lev.title": "2x ETF Monthly Performance",
+  "lev.introT": "The realised multiple is never exactly 2x",
+  "lev.intro": "<p>Monthly returns for <b>QLD (ProShares Ultra QQQ, 2x Nasdaq-100)</b> over the past two years, against the Nasdaq Composite, with the <b>realised multiple</b> for each month.</p><p><b>Cumulative returns are never exactly 2x.</b> Leveraged ETFs rebalance daily: the multiple exceeds 2 in a smooth trend and falls below 2 in choppy markets. Two months of +10% then \u221210% leaves the index at \u22121% but the 2x fund at \u22124%.</p><p>\u26a0\ufe0f QLD tracks twice the <b>daily</b> move of the Nasdaq-100 (largest 100 non-financials), <b>not the Composite</b> (3,000+ names). Months where the index moved less than 0.2% show \u201c\u2014\u201d because the ratio is meaningless.</p>",
+  "lev.run": "Show monthly performance",
   "nav.twr.sub": "TWR performance calculator",
   "nav.macro.sub": "US 2Y · 10Y · CPI",
   "nav.mine": "My Watchlist", "nav.mine.sub": "Performance · Risk · Alerts · MA deduction",
@@ -4312,12 +4339,6 @@ const I18N = { en: {
   "home.c2": "Close back within ±3% of a chosen MA",
   "home.c3": "The Taiwan edition — same logic, already live",
   "p1.title": "Find Strong Stocks", "p3.title": "Find Pullback Entries",
-  "cons.title": "Strong-stock Consolidation Watch",
-  "cons.introT": "Build the watchlist first; wait for consolidation to end",
-  "cons.intro": "<p>This list finds top-20% RS120 US leaders still above the 50-day average while price contracts. Results are labelled Consolidating, Turning Up or Breakout Watch; <b>none is a buy recommendation</b>.</p><p>The first version uses close-price history, so contraction is based on close-to-close volatility rather than ATR and has no volume confirmation. The structure is adapted from Taiwan, but US performance has not been backtested and Taiwan results do not transfer.</p>",
-  "cons.rules": "Fixed watch rules",
-  "cons.rulesBody": "Top-20% RS120, above 50MA, 3–15% below the 60-day high; at least three of tight range, lower volatility, flat 20MA and intact structure.",
-  "cons.run": "Build Today's Watchlist",
   "p7.title": "My Performance",
   "p7.introT": "Your return is probably wrong",
   "p7.intro": "<p>Most people compute return as \"current assets ÷ money put in − 1\". That is fine as long as you never added or withdrew funds midway — <b>but a single irregular transfer distorts it</b>.</p><p>An extreme example: you start the year with $1M and lose 20% in the first half, leaving $800k. In July you wire in another $1M and gain 10% in the second half, ending at $1.98M. Assets over contributions gives −1%, which looks like a small loss. But what you actually did was lose 20% and then gain 10% — that is <b>−12%</b>. The gap exists because <b>most of your money arrived after the loss</b>. That is timing, not skill.</p><p><b>Time-weighted return (TWR)</b> removes that effect: each month is treated as its own period, and the monthly returns are chained together. Deposits and withdrawals make no difference to the result. This is the standard for funds and managed accounts, precisely because a manager cannot control when clients wire money in.</p><p><b>How it differs from IRR (money-weighted)</b>: IRR accounts for how much you invested and when, answering \"how did this pot of money do?\" TWR answers \"how good were my picks and my timing of entries and exits?\" Use TWR to judge your process; use IRR to see what actually landed in your pocket.</p><p><b>What to enter</b>: just two columns per month — <b>net deposit</b> (deposits minus withdrawals; use a negative number for withdrawals) and <b>month-end total assets</b> (cash plus the market value of all holdings). Leave future months blank; only the months you fill are used, and you get both cumulative and annualised figures.</p><p><b>Everything stays in this browser</b> (localStorage). Nothing is uploaded and there is no account system. The upside is no sign-up; the cost is that changing device or clearing site data loses it — worth saying plainly rather than pretending there is sync.</p>",
@@ -4931,57 +4952,54 @@ function render3(res){
 function applyFilter3(){ applyAll("tb3", "cd3", lastRows3, "secFilter3", "epsFilter3", "alignFilter3", "nhFilter3"); }
 
 /* ---- 強勢股整理觀察 ---- */
-let consRows = [];
-function consStateName(s){
-  const zh={consolidating:"整理中",turning:"轉強觀察",breakout:"突破觀察"};
-  const en={consolidating:"Consolidating",turning:"Turning Up",breakout:"Breakout Watch"};
-  return (LANG==="en"?en:zh)[s]||s;
-}
-function applyConsFilter(){
-  const state=$("#consState")?$("#consState").value:"";
-  const sector=$("#consSector")?$("#consSector").value:"";
-  document.querySelectorAll("#resultCons [data-cons-row]").forEach(el=>{
-    const i=parseInt(el.getAttribute("data-i"),10), r=consRows[i];
-    el.style.display=(!state||r.state===state)&&(!sector||sectorKey(r)===sector)?"":"none";
-  });
-}
-if ($("#goCons")) $("#goCons").onclick=()=>{
-  $("#goCons").disabled=true; $("#resultCons").innerHTML=""; $("#statusCons").textContent="";
-  brewOpen(t("st.send","送出篩選條件…"));
-  fetch("/api/consolidation",{method:"POST",headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},body:"{}"})
-    .then(r=>r.json()).then(j=>{
-      if(!j.job){brewClose();$("#goCons").disabled=false;if(retryOnStaleToken(j))return;$("#statusCons").textContent=j.error||t("st.nojob","無法建立工作");return;}
-      pollCons(j.job);
-    }).catch(e=>{brewClose();$("#goCons").disabled=false;$("#statusCons").textContent=t("st.conn","連線失敗：")+e;});
+if ($("#goLev")) $("#goLev").onclick = async () => {
+  const btn=$("#goLev"), st=$("#statusLev");
+  btn.disabled=true; st.textContent = LANG==="en" ? "Loading…" : "讀取中…";
+  try{
+    const r = await fetch("/api/leverage",{method:"POST",
+      headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},body:"{}"});
+    const j = await r.json();
+    if(r.status===403){ if(retryOnStaleToken(j)) return; }
+    if(!j.rows || !j.rows.length){ st.textContent = j.error || (LANG==="en"?"No data":"目前沒有資料"); return; }
+    st.innerHTML = (LANG==="en"
+      ? `Complete months: <span class="count">${j.months}</span> · data through ${j.data_date}`
+      : `完整月份 <span class="count">${j.months}</span> 個 · 資料截至 ${j.data_date}`);
+    const pct = v => (v>0?"+":"") + v.toFixed(2) + "%";
+    // ⚠️ 美股慣例：漲綠跌紅（跟台股相反，不要照抄台股配色）
+    const col = v => v>0 ? 'style="color:#1e8e4e"' : (v<0 ? 'style="color:#c0392b"' : "");
+    const mult = r => (r===null||r===undefined) ? "—" : r.toFixed(2)+"x";
+    // ⚠️ 按年度分組，月份收在 <details> 裡。最新年度預設展開 ——
+    //    24 個月一次攤開會讓人找不到重點，年度層才是第一眼該看的。
+    let html="";
+    (j.years||[]).forEach((yr,i)=>{
+      const ytag = yr.partial ? ` <span class="badge">${LANG==="en"?yr.n+" mo":"僅 "+yr.n+" 個月"}</span>` : "";
+      let trs="";
+      for(const s of yr.months){
+        const tag = s.partial ? ` <span class="badge">${LANG==="en"?"partial":"未完月"}</span>` : "";
+        trs += `<tr><td>${s.m.slice(5)}${LANG==="en"?"":"月"}${tag}</td><td ${col(s.etf)}>${pct(s.etf)}</td><td ${col(s.idx)}>${pct(s.idx)}</td><td>${mult(s.ratio)}</td></tr>`;
+      }
+      html += `<details class="scard"${i===0?" open":""}><summary><span class="sc-l"><b>${yr.y}</b>${ytag}</span>`+
+        `<span class="sc-r" ${col(yr.etf)}>${pct(yr.etf)}</span></summary><div class="scard-body">`+
+        `<div class="kv"><span>${LANG==="en"?"Nasdaq Composite":"納斯達克綜合"}</span><b>${pct(yr.idx)}</b></div>`+
+        `<div class="kv"><span>${LANG==="en"?"Realised multiple":"實際倍數"}</span><b>${mult(yr.ratio)}</b></div>`+
+        `<table style="margin-top:10px"><thead><tr><th>${LANG==="en"?"Month":"月份"}</th><th>${LANG==="en"?"2x":"正2"}</th>`+
+        `<th>${LANG==="en"?"Index":"納斯達克"}</th><th>${LANG==="en"?"Mult.":"倍數"}</th></tr></thead><tbody>${trs}</tbody></table></div></details>`;
+    });
+    const sum = `<div class="card"><h2>${LANG==="en"?"Two-year summary":"兩年彙總"}</h2><div style="font-size:14px;line-height:2">`+
+      `${LANG==="en"?"2x cumulative":"正2 累積"} <b>${pct(j.cum_etf)}</b> · ${LANG==="en"?"Nasdaq":"納斯達克"} <b>${pct(j.cum_idx)}</b> · `+
+      `${LANG==="en"?"realised":"實際放大"} <b>${mult(j.cum_ratio)}</b><br>`+
+      `${LANG==="en"?"Up":"上漲"} ${j.up} / ${LANG==="en"?"down":"下跌"} ${j.down} ${LANG==="en"?"months":"個月"} · `+
+      `${LANG==="en"?"best":"最好"} ${pct(j.best)} · ${LANG==="en"?"worst":"最差"} ${pct(j.worst)}<br>`+
+      `${LANG==="en"?"Monthly volatility":"月報酬標準差"}：${j.vol_etf.toFixed(2)}% vs ${j.vol_idx.toFixed(2)}% `+
+      `(${(j.vol_etf/j.vol_idx).toFixed(2)}x)</div></div>`;
+    /* ⚠️ 舊快取可能沒有 years（換欄位卻沒換快取檔名時會發生）。
+       直接說出來，不要留一塊空白讓人以為壞掉。 */
+    $("#resultLev").innerHTML = (html || '<div class="status">'+
+      (LANG==="en" ? "Year grouping unavailable — cached data is in an older format."
+                   : "年度分組尚未產生（快取為舊格式），請稍後再試。")+'</div>') + sum;
+  }catch(e){ st.textContent=(LANG==="en"?"Failed: ":"讀取失敗：")+e; }
+  finally{ btn.disabled=false; }
 };
-function pollCons(id){
-  fetch("/api/job/"+id).then(r=>r.json()).then(j=>{
-    if(!j.done){brewProgress(j.progress,j.status);setTimeout(()=>pollCons(id),900);return;}
-    brewClose();$("#goCons").disabled=false;
-    if(j.error){$("#statusCons").textContent=t("st.failed","篩選失敗：")+j.error;return;}
-    renderCons(j.result);
-  }).catch(e=>{brewClose();$("#goCons").disabled=false;$("#statusCons").textContent=t("st.lost","連線中斷：")+e;});
-}
-function renderCons(res){
-  consRows=res.rows||[];
-  $("#statusCons").innerHTML=t("st.asof","資料日期")+" "+(res.as_of||"—")+"｜"+
-    (LANG==="en"?"On watch ":"今日觀察 ")+`<span class="count">${consRows.length}</span> `+t("st.unit","檔");
-  if(!consRows.length){$("#resultCons").innerHTML="<div class='status'>"+t("st.none","沒有符合條件的股票。")+"</div>";return;}
-  const states={}, sectors={}, sectorLabels={};
-  consRows.forEach(r=>{states[r.state]=(states[r.state]||0)+1;const k=sectorKey(r);sectors[k]=(sectors[k]||0)+1;sectorLabels[k]=coSector(r);});
-  let stateOpts=`<option value="">${LANG==="en"?"All states":"全部狀態"}（${consRows.length}）</option>`;
-  Object.keys(states).forEach(k=>stateOpts+=`<option value="${k}">${consStateName(k)}（${states[k]}）</option>`);
-  let sectorOpts=`<option value="">${t("flt.allSector","全部產業")}（${consRows.length}）</option>`;
-  Object.keys(sectors).sort((a,b)=>sectors[b]-sectors[a]).forEach(k=>sectorOpts+=`<option value="${k}">${sectorLabels[k]}（${sectors[k]}）</option>`);
-  let trs="",cards="";
-  consRows.forEach((r,i)=>{
-    const ch=(r.rs20_change>=0?"+":"")+r.rs20_change;
-    trs+=`<tr data-cons-row data-i="${i}"><td>${r.rank}</td><td>${r.symbol}</td><td>${coName(r)}</td><td>${coSector(r)}</td><td><span class="badge">${consStateName(r.state)}</span></td><td>${r.rs120}</td><td>${ch}</td><td>${r.width}%</td><td>${r.position}%</td><td>${r.drawdown}%</td><td>${r.score}/4</td></tr>`;
-    cards+=`<details class="scard" data-cons-row data-i="${i}"><summary><span class="sc-l"><b>${r.symbol}</b> ${coName(r)}</span><span class="sc-r">${consStateName(r.state)}</span></summary><div class="scard-body"><div class="kv"><span>${t("th.sector","產業")}</span><b>${coSector(r)}</b></div><div class="kv"><span>RS120</span><b>${r.rs120}</b></div><div class="kv"><span>RS20 Δ5d</span><b>${ch}</b></div><div class="kv"><span>${LANG==="en"?"Range width":"區間寬度"}</span><b>${r.width}%</b></div><div class="kv"><span>${LANG==="en"?"Range position":"區間位置"}</span><b>${r.position}%</b></div><div class="kv"><span>${LANG==="en"?"From 60d high":"距60日高點"}</span><b>${r.drawdown}%</b></div><div class="kv"><span>${LANG==="en"?"Conditions":"整理條件"}</span><b>${r.score}/4</b></div></div></details>`;
-  });
-  $("#resultCons").innerHTML=`<div class="resfilter"><span class="rflabel">${LANG==="en"?"Filter":"結果篩選"}</span><select id="consState">${stateOpts}</select><select id="consSector">${sectorOpts}</select></div><div class="tblwrap res-wide"><table><thead><tr><th>${t("th.rank","市值排名")}</th><th>${t("th.sym","代號")}</th><th>${t("th.name","公司名稱")}</th><th>${t("th.sector","產業")}</th><th>${LANG==="en"?"State":"狀態"}</th><th>RS120</th><th>RS20 Δ5d</th><th>${LANG==="en"?"Range width":"區間寬度"}</th><th>${LANG==="en"?"Range position":"區間位置"}</th><th>${LANG==="en"?"From 60d high":"距60日高點"}</th><th>${LANG==="en"?"Conditions":"整理條件"}</th></tr></thead><tbody>${trs}</tbody></table></div><div class="res-cards">${cards}</div>`;
-  $("#consState").onchange=applyConsFilter;$("#consSector").onchange=applyConsFilter;
-}
 
 /* 三個條件同時成立才顯示（AND）。用列的索引對回原始資料，
    避免從 DOM 反推數值時被格式化字串（「—」「+12.3%」）搞混。
@@ -6115,12 +6133,13 @@ PAGE_ROUTES = {
     },
     "consolidation": {
         "page": "p11", "index": True,
-        "zh": ("強勢股整理觀察｜美股整理、轉強與突破候選",
-               "從市值前 300 大美股找出 RS120 前 20%、守住 50 日線且價格收斂的強勢股，"
-               "分成整理中、轉強觀察與突破觀察。研究候選清單，不是買進建議。"),
-        "en": ("Strong-stock Consolidation Watch｜US Turning and Breakout Candidates",
-               "Find top-20% RS120 US leaders above the 50-day average with contracting price action, "
-               "labelled Consolidating, Turning Up or Breakout Watch. A research list, not a buy signal."),
+        "zh": ("正2 逐月績效｜QLD 對納斯達克的實際倍數",
+               "ProShares Ultra QQQ（QLD）最近兩年的逐月報酬與納斯達克綜合指數對照，"
+               "並算出每個月的實際倍數。槓桿每日再平衡，累積倍數不會等於 2。"),
+        "en": ("2x ETF Monthly Performance｜QLD vs Nasdaq Realised Multiple",
+               "Monthly returns for ProShares Ultra QQQ (QLD) against the Nasdaq Composite "
+               "over two years, with the realised multiple. Daily rebalancing means "
+               "cumulative leverage is never exactly 2x."),
     },
     "twr": {
         "page": "p7", "index": True,
@@ -7745,11 +7764,21 @@ def api_pullback():
     return jsonify(job=start_job(screen_pullback, params))
 
 
-@app.route("/api/consolidation", methods=["POST"])
-def api_consolidation():
+@app.route("/api/leverage", methods=["POST"])
+def api_leverage():
+    """QLD 逐月績效。⚠️ 只抓月資料、不跑篩選，所以直接回結果、不用背景工作。"""
     if not _valid_app_token(request.headers.get("X-App-Token")):
         return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
-    return jsonify(job=start_job(screen_consolidation, {}))
+    try:
+        return jsonify(get_leverage_monthly())
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+
+# ⚠️ 舊路由保留回 410，讓還開著舊頁面的瀏覽器拿到明確答案，而不是 404 或靜默失敗。
+@app.route("/api/consolidation", methods=["POST"])
+def api_consolidation_gone():
+    return jsonify(error="此功能已由『正2 逐月績效』取代"), 410
 
 
 @app.route("/api/pro/new-high", methods=["POST"])

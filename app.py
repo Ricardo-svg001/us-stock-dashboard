@@ -2333,6 +2333,78 @@ def get_nasdaq_index():
     return cached or {}       # ⚠️ 抓不到別寫空的蓋掉舊資料
 
 
+# 站上均線的家數（首頁「大盤詳細數據」用）
+# ⚠️⚠️ **這裡是美股的線，不是台股的。**
+#   台股用 60／120／240（季線／半年線／年線），美股改成 **50／150／200**：
+#     ・50MA  —— 美股慣例中相當於台股季線的地位
+#     ・150MA —— 趨勢模板線，也是既有 breadth.json 用的那條（保持一致）
+#     ・200MA —— 美股最經典的長期線，等同台股的年線
+#   📌 直接照搬 60/120/240 會讓數字對不上美股讀者的既有認知，
+#      也跟站上其他頁面（50/150）說的不是同一種語言。
+SNAP_MAS = ((50, "50MA"), (150, "150MA"), (200, "200MA"))
+SNAP_NH_WINDOW = 60          # 創新高看幾個交易日
+SNAP_NH_TOL = 0.02           # 2% 容差，與創新高篩選頁一致
+
+
+def build_ma_breadth_snapshot():
+    """今天有多少家站上 50／150／200MA，以及多少家創 60 日新高。
+
+    ⚠️ **只能在預抓流程裡呼叫**（同 `build_breadth()`）：要讀幾百個快取檔。
+    ⚠️ **純 Python，不用 pandas** —— 這個專案沒裝（見 5.2）。
+
+    ⚠️⚠️ **每條均線的分母不一樣，不可以共用一個總數。**
+    新上市的股票湊不滿 200 天，算進 200MA 的分母會系統性低估比例。
+    每條線各自回報「有足夠資料的家數」當分母。
+    """
+    above = {p: 0 for p, _ in SNAP_MAS}
+    base = {p: 0 for p, _ in SNAP_MAS}
+    nh_above = nh_base = 0
+    last_date = None
+    try:
+        files = [f for f in os.listdir(CACHE_DIR)
+                 if f.startswith("hist_") and f.endswith(".json")]
+    except Exception:
+        return None
+    for f in files:
+        try:
+            rows = _load_cache(f, 24 * 365) or []
+        except Exception:
+            continue
+        closes = [r[1] for r in rows if r and len(r) >= 2 and r[1] is not None]
+        if len(closes) < SNAP_NH_WINDOW:
+            continue
+        last = closes[-1]
+        if rows and rows[-1] and rows[-1][0]:
+            last_date = max(last_date or rows[-1][0], rows[-1][0])
+        for period, _ in SNAP_MAS:
+            if len(closes) < period:
+                continue            # 資料不足 → 不列入分母（見上面的警告）
+            base[period] += 1
+            if last >= sum(closes[-period:]) / period:
+                above[period] += 1
+        nh_base += 1
+        if last >= max(closes[-SNAP_NH_WINDOW:]) * (1 - SNAP_NH_TOL):
+            nh_above += 1
+    if not nh_base:
+        return None
+    data = {
+        "rows": [{"period": p, "label": lab, "above": above[p], "base": base[p],
+                  "pct": round(above[p] / base[p] * 100, 1) if base[p] else None}
+                 for p, lab in SNAP_MAS],
+        "newhigh": {"window": SNAP_NH_WINDOW, "above": nh_above, "base": nh_base,
+                    "tol": SNAP_NH_TOL * 100,
+                    "pct": round(nh_above / nh_base * 100, 1)},
+        "date": last_date,
+    }
+    _save_cache("ma_breadth_snapshot_v1.json", data)
+    return data
+
+
+def get_ma_breadth_snapshot():
+    """⚠️ 只讀快取，不計算、不連網。資料由預抓的 `build_ma_breadth_snapshot()` 產生。"""
+    return _load_cache("ma_breadth_snapshot_v1.json", 24) or {}
+
+
 def build_breadth():
     """從 hist_ 快取算市場寬度，存成 breadth.json。
 
@@ -2639,6 +2711,8 @@ def _maybe_rebuild_breadth():
         def job():
             try:
                 build_breadth()
+                # ⚠️ 順便算，因為讀的是同一批 hist_ 快取檔 —— 分開跑等於讀兩次。
+                build_ma_breadth_snapshot()
                 _PHASE_MEMO.update(at=0, val=None)   # 讓下一次讀到新結果
             except Exception as e:
                 _PHASE_WHY.update(why="背景重算寬度失敗 %s: %s"
@@ -2772,6 +2846,9 @@ def prefetch(universe_n=300, force=False):
     PREFETCH_STATE["stage"] = "計算市場寬度"
     try:
         build_breadth()
+        # ⚠️ 順便算今日快照（50／150／200MA 家數 ＋ 創 60 日新高）——
+        #    讀的是同一批 hist_ 快取檔，分開跑等於整批讀兩次。
+        build_ma_breadth_snapshot()
     except Exception:
         pass
     PREFETCH_STATE["stage"] = "本日推薦"
@@ -5117,9 +5194,47 @@ function wireBreadthHover(j){
   svg.addEventListener("pointercancel", rest);
 }
 
+/* 今日快照：站上 50／150／200MA 的家數 ＋ 創 60 日新高家數。
+   ⚠️⚠️ 用的是**美股的線**（50／150／200），不是台股的 60／120／240 ——
+      50MA 相當於台股季線的地位、150MA 是趨勢模板線（與 breadth 折線圖同一條）、
+      200MA 是美股最經典的長期線。**照搬台股的數字會跟站上其他頁面說不同語言。**
+   📌 折線圖看的是「150MA 寬度的歷史走勢」，這裡看的是「今天各條線的橫斷面」——
+      兩者互補：一個回答「現在算高還是低」，一個回答「現在是誰在撐」。 */
+function maSnapshotHtml(j){
+  const s = j.snapshot;
+  if (!s || !s.rows || !s.rows.length) return "";
+  /* 美股慣例：漲綠跌紅（跟台股相反，不要照抄台股配色） */
+  const col = (v, mid) => v >= mid ? "#1e8e4e" : "#c0392b";
+  let h = `<div class="card"><h2>${t("br.snapTitle","今日市場寬度")}</h2>`;
+  h += `<div style="font-size:13px;color:#666;margin-bottom:8px">
+    ${t("br.snapIntro","指數會被少數權值股撐住。這裡看的是「有多少家個股真的站在趨勢上」——指數與寬度背離時，通常是寬度先說實話。")}</div>`;
+  for (const r of s.rows) {
+    if (r.pct === null || r.pct === undefined) {
+      h += `<div class="baro-row"><span>${t("br.above","站上")} ${r.label}</span>
+            <span style="color:#999">${t("br.nodata","資料不足")}</span></div>`;
+      continue;
+    }
+    h += `<div class="baro-row"><span>${t("br.above","站上")} ${r.label}</span>`+
+         `<b style="color:${col(r.pct,50)}">${r.above} / ${r.base}　${r.pct}%</b></div>`;
+  }
+  const nh = s.newhigh;
+  if (nh && nh.pct !== null && nh.pct !== undefined) {
+    /* ⚠️ 創新高的門檻用 20% 不是 50% —— 它本來就不會過半，
+       用 50% 當分界會永遠是紅的。 */
+    h += `<div class="baro-row"><span>${t("br.nh","創 "+nh.window+" 日新高")}</span>`+
+         `<b style="color:${col(nh.pct,20)}">${nh.above} / ${nh.base}　${nh.pct}%</b></div>`;
+  }
+  /* ⚠️⚠️ 分母不一樣一定要講。新上市的股票湊不滿 200 天，
+     不列入 200MA 的分母；不說明的話讀者會以為三條線可以直接互比。 */
+  h += `<div style="font-size:12px;color:#999;line-height:1.7;margin-top:6px">
+    ${t("br.snapNote","分母是「有足夠交易日可以計算該均線」的家數，所以三條線的分母不同（新上市股票湊不滿 200 天）。創新高採 2% 容差（收盤達 60 日高點的 98% 即算）。均線家數看「還站在趨勢上」，創新高家數看「正在突破」——後者通常掉得更早，因為它需要新的買盤。")}
+    ${s.date ? "<br>" + t("br.snapAsOf","資料日期") + " " + s.date : ""}</div></div>`;
+  return h;
+}
+
 function breadthHtml(j){
   const S = j.series || [];
-  if (!S.length) return "";
+  if (!S.length) return maSnapshotHtml(j);   /* 折線圖沒資料時，至少把快照顯示出來 */
   const W = 560, H = 150, PAD_L = 30, PAD_R = 8, PAD_T = 10, PAD_B = 18;
   const iw = W - PAD_L - PAD_R, ih = H - PAD_T - PAD_B;
   const x = i => PAD_L + (S.length < 2 ? 0 : i / (S.length - 1) * iw);
@@ -5223,9 +5338,11 @@ function breadthHtml(j){
        ${j.top}%／${j.wash}% 的門檻是用 10 年回測訂的，兩者母體不同。<br>
        歷史寬度以今日成分股回算，較早數值可能因存活者偏誤而偏高。</p>`;
 
+  /* 今日快照放在折線圖之後：先看「歷史上算高還是低」，再看「今天是誰在撐」。 */
   return idxHtml
        + `<div style="font-size:12.5px;color:var(--mocha);margin:2px 0 6px">${head}</div>`
-       + svg + `<div style="margin-top:10px">${stats}</div>` + note;
+       + svg + `<div style="margin-top:10px">${stats}</div>` + note
+       + maSnapshotHtml(j);
 }
 
 /* ---- 升級專業版：創新高／RS ---- */
@@ -6007,6 +6124,13 @@ if ($("#rkBtn")){
 /* ---- 美國利率與購買力 ---- */
 const MACRO_EN = {
   us2y:"US 2Y Treasury", us10y:"US 10Y Treasury",
+  "br.snapTitle":"Today's Market Breadth",
+  "br.snapIntro":"An index can be held up by a few heavyweights. This shows how many individual stocks are actually in trend — when the index and breadth diverge, breadth usually tells the truth first.",
+  "br.above":"Above",
+  "br.nh":"60-day new highs",
+  "br.nodata":"insufficient data",
+  "br.snapAsOf":"As of",
+  "br.snapNote":"Denominators count only stocks with enough trading days for that average, so the three lines differ (newly listed names cannot fill 200 days). New highs use a 2% tolerance. Moving-average counts show how many remain in trend; new-high counts show how many are breaking out — the latter usually falls first, because it needs fresh buying.",
   cpi_ytd:"YTD Cumulative CPI", cpi_5y:"5-Year Cumulative CPI",
   cpi_10y:"10-Year Cumulative CPI"
 };
@@ -6913,6 +7037,9 @@ def api_breadth():
         span_days=len(days), span_years=round(len(days) / 252.0, 1),
         p={str(p): round(vals[max(0, min(len(vals) - 1, int(len(vals) * p / 100)))], 1)
            for p in (10, 25, 50, 75, 90)},
+        # 今日快照：站上 50／150／200MA 的家數 ＋ 創 60 日新高家數
+        # ⚠️ 一樣只讀快取，不重算（見上面的原則）。
+        snapshot=get_ma_breadth_snapshot(),
     )
 
 

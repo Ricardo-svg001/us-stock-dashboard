@@ -1818,6 +1818,15 @@ def get_leverage_monthly(months=24):
 
 
 
+# ⚠️⚠️ 2026-08-14 事故：這兩個常數原本緊鄰 `screen_consolidation`，
+#      刪除強勢股整理功能時被一起刪掉，但 5 處使用點還在 →
+#      每次按 RS 篩選都 NameError → 500 HTML → 前端只顯示
+#      「SyntaxError: Unexpected token '<'」，完全看不出真正原因。
+#      📌 教訓：刪功能後要 grep 被刪區塊裡的**每個大寫常數**，確認沒有別處在用。
+RS_PERIODS = (20, 60, 120, 250)
+RS_CACHE_FILE = "rs_scores_v1.json"
+
+
 def _percentile_scores(values):
     """把 {symbol: return} 換成 1～99 的市場百分位；同報酬者使用平均名次。"""
     ordered = sorted(values.items(), key=lambda x: x[1])
@@ -5350,21 +5359,36 @@ let lastProHigh = null, lastProRs = null;
 const proPct = v => `<span class="${Number(v) >= 0 ? 'pos' : 'neg'}">${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(2)}%</span>`;
 const proKv = (k, v) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`;
 
+/* ⚠️⚠️ **不要直接 `r.json()`。**
+   伺服器回 500／502 時給的是 HTML 錯誤頁，`r.json()` 會丟
+   「SyntaxError: Unexpected token '<'」—— 那個訊息**把真正的原因整個蓋掉了**，
+   使用者只看得到「連線失敗」，看不到是幾號錯誤、也看不到錯誤內容。
+   2026-08-13 實際踩到：RS 篩選失敗時完全查不出原因。
+   📌 通則：**解析回應之前先看 `r.status` 與 Content-Type。** */
+async function readJson(r){
+  const ct = r.headers.get("content-type") || "";
+  if (!ct.includes("json")) {
+    const body = (await r.text()).replace(/<[^>]*>/g, " ").trim().slice(0, 160);
+    throw new Error("HTTP " + r.status + (body ? "：" + body : "（伺服器回了非 JSON 內容）"));
+  }
+  return r.json();
+}
+
 function runProJob(url, params, button, status, done){
   button.disabled = true; status.textContent = "";
   brewOpen(t("st.send","送出篩選條件…"));
   fetch(url, {method:"POST", headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},
-    body:JSON.stringify(params)}).then(r => r.json()).then(j => {
+    body:JSON.stringify(params)}).then(readJson).then(j => {
       if (!j.job){ brewClose(); button.disabled=false; if (retryOnStaleToken(j)) return;
         status.textContent=j.error||t("st.nojob","無法建立工作"); return; }
-      const pollPro = () => fetch("/api/job/"+j.job).then(r=>r.json()).then(x => {
+      const pollPro = () => fetch("/api/job/"+j.job).then(readJson).then(x => {
         if (!x.done){ brewProgress(x.progress,x.status); setTimeout(pollPro,500); return; }
         brewClose(); button.disabled=false;
         if (x.error){ status.textContent=t("st.failed","篩選失敗：")+x.error; return; }
         done(x.result);
-      }).catch(e=>{ brewClose(); button.disabled=false; status.textContent=t("st.conn","連線失敗：")+e; });
+      }).catch(e=>{ brewClose(); button.disabled=false; status.textContent=t("st.conn","連線失敗：")+e.message; });
       pollPro();
-  }).catch(e=>{ brewClose(); button.disabled=false; status.textContent=t("st.conn","連線失敗：")+e; });
+  }).catch(e=>{ brewClose(); button.disabled=false; status.textContent=t("st.conn","連線失敗：")+e.message; });
 }
 
 function proHighFilter(){

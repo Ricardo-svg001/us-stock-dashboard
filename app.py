@@ -1711,8 +1711,13 @@ def get_leverage_monthly(months=24):
     後者三千多檔。所以「實際倍數」本來就不會乾淨，這不是資料錯誤。
     📌 台股的 00631L 對加權指數也是同一個問題。
 
-    ⚠️ Nasdaq 的 `/historical` 回的是**已還原**價格（拆股／配息都處理過），
-    所以不需要像台股那樣自己做公司行為還原。
+    ⚠️⚠️ **2026-08-14 更正**：原本這裡寫「拆股／配息都處理過」，**配息那半是錯的**。
+    實測結果：
+      ・**拆股 → 已還原**：NVDA 2024-06-03 回傳 115.0，當時實際成交約 1150（10:1 拆股）。
+      ・**配息 → 未還原**：AAPL 2023-06-27 回傳 188.06，就是當天實際收盤價。
+    對本函式（QLD 逐月績效）影響很小 —— 槓桿 ETF 配息低、期間也只有兩年。
+    📌 但**任何長期累計報酬的功能都必須自己處理配息**，否則會系統性偏袒
+    低配息的成長股、低估高股息股。見 `長期成長股列表`。
     """
     cached = _load_cache("leverage_monthly_v2.json", 12)   # ⚠️ v2: 新增 years 年度分組
     if cached is not None:
@@ -2004,6 +2009,35 @@ BREADTH_SEED_FILE = os.path.join(BASE_DIR, "breadth_5y_seed.json")
 # 洗盤記憶維持近 90 日最低寬度 ≤30%。收復 50MA 是初步復甦，收復 100MA
 # 是復甦確認；三日黏著消除單日假突破。歷史寬度以今日前 300 大回算，仍有
 # 存活者偏誤，門檻只應保守解讀。
+
+# ---- 長期成長股列表 ----------------------------------------------------
+# ⚠️⚠️ 這份資料**不在線上計算**，由本機 `長期成長股列表.py` 算好、
+#      隨程式一起部署。原因有兩個：
+#        ① 線上沒有 `cache/long_term/`（300 檔十年報價，營運快取只留 1260 筆）。
+#        ② 十年報酬變動極慢，每天重算沒有意義。
+#      📌 所以更新流程是：本機重跑腳本 → `growth_seed.json` 更新 → 部署。
+#      **忘了重跑腳本，網站顯示的就是舊數字**，所以頁面一定要顯示 `as_of`。
+GROWTH_SEED_FILE = os.path.join(BASE_DIR, "growth_seed.json")
+_GROWTH_CACHE = None
+
+
+def get_growth():
+    """讀取長期成長股種子檔。⚠️ 純讀檔 —— 不連網、不計算、不寫入。
+
+    自我檢查：這個函式裡不應該出現 `requests.get`（見鐵律）。
+    """
+    global _GROWTH_CACHE
+    if _GROWTH_CACHE is None:
+        try:
+            with open(GROWTH_SEED_FILE, encoding="utf-8") as f:
+                _GROWTH_CACHE = json.load(f)
+        except Exception as exc:
+            # ⚠️ 不要回空清單假裝沒事 —— 那會讓頁面顯示「查無資料」，
+            #    看起來像正常結果，實際上是檔案沒部署上去。
+            _GROWTH_CACHE = {"error": "找不到 growth_seed.json（%s）"
+                                      % type(exc).__name__}
+    return _GROWTH_CACHE
+
 
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
 MACRO_CACHE_FILE = "us_rate_inflation_v2.json"   # v2: 新增近五年累積 CPI
@@ -3521,6 +3555,37 @@ __SEO_HEAD__
   .status { text-align:center; margin:14px 0; color:var(--mocha); font-size:14px; min-height:20px; }
   table { width:100%; border-collapse:collapse; font-size:13px; background:var(--foam);
           border-radius:14px; overflow:hidden; box-shadow:var(--shadow); }
+  /* 長期成長股列表的排序切換鈕 */
+  .segbar { display:flex; gap:8px; margin:0 0 12px; flex-wrap:wrap; }
+  .segbtn { padding:8px 14px; border:1px solid var(--grounds); background:var(--foam);
+            border-radius:999px; font-size:13px; cursor:pointer; color:inherit;
+            font-family:inherit; }
+  .segbtn:hover { border-color:var(--caramel); }
+  .segbtn.active { background:var(--caramel); border-color:var(--caramel); color:#fff; }
+  /* ⚠️⚠️ 這裡**不用表格**。六欄的表格在手機上一定要左右橫拉，
+     而 .res-wide 在 640px 以下是 display:none（要另外維護一套卡片版）。
+     改用單列 grid：左邊名稱可省略號截斷、右邊數字靠右，
+     **任何寬度都不需要橫向捲動**，桌機手機共用同一份版面。 */
+  .growlist { display:flex; flex-direction:column; gap:6px; }
+  .growrow { display:grid; grid-template-columns:30px minmax(0,1fr) auto;
+             align-items:center; gap:10px; padding:10px 12px;
+             background:var(--foam); border:1px solid var(--grounds);
+             border-radius:12px; }
+  .growrow.top { border-color:var(--caramel); }
+  .growrk { font-size:12px; opacity:.5; text-align:right; font-variant-numeric:tabular-nums; }
+  /* ⚠️ minmax(0,1fr) 不能寫成 1fr —— grid 項目的最小尺寸預設是內容寬度，
+     寫 1fr 的話長公司名會把整列撐開，省略號永遠不會生效。 */
+  .growmid { min-width:0; }
+  .growsym { font-weight:700; font-size:14px; }
+  .growname { font-size:12px; opacity:.6; overflow:hidden;
+              text-overflow:ellipsis; white-space:nowrap; }
+  .growval { text-align:right; font-variant-numeric:tabular-nums; }
+  .growtot { font-weight:700; font-size:15px; }
+  .growsub { font-size:11px; opacity:.6; margin-top:1px; }
+  @media (max-width:420px){
+    .growname { font-size:11px; }
+    .growtot { font-size:14px; }
+  }
   /* 結果版面：桌機用表格(窄時可橫向捲動)；手機改成可點開卡片 */
   .res-wide { overflow-x:auto; -webkit-overflow-scrolling:touch; max-width:100%; }
   .res-wide table { min-width:640px; }
@@ -3826,6 +3891,7 @@ __SEO_HEAD__
     <a class="navitem sub" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
     <a class="navitem sub" data-page="p3" href="/pullback"><i>⭐</i><b data-i18n="p3.title">拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
     <a class="navitem sub" data-page="p11" href="/consolidation"><i>🧭</i><b data-i18n="lev.title">正2 逐月績效</b><small data-i18n="nav.lev.sub">QLD・實際倍數</small></a>
+    <a class="navitem sub" data-page="pgrow" href="/growth"><i>🌱</i><b data-i18n="grow.title">長期成長股列表</b><small data-i18n="nav.grow.sub">十年累計・年化報酬</small></a>
     <a class="navitem sub" data-page="pmac" href="/macro"><i>🏦</i><b data-i18n="pmac.title">利率與購買力</b><small data-i18n="nav.macro.sub">美債 2Y・10Y・CPI</small></a>
   </details>
   <details class="navgroup">
@@ -4043,6 +4109,17 @@ __QUOTES_HTML__
   <button class="gobtn" id="goLev" data-i18n="lev.run">查看逐月績效</button>
   <div class="status" id="statusLev"></div>
   <div id="resultLev"></div>
+</div>
+
+<!-- ============ 長期成長股列表 ============ -->
+<div class="page" id="pgrow">
+  <h2 class="ptitle" data-i18n="grow.title">長期成長股列表</h2>
+  <details class="pgintro" open>
+    <summary data-i18n="grow.introT">十年下來，誰真的漲上去了</summary>
+    <div class="pgintro-b" data-i18n-html="grow.intro"><p>這裡列出<b>市值前 300 大</b>美股<b>固定回溯十年</b>的累計漲幅與年化報酬率，可以依兩者任一排序。所有個股用<b>同一個起跑點</b>，累計漲幅才能互相比較——若改用各自的上市日，期間長短不同，排名就沒有意義。</p><p><b>⚠️ 這份清單回答的是「現在的大公司過去十年漲了多少」，不是「十年前該買什麼」。</b>股票池是<b>今天</b>的前 300 大：十年前還很小、後來長大的公司被預先放進來，十年前很大、後來衰退掉出榜外的則完全看不到。這叫存活者偏誤加前視偏誤，會讓整份清單看起來比實際好很多。</p><p><b>⚠️ 未還原配息。</b>報價已還原拆股，但沒有還原股息，所以<b>高股息個股的報酬被系統性低估</b>——年配 6~7% 的十年下來可能少算五成以上。排名前段集中在科技股，有一部分是這個原因造成的。<b>台股站的同名頁面是含息的，兩邊的數字不能並排比較。</b></p><p><b>年數欄位要跟年化一起看。</b>上市不滿十年的個股會標示實際年數；短期間內一段暴漲會被年化放大成很誇張的數字。</p></div>
+  </details>
+  <div class="status" id="statusGrow"></div>
+  <div id="resultGrow"></div>
 </div>
 
 <div class="page" id="pmac">
@@ -4471,6 +4548,30 @@ const I18N = { en: {
   "ded.done": "already deducted",
   "ded.noData": "Not enough history to compute this average",
   "ded.negNote": "\u26a0\ufe0f The recent slope is negative, so the shorter count in the trend row means price would fall to the average \u2014 not that the average is catching up. For \"how long can this keep consolidating\", read the flat row.",
+  "grow.title": "Long-Term Growth List",
+  "nav.grow.sub": "10-year total & annualised",
+  "grow.introT": "Who actually went up over ten years",
+  "grow.intro": "<p>This lists the <b>ten-year</b> cumulative and annualised returns for the <b>300 largest US stocks</b>, sortable by either. Every stock uses the <b>same starting date</b> so cumulative returns can be compared \u2014 using each stock's own listing date would make the periods different lengths and the ranking meaningless.</p><p><b>\u26a0\ufe0f This answers \"how much did today's large companies rise over the past ten years\", not \"what should you have bought ten years ago.\"</b> The universe is <b>today's</b> top 300: companies that were small then and grew are pre-loaded into the list, while companies that were large then and shrank out of the top 300 are invisible. That is survivorship plus look-ahead bias, and it makes the whole list look better than reality.</p><p><b>\u26a0\ufe0f Not dividend-adjusted.</b> Prices are split-adjusted but dividends are not added back, so <b>high-yield stocks are systematically understated</b> \u2014 a 6-7% yielder can be understated by more than half over ten years. The concentration of technology names at the top is partly caused by this.</p><p><b>Read the years column alongside the annualised figure.</b> Stocks listed for less than ten years are flagged; a single sharp run inside a short window gets magnified into an extreme annualised number.</p>",
+  "grow.loading": "Loading long-term growth data\u2026",
+  "grow.fail": "Failed to load",
+  "grow.bench": "Nasdaq Composite, same period",
+  "grow.benchNote": "Index and stocks both exclude dividends",
+  "grow.total": "Total return",
+  "grow.cagr": "Annualised",
+  "grow.beat": "Beat the index (annualised)",
+  "grow.neg": "Negative over ten years:",
+  "grow.cnt": "",
+  "grow.med": "median",
+  "grow.rank": "Ranking",
+  "grow.asof": "Data as of",
+  "grow.byTotal": "By total return",
+  "grow.byCagr": "By annualised",
+  "grow.sym": "Symbol",
+  "grow.name": "Name",
+  "grow.years": "Years",
+  "grow.yr": "y",
+  "grow.shortT": "Listed less than ten years \u2014 annualised figure is unstable",
+  "grow.spinT": "A spin-off occurred in this period \u2014 return is understated",
   "ded.warn": "\u26a0\ufe0f This is arithmetic extrapolation, not a forecast. It assumes the same daily move every session, which real markets do not do. Treat the session count as a rough \"if this pace holds\" estimate, not a guarantee.",
   "risk.introT": "Work out what you can lose before what you can make",
   "risk.intro": "<p>This page lays out four things about the stocks you hold: <b>how much it typically moves in a day (ATR)</b>, <b>how choppy it is overall (volatility)</b>, <b>whether the trend is still intact (MA alignment)</b>, and <b>how tightly it tracks the market (Beta)</b>.</p><p>Enter your entry price and it computes an <b>initial stop</b> and a <b>trailing stop</b> from ATR. The value isn't in the precision of that number — it's in <b>forcing you to write down the exit before you buy</b>. Decide a stop after you're underwater and you usually won't take it.</p><p><b>Why ATR instead of a fixed percentage</b>: 5% is a distant stop for a utility that moves 1% a day, and a same-day stop-out for a name that moves 6%. ATR is \"how much this stock normally moves in a day\", so using it as the unit makes the stop distance adapt to the character of the stock.</p><p><b>Everything stays in this browser</b> — nothing is uploaded and there is no account system. Changing device or clearing site data loses it, which is worth saying plainly rather than pretending there is sync.</p>",
@@ -6195,6 +6296,89 @@ async function loadMacro(){
   }
 }
 
+/* ---- 長期成長股列表 ---- */
+let GROW = null, GROW_SORT = "total";
+function growNum(v, dp){
+  return (v >= 0 ? "+" : "") + v.toLocaleString(undefined,
+    {minimumFractionDigits: dp, maximumFractionDigits: dp}) + "%";
+}
+function growTable(){
+  const rows = GROW.rows.slice().sort((a, b) =>
+    GROW_SORT === "total" ? b.total_pct - a.total_pct : b.cagr_pct - a.cagr_pct);
+  /* ⚠️ 分拆過的個股報酬被嚴重低估（Nasdaq 報價不還原分拆），要標出來 */
+  const spun = new Set((GROW.jumps || []).filter(j => j.pct < -35).map(j => j.symbol));
+  /* 主數字＝目前排序的那一個，副數字放另一個 —— 排序切換時兩者對調，
+     使用者眼睛不用在欄位間找。 */
+  const byTotal = GROW_SORT === "total";
+  let h = `<div class="growlist">`;
+  rows.forEach((r, i) => {
+    const shortMark = r.full_period ? "" :
+      ` <span title="${t("grow.shortT", "上市未滿十年，年化不穩")}">⚠️</span>`;
+    const spinMark = spun.has(r.symbol) ?
+      ` <span title="${t("grow.spinT", "期間有分拆，報酬被低估")}">✂️</span>` : "";
+    const main = byTotal ? growNum(r.total_pct, 1) : growNum(r.cagr_pct, 2);
+    const sub = byTotal
+      ? `${t("grow.cagr", "年化")} ${growNum(r.cagr_pct, 2)}`
+      : `${t("grow.total", "累計")} ${growNum(r.total_pct, 1)}`;
+    h += `<div class="growrow${i < 3 ? " top" : ""}">`
+       + `<div class="growrk">${i + 1}</div>`
+       + `<div class="growmid"><div class="growsym">${r.symbol}${spinMark}</div>`
+       + `<div class="growname">${r.name || ""}</div></div>`
+       + `<div class="growval"><div class="growtot">${main}</div>`
+       + `<div class="growsub">${sub} · ${r.years.toFixed(1)}${t("grow.yr", "年")}${shortMark}</div>`
+       + `</div></div>`;
+  });
+  return h + "</div>";
+}
+function growRender(){
+  const box = $("#resultGrow");
+  if (!box || !GROW) return;
+  const b = GROW.benchmark || {};
+  const nBeat = GROW.rows.filter(r => r.cagr_pct > (b.cagr_pct || 0)).length;
+  const nNeg = GROW.rows.filter(r => r.total_pct < 0).length;
+  const sorted = GROW.rows.map(r => r.total_pct).sort((x, y) => x - y);
+  const med = sorted[Math.floor(sorted.length / 2)];
+  const on = s => GROW_SORT === s ? " active" : "";
+  box.innerHTML =
+    `<div class="card"><h2>${t("grow.bench", "同期納斯達克綜合指數")}</h2>`
+    + `<div class="macro-grid">`
+    + `<div class="mstat"><div class="ml">${t("grow.total", "累計漲幅")}</div>`
+    + `<div class="mv">${growNum(b.total_pct || 0, 1)}</div>`
+    + `<div class="msub">${b.start_date || ""} ~ ${b.end_date || ""}</div></div>`
+    + `<div class="mstat"><div class="ml">${t("grow.cagr", "年化")}</div>`
+    + `<div class="mv">${growNum(b.cagr_pct || 0, 2)}</div>`
+    + `<div class="msub">${t("grow.benchNote", "指數與個股同為不含息口徑")}</div></div>`
+    + `<div class="mstat"><div class="ml">${t("grow.beat", "年化贏過指數")}</div>`
+    + `<div class="mv">${nBeat} / ${GROW.rows.length}</div>`
+    + `<div class="msub">${t("grow.neg", "十年負報酬")} ${nNeg} ${t("grow.cnt", "檔")}`
+    + ` · ${t("grow.med", "中位數")} ${growNum(med, 1)}</div></div>`
+    + `</div></div>`
+    + `<div class="card"><h2>${t("grow.rank", "排名")}`
+    + ` <small style="font-weight:400;opacity:.7">${t("grow.asof", "資料截至")} ${GROW.as_of || "—"}</small></h2>`
+    + `<div class="segbar">`
+    + `<button class="segbtn${on("total")}" data-sort="total">${t("grow.byTotal", "依累計漲幅")}</button>`
+    + `<button class="segbtn${on("cagr")}" data-sort="cagr">${t("grow.byCagr", "依年化報酬")}</button>`
+    + `</div>`
+    + growTable() + `</div>`;
+  box.querySelectorAll(".segbtn").forEach(btn => btn.onclick = () => {
+    GROW_SORT = btn.dataset.sort; growRender();
+  });
+}
+async function loadGrowth(){
+  const st = $("#statusGrow");
+  if (!st) return;
+  st.textContent = t("grow.loading", "讀取長期成長股資料…");
+  try {
+    /* ⚠️ 用 readJson：伺服器出錯時回的是 HTML，直接 .json() 只會看到
+       「Unexpected token '<'」，查不出真正原因（2026-08-14 的教訓）。 */
+    GROW = await readJson(await fetch("/api/growth"));
+    st.textContent = "";
+    growRender();
+  } catch(e){
+    st.textContent = t("grow.fail", "讀取失敗") + "：" + e.message;
+  }
+}
+
 /* ---- 依網址開對應分頁 ---- */
 if (START_PAGE && $("#" + START_PAGE)){
   document.querySelectorAll(".page").forEach(p => p.classList.remove("show"));
@@ -6206,6 +6390,7 @@ if (START_PAGE && $("#" + START_PAGE)){
 }
 if (START_PAGE === "p7") buildTwTable();
 if (START_PAGE === "pmac") loadMacro();
+if (START_PAGE === "pgrow") loadGrowth();
 applyLang();
 </script>
 </body>
@@ -6304,6 +6489,16 @@ PAGE_ROUTES = {
                "Monthly returns for ProShares Ultra QQQ (QLD) against the Nasdaq Composite "
                "over two years, with the realised multiple. Daily rebalancing means "
                "cumulative leverage is never exactly 2x."),
+    },
+    "growth": {
+        "page": "pgrow", "index": True,
+        "zh": ("長期成長股列表｜美股市值前 300 大的十年報酬",
+               "市值前 300 大美股近十年的累計漲幅與年化報酬率，可依兩者排序。"
+               "⚠️ 未還原配息，且股票池是今天的前 300 大，含存活者偏誤。"),
+        "en": ("Long-Term Growth List｜10-Year Returns of the Top 300 US Stocks",
+               "Ten-year cumulative and annualised returns for the 300 largest US "
+               "stocks, sortable by either. Note: not dividend-adjusted, and the "
+               "universe is today's top 300 (survivorship bias)."),
     },
     "twr": {
         "page": "p7", "index": True,
@@ -7982,6 +8177,15 @@ def api_pro_rs():
     if threshold not in (80, 90, 95):
         return jsonify(error="RS 門檻只支援 80、90 或 95"), 400
     return jsonify(job=start_job(screen_pro_rs, {"period": period, "threshold": threshold}))
+
+
+@app.route("/api/growth")
+def api_growth():
+    """長期成長股列表。公開唯讀，資料隨程式部署（見 `get_growth`）。"""
+    d = get_growth()
+    if d.get("error"):
+        return jsonify(error=d["error"]), 503
+    return jsonify(d)
 
 
 @app.route("/api/macro")

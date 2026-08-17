@@ -3503,6 +3503,39 @@ __SEO_HEAD__
   @media (max-width:640px){
     .rk-grid, .rk-stops { grid-template-columns:1fr; }
   }
+  /* 同期比較 */
+  .cmp-form { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .cmp-field label { display:block; margin-bottom:5px; color:var(--mocha);
+           font-size:12.5px; font-weight:700; }
+  .cmp-field input { width:100%; box-sizing:border-box; padding:10px 11px;
+           border:1.5px solid var(--grounds); border-radius:10px; background:#fff;
+           color:var(--espresso); font:14px var(--font-num); }
+  .cmp-peers { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .cmp-chip { display:flex; align-items:center; gap:8px; background:var(--milk);
+           border:1px solid var(--grounds); border-radius:999px; padding:7px 12px;
+           font-size:14px; color:var(--espresso); }
+  .cmp-chip b { font-family:var(--font-num); color:var(--caramel-2); }
+  .cmp-chip .x { cursor:pointer; color:var(--mocha); }
+  .cmp-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px;
+           margin-top:14px; }
+  .cmp-card { background:var(--foam); border:1.5px solid var(--grounds);
+           border-radius:16px; padding:15px; box-shadow:var(--shadow); min-width:0; }
+  .cmp-card.actual { border-color:var(--caramel); }
+  .cmp-card.best { box-shadow:0 0 0 2px rgba(166,103,65,.16),var(--shadow); }
+  .cmp-head { display:flex; align-items:flex-start; gap:8px; }
+  .cmp-role { flex-shrink:0; border-radius:999px; padding:3px 8px;
+           background:var(--milk); color:var(--caramel-2); font-size:11px; font-weight:700; }
+  .cmp-code { font:700 17px var(--font-num); color:var(--espresso); }
+  .cmp-name { color:var(--mocha); font-size:12px; overflow:hidden;
+           white-space:nowrap; text-overflow:ellipsis; }
+  .cmp-ret { margin:12px 0 8px; font:800 27px var(--font-num); }
+  .cmp-ret.up { color:var(--up); } .cmp-ret.down { color:var(--down); }
+  .cmp-kv { display:grid; grid-template-columns:auto 1fr; gap:5px 10px;
+           border-top:1px solid var(--grounds); padding-top:9px; font-size:12px; }
+  .cmp-kv span:nth-child(odd) { color:var(--mocha); }
+  .cmp-kv span:nth-child(even) { text-align:right; font-family:var(--font-num);
+           color:var(--espresso); overflow-wrap:anywhere; }
+  @media(max-width:560px){ .cmp-form,.cmp-grid { grid-template-columns:1fr; } }
   /* 載入中：泡咖啡冒煙動畫 */
   .brewbox { position:relative; width:64px; height:60px; }
   .brewbox .steam { position:absolute; top:0; width:5px; height:20px; border-radius:3px;
@@ -3895,8 +3928,9 @@ __SEO_HEAD__
     <a class="navitem sub" data-page="pmac" href="/macro"><i>🏦</i><b data-i18n="pmac.title">利率與購買力</b><small data-i18n="nav.macro.sub">美債 2Y・10Y・CPI</small></a>
   </details>
   <details class="navgroup">
-    <summary><i>⭐</i><b data-i18n="nav.mine">我的自選股</b><small data-i18n="nav.mine.sub">績效・風控・提醒・扣抵法</small></summary>
+    <summary><i>⭐</i><b data-i18n="nav.mine">我的自選股</b><small data-i18n="nav.mine.sub">績效・同期比較・風控・提醒</small></summary>
     <a class="navitem sub" data-page="p7" href="/twr"><i>📈</i><b data-i18n="p7.title">我的績效</b><small data-i18n="nav.twr.sub">TWR 報酬率試算</small></a>
+    <a class="navitem sub" data-page="p12" href="/comparison"><i>⚖️</i><b data-i18n="p12.title">同期比較</b><small data-i18n="nav.compare.sub">如果當初買了別檔</small></a>
     <a class="navitem sub" data-page="p8" href="/risk"><i>🛡️</i><b data-i18n="p8.title">風控管理</b><small data-i18n="nav.risk.sub">ATR・波動率・趨勢・Beta</small></a>
     <a class="navitem sub" data-page="p4" href="/alerts"><i>🔔</i><b data-i18n="p4.title">推播通知</b><small data-i18n="nav.alert.sub">收盤到價提醒（測試中）</small></a>
     <a class="navitem sub" data-page="p10" href="/deduction"><i>📐</i><b data-i18n="nav.deduct">均線扣抵法</b><small data-i18n="nav.deduct.sub">50／100／150MA 何時追上</small></a>
@@ -4221,6 +4255,56 @@ __QUOTES_HTML__
   </div>
 </div>
 
+<!-- ============ 我的自選股：同期比較 ============ -->
+<div class="page" id="p12">
+  <h2 class="ptitle" data-i18n="p12.title">同期比較</h2>
+  <details class="pgintro">
+    <summary data-i18n="cmp.introT">當初沒買的股票，後來漲了多少？</summary>
+    <div class="pgintro-b" data-i18n-html="cmp.intro">
+      <p>輸入你實際買進的 A 股票、日期、價格與股數，系統會算出當時投入的美元本金。</p>
+      <p>再挑 B、C、D，假設在同一個交易日用<b>完全相同的本金買整股</b>，未用完的錢保留現金，
+      比較到最新共同收盤日的總值與報酬率，直接看見選股造成的機會成本。</p>
+      <p>資料只存在這台裝置。報酬採拆股一致的歷史收盤，但不含手續費、稅與現金股利；
+      最長約可比較最近五年。</p>
+    </div>
+  </details>
+
+  <div class="card">
+    <h2><span class="stepno">01</span><span data-i18n="cmp.actual">輸入 A 股票的實際買進資料</span></h2>
+    <div class="stockpick" style="position:relative;margin-bottom:12px">
+      <input id="cmpASearch" type="text" autocomplete="off" data-i18n-ph="cmp.aPh"
+             placeholder="搜尋 A 股票，例如 AAPL 或 Apple">
+      <div id="cmpASuggest" class="suggest"></div>
+      <div id="cmpAPicked" class="picked" style="display:none"></div>
+    </div>
+    <div class="cmp-form">
+      <div class="cmp-field"><label data-i18n="cmp.date">買入日期</label>
+        <input id="cmpDate" type="date"></div>
+      <div class="cmp-field"><label data-i18n="cmp.price">A 實際買入價</label>
+        <input id="cmpPrice" type="number" min="0.0001" step="0.01" inputmode="decimal" placeholder="例如 180.50"></div>
+      <div class="cmp-field"><label data-i18n="cmp.shares">A 實際買入股數</label>
+        <input id="cmpShares" type="number" min="0.0001" step="0.0001" inputmode="decimal" placeholder="例如 10"></div>
+      <div class="cmp-field"><label data-i18n="cmp.principal">實際投入本金</label>
+        <input id="cmpPrincipal" type="text" readonly value="—"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="stepno">02</span><span data-i18n="cmp.peers">選擇當初沒買的 B／C／D（最多 3 檔）</span></h2>
+    <div class="stockpick" style="position:relative">
+      <input id="cmpPeerSearch" type="text" autocomplete="off" data-i18n-ph="cmp.peerPh"
+             placeholder="搜尋比較股票">
+      <div id="cmpPeerSuggest" class="suggest"></div>
+    </div>
+    <div id="cmpPeers" class="cmp-peers"></div>
+    <div class="rk-hint" data-i18n-html="cmp.local">資料與選擇<b>只存在這台裝置的瀏覽器</b>，不會上傳保存。</div>
+  </div>
+
+  <button class="gobtn" id="cmpBtn" data-i18n="cmp.run">開始同期比較</button>
+  <div class="status" id="cmpStatus"></div>
+  <div id="cmpResult"></div>
+</div>
+
 <!-- ============ 我的自選股：風控管理 ============ -->
 <div class="page" id="p8">
   <h2 class="ptitle" data-i18n="p8.title">風控管理</h2>
@@ -4473,7 +4557,27 @@ const I18N = { en: {
   "lev.run": "Show monthly performance",
   "nav.twr.sub": "TWR performance calculator",
   "nav.macro.sub": "US 2Y · 10Y · CPI",
-  "nav.mine": "My Watchlist", "nav.mine.sub": "Performance · Risk · Alerts · MA deduction",
+  "nav.mine": "My Watchlist", "nav.mine.sub": "Performance · Comparison · Risk · Alerts",
+  "p12.title": "Same-period Comparison", "nav.compare.sub": "What if you bought another stock?",
+  "cmp.introT": "How much did the stocks you skipped gain?",
+  "cmp.intro": "<p>Enter the stock you actually bought (A), its date, price and share count. The tool derives your real starting capital.</p><p>Then choose B, C and D. Each hypothetical position uses <b>the exact same capital to buy whole shares</b> on the same session, with unused money kept as cash. Results run through the latest common close, revealing the opportunity cost of the original choice.</p><p>Data stays on this device. Prices are split-consistent, but returns exclude fees, taxes and cash dividends. US comparisons cover roughly the latest five years.</p>",
+  "cmp.actual": "Your actual A purchase", "cmp.aPh": "Search stock A, e.g. AAPL or Apple",
+  "cmp.date": "Purchase date", "cmp.price": "Actual A purchase price",
+  "cmp.shares": "Actual A shares", "cmp.principal": "Actual capital invested",
+  "cmp.peers": "Stocks you skipped: B / C / D (up to 3)", "cmp.peerPh": "Search comparison stocks",
+  "cmp.local": "Selections are stored <b>only in this browser</b> and are not saved on the server.",
+  "cmp.run": "Compare Returns", "cmp.loading": "Calculating the same-period returns…",
+  "cmp.needA": "Choose stock A first", "cmp.needPeer": "Choose at least one comparison stock",
+  "cmp.needDate": "Enter a purchase date", "cmp.needTrade": "Enter a valid A price and share count",
+  "cmp.max": "You can compare up to 3 stocks", "cmp.duplicate": "That stock is already selected",
+  "cmp.nohit": "No match (top 300 by market cap only)", "cmp.fail": "Comparison failed — please try again",
+  "cmp.actualTag": "Actually bought A", "cmp.hypTag": "Skipped stock",
+  "cmp.best": "Best result", "cmp.return": "Return", "cmp.buyDate": "Comparison start",
+  "cmp.buyPrice": "Starting price", "cmp.qty": "Shares", "cmp.cash": "Cash left",
+  "cmp.split": "split-adjusted",
+  "cmp.last": "Latest close", "cmp.value": "Current total", "cmp.vsA": "Difference vs A",
+  "cmp.range": "Same period", "cmp.shift": "The requested date was not a common trading session; comparison starts on",
+  "cmp.note": "Price return only: fees, taxes and cash dividends are excluded. B/C/D use whole shares and keep unused capital as cash.",
   "nav.risk.sub": "ATR · Volatility · Trend · Beta",
   "nav.alert.sub": "Close-price alerts (beta)",
   "nav.pro": "Upgrade to Pro", "nav.pro.sub": "New highs · RS ranking",
@@ -6246,6 +6350,130 @@ if ($("#rkBtn")){
   });
 }
 
+/* ================= 我的自選股：同期比較（/comparison）================= */
+const CMP_KEY = "us_same_period_v1";
+let cmpStocks = [], cmpA = null, cmpPeers = [];
+function cmpStock(code){ return cmpStocks.find(s => s.code === code); }
+function cmpName(s){ return !s ? "" : (LANG === "en" ? s.name : (s.name_zh || s.name)); }
+function cmpEsc(v){ const d=document.createElement("div"); d.textContent=String(v||""); return d.innerHTML; }
+function cmpSave(){
+  if (!$("#cmpDate")) return;
+  localStorage.setItem(CMP_KEY,JSON.stringify({a:cmpA?cmpA.code:"",peers:cmpPeers,
+    date:$("#cmpDate").value,price:$("#cmpPrice").value,shares:$("#cmpShares").value}));
+}
+function cmpPrincipal(){
+  const price=Number($("#cmpPrice")&&$("#cmpPrice").value), shares=Number($("#cmpShares")&&$("#cmpShares").value);
+  const value=(price>0&&shares>0)?price*shares:0;
+  if ($("#cmpPrincipal")) $("#cmpPrincipal").value=value?"$"+value.toLocaleString(undefined,{maximumFractionDigits:2}):"—";
+  return value;
+}
+function cmpRenderPicks(){
+  const aBox=$("#cmpAPicked");
+  if (aBox){
+    if (cmpA){ aBox.innerHTML="<span>"+t("alert.picked","已選擇")+"：<b>"+cmpEsc(cmpA.code+" "+cmpName(cmpA))
+      +"</b></span><span class=\"clr\" onclick=\"cmpClearA()\">"+t("alert.repick","重新選擇 ✕")+"</span>"; aBox.style.display="flex"; }
+    else { aBox.style.display="none"; aBox.innerHTML=""; }
+  }
+  const box=$("#cmpPeers");
+  if (box) box.innerHTML=cmpPeers.map((code,i)=>{ const s=cmpStock(code)||{code:code,name:""};
+    return "<span class=\"cmp-chip\"><b>"+"BCD"[i]+"・"+cmpEsc(s.code)+"</b>"+cmpEsc(cmpName(s))
+      +"<span class=\"x\" onclick=\"cmpRemovePeer('"+s.code+"')\">✕</span></span>"; }).join("");
+}
+function cmpClearA(){ cmpA=null; cmpSave(); cmpRenderPicks(); }
+function cmpRemovePeer(code){ cmpPeers=cmpPeers.filter(x=>x!==code); cmpSave(); cmpRenderPicks(); }
+function cmpChoose(code,kind){
+  const s=cmpStock(code); if (!s) return;
+  if (kind==="a"){
+    cmpA=s; cmpPeers=cmpPeers.filter(x=>x!==code); $("#cmpASearch").value=""; $("#cmpASuggest").classList.remove("show");
+  } else {
+    if ((cmpA&&cmpA.code===code)||cmpPeers.includes(code)){ alert(t("cmp.duplicate","這檔已經選過了")); return; }
+    if (cmpPeers.length>=3){ alert(t("cmp.max","最多比較 3 檔")); return; }
+    cmpPeers.push(code); $("#cmpPeerSearch").value=""; $("#cmpPeerSuggest").classList.remove("show");
+  }
+  cmpSave(); cmpRenderPicks();
+}
+function cmpSuggest(kind){
+  const inp=$(kind==="a"?"#cmpASearch":"#cmpPeerSearch"), box=$(kind==="a"?"#cmpASuggest":"#cmpPeerSuggest");
+  if (!inp||!box) return;
+  const kw=inp.value.trim().toLowerCase(); if (!kw){ box.classList.remove("show"); return; }
+  const hit=cmpStocks.filter(s=>s.code.toLowerCase().indexOf(kw)===0 || s.name.toLowerCase().indexOf(kw)>=0
+    || (s.name_zh||"").toLowerCase().indexOf(kw)>=0).slice(0,30);
+  box.innerHTML=hit.length?hit.map(s=>"<div onclick=\"cmpChoose('"+s.code+"','"+kind+"')\"><b>"
+    +cmpEsc(s.code)+"</b>"+cmpEsc(cmpName(s))+"</div>").join("")
+    :"<div class=\"empty\">"+t("cmp.nohit","找不到符合的股票（僅限市值前300大）")+"</div>";
+  box.classList.add("show");
+}
+async function cmpInit(){
+  if (!$("#cmpDate")) return;
+  $("#cmpDate").max=new Date().toISOString().slice(0,10);
+  if (!cmpStocks.length){
+    try {
+      const r=await fetch("/api/stocklist",{headers:{"X-App-Token":APP_TOKEN}});
+      if (r.status===403){ retryOnStaleToken(); return; }
+      cmpStocks=await r.json();
+    } catch(e){ cmpStocks=[]; }
+  }
+  try {
+    const x=JSON.parse(localStorage.getItem(CMP_KEY)||"{}"); cmpA=cmpStock(x.a)||null;
+    cmpPeers=(x.peers||[]).filter(c=>cmpStock(c)&&(!cmpA||c!==cmpA.code)).slice(0,3);
+    $("#cmpDate").value=x.date||""; $("#cmpPrice").value=x.price||""; $("#cmpShares").value=x.shares||"";
+  } catch(e){ cmpA=null; cmpPeers=[]; }
+  cmpPrincipal(); cmpRenderPicks();
+}
+function cmpMoney(v){ return Number(v).toLocaleString(LANG==="en"?"en-US":"zh-TW",{minimumFractionDigits:0,maximumFractionDigits:2}); }
+function cmpRenderResult(j){
+  const best=Math.max.apply(null,(j.rows||[]).map(r=>r.return_pct));
+  let head="<div class=\"concl blue\">"+t("cmp.range","同期區間")+"：<b>"+j.entry_date+" → "+j.as_of+"</b>"
+    +"　·　"+t("cmp.principal","實際投入本金")+" <b>$"+cmpMoney(j.principal)+"</b></div>";
+  if (j.entry_date!==j.requested_date) head+="<div class=\"status\">"+t("cmp.shift","指定日期不是共同交易日，比較改從")+" "+j.entry_date+"</div>";
+  const cards=(j.rows||[]).map(r=>{
+    const up=r.return_pct>=0,isBest=Math.abs(r.return_pct-best)<0.000001;
+    const role=r.role==="A"?t("cmp.actualTag","實際買入 A"):t("cmp.hypTag","當初沒買")+" "+r.role;
+    const name=LANG==="en"?r.name:(r.name_zh||r.name);
+    const diff=r.role==="A"?"—":((r.difference_vs_a>=0?"+":"")+"$"+cmpMoney(r.difference_vs_a));
+    const qty=(r.role==="A"&&Math.abs(r.split_factor-1)>0.000001)
+      ? cmpMoney(r.original_shares)+" → "+cmpMoney(r.shares)+"（"+t("cmp.split","拆股調整")+"）"
+      : cmpMoney(r.shares);
+    return "<div class=\"cmp-card "+(r.role==="A"?"actual ":"")+(isBest?"best":"")+"\"><div class=\"cmp-head\">"
+      +"<span class=\"cmp-role\">"+role+"</span><div style=\"min-width:0\"><div class=\"cmp-code\">"+cmpEsc(r.code)
+      +(isBest?"　<small>🏆 "+t("cmp.best","同期最佳")+"</small>":"")+"</div><div class=\"cmp-name\">"+cmpEsc(name)+"</div></div></div>"
+      +"<div class=\"cmp-ret "+(up?"up":"down")+"\">"+(up?"+":"")+r.return_pct.toFixed(2)+"%</div>"
+      +"<div class=\"cmp-kv\"><span>"+t("cmp.buyPrice","起始價格")+"</span><span>$"+cmpMoney(r.entry_price)+"</span>"
+      +"<span>"+t("cmp.qty","可買股數")+"</span><span>"+qty+"</span>"
+      +"<span>"+t("cmp.cash","剩餘現金")+"</span><span>$"+cmpMoney(r.cash)+"</span>"
+      +"<span>"+t("cmp.last","最新收盤")+"</span><span>$"+cmpMoney(r.last_price)+"（"+r.last_date+"）</span>"
+      +"<span>"+t("cmp.value","目前總值")+"</span><span>$"+cmpMoney(r.current_value)+"</span>"
+      +"<span>"+t("cmp.vsA","相較 A 多／少")+"</span><span>"+diff+"</span></div></div>";
+  }).join("");
+  $("#cmpResult").innerHTML=head+"<div class=\"cmp-grid\">"+cards+"</div><div class=\"rk-hint\">⚠️ "
+    +t("cmp.note","僅比較價格報酬：未計手續費、稅與現金股利；B/C/D 以整股買入，剩餘本金保留現金。")+"</div>";
+}
+async function cmpRun(){
+  if (!cmpA){ $("#cmpStatus").textContent=t("cmp.needA","請先選擇 A 股票"); return; }
+  if (!cmpPeers.length){ $("#cmpStatus").textContent=t("cmp.needPeer","至少選擇一檔比較股票"); return; }
+  if (!$("#cmpDate").value){ $("#cmpStatus").textContent=t("cmp.needDate","請輸入買入日期"); return; }
+  const price=Number($("#cmpPrice").value),shares=Number($("#cmpShares").value);
+  if (!(price>0)||!(shares>0)){ $("#cmpStatus").textContent=t("cmp.needTrade","請輸入正確的 A 買入價與股數"); return; }
+  cmpSave(); $("#cmpBtn").disabled=true; $("#cmpStatus").textContent=t("cmp.loading","正在計算同期報酬…"); $("#cmpResult").innerHTML="";
+  try {
+    const r=await fetch("/api/comparison",{method:"POST",headers:{"Content-Type":"application/json","X-App-Token":APP_TOKEN},
+      body:JSON.stringify({anchor:cmpA.code,peers:cmpPeers,date:$("#cmpDate").value,buy_price:price,shares:shares,lang:LANG})});
+    if (r.status===403){ retryOnStaleToken(); return; }
+    const j=await r.json(); if (!r.ok||j.error){ $("#cmpStatus").textContent=j.error||t("cmp.fail","比較失敗，請稍後再試"); return; }
+    $("#cmpStatus").textContent=""; cmpRenderResult(j);
+  } catch(e){ $("#cmpStatus").textContent=t("cmp.fail","比較失敗，請稍後再試"); }
+  finally { $("#cmpBtn").disabled=false; }
+}
+if ($("#cmpASearch")) $("#cmpASearch").addEventListener("input",()=>cmpSuggest("a"));
+if ($("#cmpPeerSearch")) $("#cmpPeerSearch").addEventListener("input",()=>cmpSuggest("peer"));
+["cmpDate","cmpPrice","cmpShares"].forEach(id=>{if($("#"+id))$("#"+id).addEventListener("input",()=>{cmpPrincipal();cmpSave();});});
+if ($("#cmpBtn")) $("#cmpBtn").onclick=cmpRun;
+document.addEventListener("click",e=>{
+  [["cmpASearch","cmpASuggest"],["cmpPeerSearch","cmpPeerSuggest"]].forEach(x=>{
+    const inp=$("#"+x[0]),box=$("#"+x[1]); if(inp&&box&&!inp.parentElement.contains(e.target))box.classList.remove("show");
+  });
+});
+
 /* ---- 美國利率與購買力 ---- */
 const MACRO_EN = {
   us2y:"US 2Y Treasury", us10y:"US 10Y Treasury",
@@ -6389,6 +6617,7 @@ if (START_PAGE && $("#" + START_PAGE)){
   if (activeNav && activeNav.closest("details")) activeNav.closest("details").open = true;
 }
 if (START_PAGE === "p7") buildTwTable();
+if (START_PAGE === "p12") cmpInit();
 if (START_PAGE === "pmac") loadMacro();
 if (START_PAGE === "pgrow") loadGrowth();
 applyLang();
@@ -6527,8 +6756,17 @@ PAGE_ROUTES = {
                "How to read the US market, how to use moving averages and market breadth, and how "
                "US and Taiwan markets differ — the US Stock Coffee article index."),
     },
+    "comparison": {
+        "page": "p12", "index": False,
+        "zh": ("同期比較｜同樣本金比較 A、B、C、D 美股報酬",
+               "輸入實際買進的 A 股票，再以相同美元本金計算當初若買 B、C、D，"
+               "可買股數、目前總值、報酬率與相較 A 的機會成本。資料只存在瀏覽器。"),
+        "en": ("Same-period Comparison｜Compare A, B, C and D with Equal Capital",
+               "Enter the US stock you actually bought, then compare what the same capital would "
+               "be worth in up to three alternatives, including whole-share counts and opportunity cost."),
+    },
     # ⚠️ `risk` 在 2026-08-07 功能完成後改成 index=True。
-    #    ↓ 以下三頁仍是 index=False：一頁測試中、兩頁功能試作，內容都還太薄。
+    #    comparison 是個人操作頁；alerts 測試中；pro 兩頁仍是功能試作，全部 noindex。
     "risk": {
         "page": "p8", "index": True,
         "zh": ("風控管理｜自選股 ATR、波動率、均線趨勢與 Beta",
@@ -7336,6 +7574,132 @@ def _save_alerts(alerts):
         except Exception:
             pass
     _save_cache(ALERTS_FILE, alerts)
+
+
+def _same_period_comparison(anchor, peers, requested_date, buy_price, shares, lang="zh"):
+    """同本金同期比較。歷史快取為拆股一致口徑，個人輸入不保存到伺服器。"""
+    def msg(zh, en):
+        return en if lang == "en" else zh
+
+    universe = _load_cache("universe.json", None) or []
+    info = {str(u.get("symbol") or "").upper(): u for u in universe[:300]
+            if u.get("symbol")}
+    codes = [anchor] + peers
+    missing = [c for c in codes if c not in info]
+    if missing:
+        raise ValueError(msg("僅限目前市值前 300 大股票：", "Limited to the current top 300: ")
+                         + ", ".join(missing))
+
+    histories = {}
+    for c in codes:
+        rows = get_history(c) or []
+        histories[c] = {str(d): float(v) for d, v in rows if d and v is not None}
+    missing = [c for c in codes if len(histories[c]) < 2]
+    if missing:
+        raise ValueError(msg("這些股票的歷史收盤不足：", "Insufficient history for: ")
+                         + ", ".join(missing))
+
+    common = None
+    for c in codes:
+        dates = set(histories[c])
+        common = dates if common is None else common.intersection(dates)
+    common = sorted(common or [])
+    usable = [d for d in common if d >= requested_date]
+    if len(usable) < 2:
+        earliest = max(min(histories[c]) for c in codes)
+        latest = min(max(histories[c]) for c in codes)
+        raise ValueError(msg("買入日超出可比較範圍（目前共同資料 %s～%s）",
+                             "Purchase date is outside the common range (%s to %s)")
+                         % (earliest, latest))
+    entry_date, as_of = usable[0], usable[-1]
+    if entry_date >= as_of:
+        raise ValueError(msg("買入日後尚無足夠收盤資料可比較",
+                             "Not enough closes after the purchase date"))
+
+    principal = float(buy_price) * float(shares)
+    # Nasdaq 歷史序列會回頭調整拆股前價格。使用者輸入的卻是當時實際成交價與原股數，
+    # 所以當「實際價 / 還原收盤」接近常見拆股倍數時，要同步放大目前股數。
+    adjusted_close = histories[anchor][entry_date]
+    observed = float(buy_price) / adjusted_close if adjusted_close > 0 else 1.0
+    split_factor = 1.0
+    split_factors = list(SPLIT_RATIOS) + [1.0 / float(r) for r in SPLIT_RATIOS]
+    for factor in split_factors:
+        if abs(observed / factor - 1) <= 0.18:
+            split_factor = float(factor)
+            break
+    current_shares = float(shares) * split_factor
+    a_last = histories[anchor][as_of]
+    a_value = current_shares * a_last
+    a_return = (a_value / principal - 1) * 100
+
+    def names(c):
+        u = info[c]
+        raw = u.get("name") or c
+        return raw, zh_company(c, raw)
+
+    name, name_zh = names(anchor)
+    rows = [{
+        "role": "A", "code": anchor, "name": name, "name_zh": name_zh,
+        "entry_price": round(float(buy_price), 4), "shares": round(current_shares, 6),
+        "original_shares": round(float(shares), 6), "split_factor": split_factor,
+        "cash": 0.0, "last_price": round(a_last, 4), "last_date": as_of,
+        "current_value": round(a_value, 2), "return_pct": round(a_return, 4),
+        "difference_vs_a": 0.0,
+    }]
+    for i, c in enumerate(peers):
+        start, last = histories[c][entry_date], histories[c][as_of]
+        qty = math.floor(principal / start)
+        cash = principal - qty * start
+        value = qty * last + cash
+        name, name_zh = names(c)
+        rows.append({
+            "role": "BCD"[i], "code": c, "name": name, "name_zh": name_zh,
+            "entry_price": round(start, 4), "shares": int(qty),
+            "original_shares": int(qty), "split_factor": 1.0,
+            "cash": round(cash, 2), "last_price": round(last, 4), "last_date": as_of,
+            "current_value": round(value, 2),
+            "return_pct": round((value / principal - 1) * 100, 4),
+            "difference_vs_a": round(value - a_value, 2),
+        })
+    return {"requested_date": requested_date, "entry_date": entry_date, "as_of": as_of,
+            "currency": "USD", "principal": round(principal, 2), "rows": rows,
+            "price_return_only": True, "whole_share_peers": True}
+
+
+@app.route("/api/comparison", methods=["POST"])
+def api_comparison():
+    if not _valid_app_token(request.headers.get("X-App-Token")):
+        return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
+    p = request.get_json(silent=True) or {}
+    lang = "en" if p.get("lang") == "en" else "zh"
+    msg = (lambda zh, en: en if lang == "en" else zh)
+    anchor = str(p.get("anchor") or "").strip().upper()
+    peers = [str(x).strip().upper() for x in (p.get("peers") or []) if str(x).strip()]
+    peers = list(dict.fromkeys(peers))
+    try:
+        buy_price, shares = float(p.get("buy_price")), float(p.get("shares"))
+        requested = datetime.strptime(str(p.get("date") or ""), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return jsonify(error=msg("請輸入正確的買入日期、價格與股數",
+                                 "Enter a valid purchase date, price and share count")), 400
+    if not anchor or not peers:
+        return jsonify(error=msg("請選擇 A 股票與至少一檔比較股票",
+                                 "Choose stock A and at least one comparison stock")), 400
+    if len(peers) > 3 or anchor in peers:
+        return jsonify(error=msg("B／C／D 最多 3 檔，且不可與 A 重複",
+                                 "B/C/D allow up to 3 unique stocks and cannot repeat A")), 400
+    if buy_price <= 0 or shares <= 0:
+        return jsonify(error=msg("買入價與股數必須大於 0",
+                                 "Purchase price and shares must be greater than zero")), 400
+    if requested > _utcnow().date():
+        return jsonify(error=msg("買入日期不能晚於今天", "Purchase date cannot be in the future")), 400
+    try:
+        return jsonify(_same_period_comparison(anchor, peers, requested.isoformat(),
+                                               buy_price, shares, lang))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    except Exception as e:
+        return jsonify(error=msg("同期比較計算失敗：", "Comparison failed: ") + str(e)[:80]), 500
 
 
 def _send_push(subscription, title, body):

@@ -3471,6 +3471,10 @@ __SEO_HEAD__
   .eps-half-grid { display:grid; grid-template-columns:repeat(2,minmax(88px,1fr)); gap:5px; margin-top:6px; min-width:190px; }
   .eps-half-grid span { display:flex; justify-content:space-between; gap:8px; padding:5px 7px; border-radius:7px; background:var(--milk); color:var(--mocha); font-size:11.5px; }
   .eps-half-grid b { color:var(--espresso); font-family:var(--font-num); }
+  /* 公司欄原本會裁切溢出內容；半年度面板改為撐開表格，外層可橫向捲動。 */
+  .res-wide td:has(.eps-half) { max-width:none; overflow:visible; text-overflow:clip; }
+  .res-wide .eps-half-grid { width:270px; min-width:270px; }
+  .res-cards .eps-half-grid { width:100%; min-width:0; }
   /* 推播：股票搜尋選擇器 */
   .stockpick { position:relative; }
   .stockpick input { width:100%; padding:11px; font-size:15px; border:1.5px solid var(--grounds);
@@ -3761,6 +3765,7 @@ __SEO_HEAD__
   /* 公司名稱欄：限寬並在過長時省略，避免撐爆表格；title 屬性可看全名 */
   td.coname { max-width:180px; overflow:hidden; text-overflow:ellipsis;
               white-space:nowrap; font-family:var(--font-body); }
+  td.coname:has(.eps-half) { max-width:none; overflow:visible; text-overflow:clip; }
   td.sector { max-width:120px; overflow:hidden; text-overflow:ellipsis;
               white-space:nowrap; font-family:var(--font-body); }
   @media (max-width:640px){

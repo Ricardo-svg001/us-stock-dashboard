@@ -737,7 +737,7 @@ def get_fundamentals(symbol, max_age_hours=24):
     用 EPS 欄括號裡的日期判斷哪一季最新（不同公司會計年度起訖不同，
     不能假設順序）。尚未公布的季度 value2 是空的，會自動跳過。
     """
-    key = "fund_%s.json" % symbol.upper()
+    key = "fund_v2_%s.json" % symbol.upper()  # v2: 包含近兩年 H1／H2 EPS
     cached = _load_cache(key, max_age_hours)
     if cached is not None:
         return cached
@@ -748,12 +748,12 @@ def get_fundamentals(symbol, max_age_hours=24):
 
 def _get_fundamentals_now(symbol, key):
     out = {"eps_yoy": None, "rev_yoy": None, "period": None,
-           "eps": None, "rev": None}
+           "eps": None, "rev": None, "eps_halves": []}
     try:
         j = _get(FUND_REV.format(sym=symbol.upper()), timeout=25, tries=2).json()
         rows = (((j or {}).get("data") or {}).get("revenueTable") or {}).get("rows") or []
 
-        quarters, cur = [], None
+        quarters, cur, eps_points = [], None, []
         for r in rows:
             label = str(r.get("value1") or "").strip()
             base = label.replace("(FYE)", "").strip()
@@ -766,6 +766,10 @@ def _get_fundamentals_now(symbol, key):
             elif cur is not None and label == "EPS":
                 cur["eps"], cur["date"] = _paren_date(r.get("value2"))
                 cur["eps_prev"], _ = _paren_date(r.get("value3"))
+                for col in ("value2", "value3", "value4"):
+                    amount, report_date = _paren_date(r.get(col))
+                    if amount is not None and report_date:
+                        eps_points.append((report_date, amount))
 
         # 挑「已公布且有去年同季可比」的最新一季
         usable = [q for q in quarters if q.get("date")
@@ -777,6 +781,21 @@ def _get_fundamentals_now(symbol, key):
             out["rev"] = q.get("rev")
             out["eps_yoy"] = _yoy(q.get("eps"), q.get("eps_prev"))
             out["rev_yoy"] = _yoy(q.get("rev"), q.get("rev_prev"))
+
+        # 依實際財報日期整理自然年度 H1／H2；每個半年需有兩季才顯示。
+        grouped = {}
+        for report_date, amount in set(eps_points):
+            year, month = int(report_date[:4]), int(report_date[5:7])
+            half = 1 if month <= 6 else 2
+            grouped.setdefault((year, half), []).append(amount)
+        halves = []
+        for (year, half), amounts in sorted(grouped.items(), reverse=True):
+            if len(amounts) >= 2:
+                halves.append({"label": "%d H%d" % (year, half),
+                               "value": round(sum(amounts), 2)})
+            if len(halves) >= 4:
+                break
+        out["eps_halves"] = halves
     except Exception:
         pass
 
@@ -1597,6 +1616,7 @@ def screen_watchlist(universe_n=150, ma=50, direction="above", days=1,
             "days": days,
             "mktcap": m.get("mktcap"),
             "eps_yoy": (fund.get(sym) or {}).get("eps_yoy"),
+            "eps_halves": (fund.get(sym) or {}).get("eps_halves", []),
             "rev_yoy": (fund.get(sym) or {}).get("rev_yoy"),
             "period": (fund.get(sym) or {}).get("period"),
         })
@@ -1672,6 +1692,7 @@ def screen_pullback(universe_n=150, ma=50, band=3.0, align="strict_bull",
             "days": 1,
             "mktcap": u.get("mktcap"),
             "eps_yoy": (fund.get(sym) or {}).get("eps_yoy"),
+            "eps_halves": (fund.get(sym) or {}).get("eps_halves", []),
             "rev_yoy": (fund.get(sym) or {}).get("rev_yoy"),
             "period": (fund.get(sym) or {}).get("period"),
         })
@@ -2040,33 +2061,70 @@ def get_growth():
 
 
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
-MACRO_CACHE_FILE = "us_rate_inflation_v2.json"   # v2: 新增近五年累積 CPI
+MACRO_CACHE_FILE = "us_rate_inflation_v3.json"   # v3: 新增 30Y、三年曲線與判讀
 # ⚠️ 新增欄位一定要換快取檔名。沿用舊檔會讓新那一格永遠讀到沒有它的舊快取，
 #    畫面上少一列、卻不會報錯 —— 這是 5.5「看起來正常才最危險」的同一類。
 
 
 def _treasury_yields():
-    """美國財政部當年度 Daily Treasury Par Yield Curve Rates。"""
+    """美國財政部近三年 Daily Treasury Par Yield Curve Rates。"""
     import xml.etree.ElementTree as ET
-    year = datetime.utcnow().year
-    r = requests.get(
-        "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml",
-        params={"data": "daily_treasury_yield_curve", "field_tdr_date_value": year},
-        headers=HEADERS, timeout=30,
-    )
-    r.raise_for_status()
     rows = []
-    root = ET.fromstring(r.content)
-    for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
-        values = {node.tag.split("}")[-1]: (node.text or "").strip()
-                  for node in entry.iter()}
-        try:
-            rows.append((values["NEW_DATE"][:10], float(values["BC_2YEAR"]),
-                         float(values["BC_10YEAR"])))
-        except (KeyError, TypeError, ValueError):
-            continue
+    year = datetime.utcnow().year
+    for target_year in range(year - 3, year + 1):
+        r = requests.get(
+            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml",
+            params={"data": "daily_treasury_yield_curve", "field_tdr_date_value": target_year},
+            headers=HEADERS, timeout=30,
+        )
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
+            values = {node.tag.split("}")[-1]: (node.text or "").strip()
+                      for node in entry.iter()}
+            try:
+                rows.append((values["NEW_DATE"][:10], float(values["BC_2YEAR"]),
+                             float(values["BC_10YEAR"]), float(values["BC_30YEAR"])))
+            except (KeyError, TypeError, ValueError):
+                continue
     rows.sort()
-    return rows
+    cutoff = (datetime.utcnow() - timedelta(days=365 * 3 + 10)).strftime("%Y-%m-%d")
+    return [row for row in rows if row[0] >= cutoff]
+
+
+def _yield_analysis(treasury):
+    history = [{"date": r[0], "us2y": r[1], "us10y": r[2], "us30y": r[3]} for r in treasury]
+    if len(history) < 21:
+        return history, []
+    findings = []
+    labels = {"us2y": "2Y", "us10y": "10Y", "us30y": "30Y"}
+    for key in labels:
+        values = [r[key] for r in history]
+        recent, previous = values[-1] - values[-11], values[-11] - values[-21]
+        if recent * previous < 0 and abs(recent - previous) >= .12:
+            findings.append({"level": "watch", "text": "%s 趨勢反轉：近 10 個交易日轉為%s。" % (labels[key], "上行" if recent > 0 else "下行")})
+        if key == "us30y" and len(values) >= 6 and abs(values[-1] - values[-6]) >= .20:
+            move = (values[-1] - values[-6]) * 100
+            findings.append({"level": "alert", "text": "30Y 五個交易日%s %.0f bp，長端利率變動快速。" % ("上升" if move > 0 else "下降", abs(move))})
+    for key in ("us10y", "us30y"):
+        values = sorted(r[key] for r in history[:-1])
+        lo, hi = values[max(0, int(len(values)*.2)-1)], values[min(len(values)-1, int(len(values)*.8))]
+        current = history[-1][key]
+        if current > hi:
+            findings.append({"level": "alert", "text": "%s %.2f%% 突破近三年關鍵高檔區 %.2f%%。" % (labels[key], current, hi)})
+        elif current < lo:
+            findings.append({"level": "alert", "text": "%s %.2f%% 跌破近三年關鍵低檔區 %.2f%%。" % (labels[key], current, lo)})
+    for name, long_key, short_key in (("10Y－2Y", "us10y", "us2y"), ("30Y－10Y", "us30y", "us10y")):
+        current = (history[-1][long_key] - history[-1][short_key]) * 100
+        old = (history[-21][long_key] - history[-21][short_key]) * 100
+        change = current - old
+        if current * old < 0:
+            findings.append({"level": "alert", "text": "%s 利差跨越零軸：曲線由%s轉為%s。" % (name, "正斜率" if old > 0 else "倒掛", "正斜率" if current > 0 else "倒掛")})
+        elif abs(change) >= 25:
+            findings.append({"level": "watch", "text": "%s 近 20 個交易日%s %.0f bp，曲線明顯%s。" % (name, "擴大" if change > 0 else "縮小", abs(change), "陡峭化" if change > 0 else "平坦化／加深倒掛")})
+    if not findings:
+        findings.append({"level": "normal", "text": "目前未出現設定門檻內的重大反轉、區間突破或曲線急變。"})
+    return history, findings[:6]
 
 
 def _bls_cpi_series():
@@ -2129,7 +2187,7 @@ def _us_cpi_for_years(years):
 
 
 def _us_rate_inflation_data():
-    """美國 2Y／10Y 公債與今年、近十年累積 CPI 漲幅。"""
+    """美國 2Y／10Y／30Y 公債、三年走勢與累積 CPI。"""
     cached = _load_cache(MACRO_CACHE_FILE, 6)
     if cached is not None:
         return cached
@@ -2149,10 +2207,11 @@ def _us_rate_inflation_data():
 
     items = []
     if treasury:
-        date, value2, value10 = treasury[-1]
+        date, value2, value10, value30 = treasury[-1]
         previous = treasury[-2] if len(treasury) > 1 else None
         for key, label, value, col in (("us2y", "美國 2 年期公債", value2, 1),
-                                       ("us10y", "美國 10 年期公債", value10, 2)):
+                                       ("us10y", "美國 10 年期公債", value10, 2),
+                                       ("us30y", "美國 30 年期公債", value30, 3)):
             item = {"key": key, "label": label, "unit": "%",
                     "value": round(value, 2), "date": date}
             if previous:
@@ -2183,7 +2242,9 @@ def _us_rate_inflation_data():
         cumulative("cpi_5y", "近五年累積 CPI", five_year)
         cumulative("cpi_10y", "近十年累積 CPI", ten_year)
 
-    data = {"items": items, "updated": now.strftime("%Y-%m-%d")}
+    history, conclusions = _yield_analysis(treasury)
+    data = {"items": items, "yield_history": history, "yield_conclusions": conclusions,
+            "updated": now.strftime("%Y-%m-%d")}
     if items:
         _save_cache(MACRO_CACHE_FILE, data)
     return data
@@ -2934,13 +2995,16 @@ def prefetch(universe_n=300, force=False):
 #   17:00 用單一檔股票探測今天的收盤有沒有出來（1 次請求，很便宜）
 #   → 有：立刻跑全量 300 檔
 #   → 沒有：等 UPDATE_RETRY_MINUTES 再探測一次，最多 UPDATE_MAX_PROBES 次
-#   → 都沒有（例如國定假日）：最後仍跑一次全量，然後結束
+#   → 19:00 仍沒有：20:00、21:00 再低頻補探測，避免來源晚補時慢一整天
+#   → 都沒有（例如國定假日）：最後仍跑一次全量，但狀態標示「來源延遲」
 #
 # 📌 所以提前的風險被吸收掉了：來源準備好就早一小時拿到，
 #    來源還沒好也不會像以前那樣「錯過就等明天」。
 UPDATE_HOUR_ET = int(os.environ.get("UPDATE_HOUR_ET", "17"))
 UPDATE_RETRY_MINUTES = int(os.environ.get("UPDATE_RETRY_MINUTES", "20"))
 UPDATE_MAX_PROBES = int(os.environ.get("UPDATE_MAX_PROBES", "7"))   # 17:00～19:00
+UPDATE_LATE_PROBES = int(os.environ.get("UPDATE_LATE_PROBES", "2"))
+UPDATE_LATE_RETRY_MINUTES = int(os.environ.get("UPDATE_LATE_RETRY_MINUTES", "60"))
 PROBE_SYMBOL = os.environ.get("PROBE_SYMBOL", "AAPL")
 # ⚠️ 行程啟動時刻。診斷要靠它判斷「是不是每次看都剛重啟」——
 #    gunicorn 的 --timeout 太短時 worker 會被反覆砍掉，PID 每次都不同。
@@ -3149,24 +3213,42 @@ def _daily_updater_inner():
             #    否則「探測壞掉」會變成「整天不更新」，而且沒有任何錯誤。
             target = _target_session_et()
             probes, got = 0, None
+            total_probes = UPDATE_MAX_PROBES + UPDATE_LATE_PROBES
             while target and probes < UPDATE_MAX_PROBES:
                 got = _probe_last_session()
                 probes += 1
                 SCHED_STATE["probe"] = ("第 %d/%d 次：來源最新 %s（目標 %s）"
-                                        % (probes, UPDATE_MAX_PROBES, got or "—", target))
+                                        % (probes, total_probes, got or "—", target))
                 _beat()
                 if got and got >= target:
                     break
                 if probes >= UPDATE_MAX_PROBES:
                     break
                 _sleep_beats(UPDATE_RETRY_MINUTES * 60)
+            # 17:00～19:00 ET 仍缺資料時，不要直接放棄到隔天；改在 20:00、21:00
+            # 各低頻探測一次。Nasdaq 偶爾在晚間才補日 K，這兩次就是補那個缺口。
+            late = 0
+            while (target and not (got and got >= target)
+                   and late < UPDATE_LATE_PROBES):
+                _sleep_beats(UPDATE_LATE_RETRY_MINUTES * 60)
+                got = _probe_last_session()
+                probes += 1
+                late += 1
+                SCHED_STATE["probe"] = ("延後探測第 %d/%d 次：來源最新 %s（目標 %s）"
+                                        % (probes, total_probes, got or "—", target))
+                _beat()
             if target:
                 SCHED_STATE["probe"] += (
                     "　✅ 探到當日收盤，開始全量更新" if (got and got >= target)
-                    else "　⚠️ 探測次數用完仍未見當日收盤（可能休市），仍跑一次全量")
+                    else "　⚠️ 延後探測仍未見當日收盤（可能休市或來源延遲），仍跑一次全量")
             try:
                 prefetch(300, force=True)   # ⚠️ 收盤後必須繞過 TTL，見 load_histories
-                SCHED_STATE["last_result"] = "成功"
+                # 「程式跑完」不等於「資料追到目標日」。以前這裡無條件寫成功，
+                # 導致來源只到前一日卻顯示綠燈，使用者只能從頁面日期猜出有問題。
+                SCHED_STATE["last_result"] = (
+                    "成功（無交易日目標）" if not target else
+                    "成功（資料到 %s）" % target if got and got >= target else
+                    "來源延遲（最新 %s，目標 %s）" % (got or "—", target))
                 # 價格快取已更新完才檢查提醒，避免用舊收盤價發通知。
                 # 推播失敗不反過來把整個每日預抓標成失敗。
                 try:
@@ -3378,6 +3460,17 @@ __SEO_HEAD__
   .mstat .mv small { font-size:12px; color:var(--mocha); font-weight:400; margin-left:3px; }
   .mstat .msub { font-family:var(--font-num); font-size:11.5px; color:var(--mocha); margin-top:5px; }
   .mstat .mnote { font-family:var(--font-head); font-weight:700; font-size:14px; margin-top:3px; }
+  .yield-chart { width:100%; height:auto; display:block; overflow:visible; }
+  .yield-legend { display:flex; gap:16px; flex-wrap:wrap; margin:8px 0 2px; font-size:12px; color:var(--mocha); }
+  .yield-legend i { display:inline-block; width:18px; height:3px; margin-right:5px; vertical-align:middle; border-radius:2px; }
+  .yield-findings { margin:8px 0 0; padding-left:20px; }
+  .yield-findings li { color:#555; line-height:1.7; margin:5px 0; }
+  .yield-findings li.alert { color:#9b3f2d; font-weight:700; }
+  .eps-half { margin-top:6px; }
+  .eps-half summary { cursor:pointer; color:var(--caramel-2); font-size:11.5px; white-space:nowrap; }
+  .eps-half-grid { display:grid; grid-template-columns:repeat(2,minmax(88px,1fr)); gap:5px; margin-top:6px; min-width:190px; }
+  .eps-half-grid span { display:flex; justify-content:space-between; gap:8px; padding:5px 7px; border-radius:7px; background:var(--milk); color:var(--mocha); font-size:11.5px; }
+  .eps-half-grid b { color:var(--espresso); font-family:var(--font-num); }
   /* 推播：股票搜尋選擇器 */
   .stockpick { position:relative; }
   .stockpick input { width:100%; padding:11px; font-size:15px; border:1.5px solid var(--grounds);
@@ -4075,6 +4168,11 @@ __QUOTES_HTML__
     <label class="opt"><input type="radio" name="align" value="none"><span data-i18n="opt.none">不限</span></label>
   </div>
 
+  <div class="card"><h2><span class="stepno">06</span>H1／H2 財報 EPS</h2>
+    <label class="opt"><input type="checkbox" id="epsHalves1"><span>追加近兩年 H1／H2 EPS</span></label>
+    <div style="font-size:12px;color:var(--mocha);margin-top:7px;line-height:1.7">H1 是上半年兩季 EPS 合計，H2 是下半年兩季 EPS 合計；依實際財報截止月份歸類。勾選後，公司名稱下方會出現可展開區塊，不增加表格欄數。</div>
+  </div>
+
   <button class="gobtn" id="go1" data-i18n="btn.screen">開始篩選</button>
   <div class="status" id="status1"></div>
   <div id="result1"></div>
@@ -4128,6 +4226,11 @@ __QUOTES_HTML__
     <label class="opt"><input type="radio" name="align3" value="none"><span data-i18n="opt.none">不限</span></label>
   </div>
 
+  <div class="card"><h2><span class="stepno">04</span>H1／H2 財報 EPS</h2>
+    <label class="opt"><input type="checkbox" id="epsHalves3"><span>追加近兩年 H1／H2 EPS</span></label>
+    <div style="font-size:12px;color:var(--mocha);margin-top:7px;line-height:1.7">H1 是上半年兩季 EPS 合計，H2 是下半年兩季 EPS 合計；依實際財報截止月份歸類。勾選後以可展開區塊呈現，手機與桌面都不會多出四個擁擠欄位。</div>
+  </div>
+
   <button class="gobtn" id="go3" data-i18n="btn.screen">開始篩選</button>
   <div class="status" id="status3"></div>
   <div id="result3"></div>
@@ -4171,9 +4274,18 @@ __QUOTES_HTML__
   </div>
   <div id="macroBox"></div>
   <div class="card">
+    <h2>為什麼要關注公債利率？</h2>
+    <div class="artbody" style="border-top:0;padding-top:0;margin-top:0">
+      <p>公債殖利率是資金的機會成本，也是股票、房貸、公司融資與信用市場估值的共同底座。殖利率上升，未來現金流折回今天的價值通常下降；殖利率下降，金融條件通常較寬鬆，但也可能反映市場對景氣轉弱的擔心。</p>
+      <h3>2Y：市場看 Fed 接下來要怎麼做</h3><p>2 年期對未來幾次升降息與通膨預期特別敏感。快速上升常代表市場把利率「更高、更久」重新計價；快速下降則常代表降息預期升溫或經濟風險增加。</p>
+      <h3>10Y：全球金融市場的重要定價基準</h3><p>10 年期是全球重要的長期折現率。股票估值、公司融資、房貸與信用市場都會受到它影響，因此突破或跌破長期區間往往不只是債市事件。</p>
+      <h3>30Y：美國長期信用、財政與無風險資產回報</h3><p>30 年期反映長期通膨、財政赤字、債券供給與期限風險。30Y 突然上升，可能表示市場要求更高的長期補償；快速下降，則可能反映避險需求或長期成長預期轉弱。應和 2Y、10Y 及整條殖利率曲線一起判讀。</p>
+    </div>
+  </div>
+  <div class="card">
     <h2 data-i18n="pmac.src">資料來源與算法</h2>
     <div style="font-size:13px;color:#555;line-height:1.85" data-i18n-html="pmac.source">
-      美國 2 年期與 10 年期使用美國財政部 Daily Treasury Par Yield Curve Rates；CPI 使用美國勞工統計局經季節調整的全城市消費者物價指數 CUSR0000SA0。<br><br>
+      美國 2 年期、10 年期與 30 年期使用美國財政部 Daily Treasury Par Yield Curve Rates；三年圖關鍵區間以期間內第 20／80 百分位估算。CPI 使用美國勞工統計局經季節調整的全城市消費者物價指數 CUSR0000SA0。<br><br>
       本年度累積 CPI＝最新指數 ÷ 去年 12 月指數 − 1；近五年／近十年累積 CPI＝最新指數 ÷ 五年／十年前同月指數 − 1。皆為期間累積漲幅，不是年化值。<br><br>
       Source: U.S. Department of the Treasury and U.S. Bureau of Labor Statistics
       （<a href="https://home.treasury.gov/resource-center/data-chart-center/interest-rates" target="_blank" rel="noopener" style="color:var(--primary)">U.S. Treasury</a>；
@@ -4933,7 +5045,8 @@ if ($("#go1")) $("#go1").onclick = () => {
     direction: val("direction"),
     days: parseInt(val("days"), 10),
     match: val("mode") || "any",
-    align: val("align")
+    align: val("align"),
+    eps_halves: !!($("#epsHalves1") && $("#epsHalves1").checked)
   };
   $("#go1").disabled = true;
   $("#result1").innerHTML = "";
@@ -4973,6 +5086,7 @@ function render(res){
   lastMeta = {as_of: res.as_of, ma_name_zh: res.ma_name_zh, ma_name: res.ma_name};
   const showAlign = val("align") === "none";
   const showQ = hasQuote(res.quote);
+  const showHalves = !!($("#epsHalves1") && $("#epsHalves1").checked);
   const per = lastRows.find(r => r.period);
   $("#status1").innerHTML = t("st.asof","資料日期") + " " + (res.as_of || "—")
     + (per ? "｜" + t("st.quarter","財報季") + " " + per.period : "")
@@ -5010,9 +5124,9 @@ function render(res){
      + "<th>" + t("th.eps","季EPS年增") + "</th><th>" + t("th.rev","季營收年增")
      + "</th><th>" + t("th.nh","創新高") + "</th>"
      + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
-     + "<th>" + t("th.hit","符合日期") + "</th></tr></thead><tbody id='tb1'>" + rowsHtml(lastRows, showAlign, showQ)
+     + "<th>" + t("th.hit","符合日期") + "</th></tr></thead><tbody id='tb1'>" + rowsHtml(lastRows, showAlign, showQ, showHalves)
      + "</tbody></table></div>";
-  h += "<div id='cd1'>" + cardsHtml(lastRows, showAlign, t("th.hit","符合日期"), showQ) + "</div>";
+  h += "<div id='cd1'>" + cardsHtml(lastRows, showAlign, t("th.hit","符合日期"), showQ, showHalves) + "</div>";
   $("#result1").innerHTML = h;
 }
 
@@ -5110,6 +5224,11 @@ function hasQuote(q){ return !!(q && q.ts); }
 /* 基本面欄位的顯示：抓不到就顯示「—」，不要留空白讓人以為壞掉 */
 function fmtYoY(v){ return (v == null) ? "—" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%"; }
 function yoyCls(v){ return (v == null) ? "" : (v >= 0 ? "pos" : "neg"); }
+function epsHalfPanel(s,show){
+  if(!show || !s.eps_halves || !s.eps_halves.length) return "";
+  const cells=s.eps_halves.slice(0,4).map(x=>`<span>${x.label}<b>${x.value==null?"—":Number(x.value).toFixed(2)}</b></span>`).join("");
+  return `<details class="eps-half"><summary>${LANG==="en"?"2-year H1 / H2 EPS":"近兩年 H1／H2 EPS"}</summary><div class="eps-half-grid">${cells}</div></details>`;
+}
 
 /* 符合日期：檢查多天時一併顯示「符合幾天」，否則看不出「部分符合」的差別 */
 function fmtHit(s){
@@ -5118,11 +5237,11 @@ function fmtHit(s){
   return d + " <small style='color:var(--mocha)'>(" + s.hit_days + "/" + s.days + ")</small>";
 }
 
-function rowsHtml(rows, showAlign, showQ){
+function rowsHtml(rows, showAlign, showQ, showHalves){
   return rows.map(s =>
     "<tr data-sector=\"" + sectorKey(s) + "\">"
     + "<td>" + s.rank + "</td><td><b>" + s.symbol + "</b></td>"
-    + "<td class='coname' title=\"" + s.name + "\">" + coName(s) + "</td>"
+    + "<td class='coname' title=\"" + s.name + "\">" + coName(s) + epsHalfPanel(s,showHalves) + "</td>"
     + "<td class='sector' title=\"" + s.sector + "\">" + coSector(s) + "</td>"
     + "<td>" + s.price.toFixed(2) + "</td>"
     + (showQ ? "<td>" + fmtLast(s) + "</td><td>" + fmtLastPct(s) + "</td>" : "")
@@ -5139,7 +5258,7 @@ function rowsHtml(rows, showAlign, showQ){
    改顯示 .res-cards。**所以每個輸出表格的地方都必須同時輸出卡片**，
    否則手機上會只剩狀態列、下面一片空白（狀態列還會顯示「符合 N 檔」，
    看起來像資料抓不到，其實是版面問題）。這個坑踩過，見變更紀錄。 */
-function cardsHtml(rows, showAlign, lastLabel, showQ){
+function cardsHtml(rows, showAlign, lastLabel, showQ, showHalves){
   return "<div class='res-cards'>" + rows.map((s, i) =>
     "<details class='scard' data-i='" + i + "'>"
     /* 卡片標題列優先顯示現價（手機上只看得到這一行，要放最新的那個數字） */
@@ -5157,6 +5276,7 @@ function cardsHtml(rows, showAlign, lastLabel, showQ){
       + yoyCls(s.eps_yoy) + "'>" + fmtYoY(s.eps_yoy) + "</b></div>"
     + "<div class='kv'><span>" + t("th.rev","季營收年增") + "</span><b class='"
       + yoyCls(s.rev_yoy) + "'>" + fmtYoY(s.rev_yoy) + "</b></div>"
+    + epsHalfPanel(s,showHalves)
     + "<div class='kv'><span>" + t("th.nh","創新高") + "</span><b>" + fmtNH(s.new_high) + "</b></div>"
     + (showAlign ? "<div class='kv'><span>" + t("th.align","均線排列")
                  + "</span><b>" + alignName(s.align) + "</b></div>" : "")
@@ -5172,7 +5292,8 @@ if ($("#go3")) $("#go3").onclick = () => {
   const params = {
     universe_n: parseInt(val("universe3"), 10),
     ma: parseInt(val("ma3"), 10),
-    align: val("align3")
+    align: val("align3"),
+    eps_halves: !!($("#epsHalves3") && $("#epsHalves3").checked)
   };
   $("#go3").disabled = true;
   $("#result3").innerHTML = "";
@@ -5209,6 +5330,7 @@ function render3(res){
                ma_name_zh: res.ma_name_zh, ma_name: res.ma_name};
   const showAlign = val("align3") === "none";
   const showQ = hasQuote(res.quote);
+  const showHalves3 = !!($("#epsHalves3") && $("#epsHalves3").checked);
   const per3 = lastRows3.find(r => r.period);
   $("#status3").innerHTML = t("st.asof","資料日期") + " " + (res.as_of || "—")
     + (per3 ? "｜" + t("st.quarter","財報季") + " " + per3.period : "")
@@ -5248,8 +5370,8 @@ function render3(res){
      + "</th><th>" + t("th.nh","創新高") + "</th>"
      + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
      + "<th>" + t("th.asof","資料日期") + "</th></tr></thead><tbody id='tb3'>"
-     + rowsHtml(lastRows3, showAlign, showQ) + "</tbody></table></div>";
-  h += "<div id='cd3'>" + cardsHtml(lastRows3, showAlign, t("th.asof","資料日期"), showQ) + "</div>";
+     + rowsHtml(lastRows3, showAlign, showQ, showHalves3) + "</tbody></table></div>";
+  h += "<div id='cd3'>" + cardsHtml(lastRows3, showAlign, t("th.asof","資料日期"), showQ, showHalves3) + "</div>";
   $("#result3").innerHTML = h;
 }
 
@@ -6476,7 +6598,7 @@ document.addEventListener("click",e=>{
 
 /* ---- 美國利率與購買力 ---- */
 const MACRO_EN = {
-  us2y:"US 2Y Treasury", us10y:"US 10Y Treasury",
+  us2y:"US 2Y Treasury", us10y:"US 10Y Treasury", us30y:"US 30Y Treasury",
   "br.snapTitle":"Today's Market Breadth",
   "br.snapIntro":"An index can be held up by a few heavyweights. This shows how many individual stocks are actually in trend — when the index and breadth diverge, breadth usually tells the truth first.",
   "br.above":"Above",
@@ -6499,6 +6621,34 @@ function macroTile(it){
   }
   return `<div class="mstat"><div class="ml">${name}</div><div class="mv">${it.value}${unit}</div><div class="msub">${sub}</div></div>`;
 }
+function yieldChart(rows){
+  if (!rows || rows.length < 2) return "";
+  const W=900,H=330,L=52,R=18,T=18,B=38,keys=["us2y","us10y","us30y"];
+  const colors={us2y:"#c87533",us10y:"#3f718c",us30y:"#7a5b9e"};
+  const vals=rows.flatMap(r=>keys.map(k=>Number(r[k])).filter(Number.isFinite));
+  let min=Math.floor((Math.min(...vals)-.15)*2)/2,max=Math.ceil((Math.max(...vals)+.15)*2)/2;if(max<=min)max=min+1;
+  const x=i=>L+i*(W-L-R)/(rows.length-1),y=v=>T+(max-v)*(H-T-B)/(max-min);
+  let grid="";for(let i=0;i<=4;i++){const v=min+(max-min)*i/4,yy=y(v);grid+=`<line x1="${L}" y1="${yy}" x2="${W-R}" y2="${yy}" stroke="var(--grounds)"/><text x="${L-8}" y="${yy+4}" text-anchor="end" fill="var(--mocha)" font-size="11">${v.toFixed(1)}%</text>`;}
+  const paths=keys.map(k=>{let d="";rows.forEach((r,i)=>{if(Number.isFinite(Number(r[k])))d+=(d?"L":"M")+x(i).toFixed(1)+" "+y(Number(r[k])).toFixed(1)+" ";});return `<path d="${d}" fill="none" stroke="${colors[k]}" stroke-width="2.2"/>`;}).join("");
+  const ticks=[0,Math.floor((rows.length-1)/2),rows.length-1].map(i=>`<text x="${x(i)}" y="${H-10}" text-anchor="middle" fill="var(--mocha)" font-size="11">${rows[i].date.slice(0,7)}</text>`).join("");
+  return `<div class="card"><h2>${LANG==="en"?"US Treasury yields — 3 years":"美債 2Y／10Y／30Y 三年走勢"}</h2><div class="yield-legend"><span><i style="background:${colors.us2y}"></i>2Y</span><span><i style="background:${colors.us10y}"></i>10Y</span><span><i style="background:${colors.us30y}"></i>30Y</span></div><svg class="yield-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="US Treasury yield chart" data-min="${min}" data-max="${max}">${grid}${paths}${ticks}<g class="yield-hover" visibility="hidden" pointer-events="none"><line class="yield-cross" y1="${T}" y2="${H-B}" stroke="var(--espresso)" stroke-width="1" stroke-dasharray="4 3" opacity=".55"/><circle data-key="us2y" r="4" fill="${colors.us2y}" stroke="white" stroke-width="2"/><circle data-key="us10y" r="4" fill="${colors.us10y}" stroke="white" stroke-width="2"/><circle data-key="us30y" r="4" fill="${colors.us30y}" stroke="white" stroke-width="2"/><g class="yield-tip"><rect width="164" height="78" rx="7" fill="var(--espresso)" opacity=".94"/><text x="10" y="18" fill="white" font-size="11"></text><text data-key="us2y" x="10" y="36" fill="white" font-size="11"></text><text data-key="us10y" x="10" y="53" fill="white" font-size="11"></text><text data-key="us30y" x="10" y="70" fill="white" font-size="11"></text></g></g><rect class="yield-hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent" style="cursor:crosshair;touch-action:none"/></svg><div class="status">${LANG==="en"?"Hover or drag to inspect daily yields.":"將滑鼠移到圖上，或用手指拖曳，可查看每日利率。"}</div></div>`;
+}
+function setupYieldHover(box,rows){
+  const svg=box.querySelector(".yield-chart");if(!svg||!rows||rows.length<2)return;
+  const W=900,H=330,L=52,R=18,T=18,B=38,min=Number(svg.dataset.min),max=Number(svg.dataset.max);
+  const hover=svg.querySelector(".yield-hover"),cross=svg.querySelector(".yield-cross"),tip=svg.querySelector(".yield-tip");
+  const x=i=>L+i*(W-L-R)/(rows.length-1),y=v=>T+(max-v)*(H-T-B)/(max-min);
+  function show(ev){
+    const rect=svg.getBoundingClientRect(),px=(ev.clientX-rect.left)*W/rect.width;
+    const i=Math.max(0,Math.min(rows.length-1,Math.round((px-L)*(rows.length-1)/(W-L-R)))),row=rows[i],xx=x(i);
+    hover.setAttribute("visibility","visible");cross.setAttribute("x1",xx);cross.setAttribute("x2",xx);
+    ["us2y","us10y","us30y"].forEach(k=>{const c=hover.querySelector(`circle[data-key="${k}"]`);c.setAttribute("cx",xx);c.setAttribute("cy",y(Number(row[k])));hover.querySelector(`text[data-key="${k}"]`).textContent=`${k.slice(2).toUpperCase()}: ${Number(row[k]).toFixed(2)}%`;});
+    hover.querySelector("text:not([data-key])").textContent=row.date;
+    tip.setAttribute("transform",`translate(${xx>W-190?xx-174:xx+10} ${T+8})`);
+  }
+  svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);
+  svg.addEventListener("pointerleave",()=>hover.setAttribute("visibility","hidden"));
+}
 async function loadMacro(){
   const box = $("#macroBox");
   if (!box) return;
@@ -6508,7 +6658,7 @@ async function loadMacro(){
     const byKey = {};
     (data.items || []).forEach(it => byKey[it.key] = it);
     const groups = [
-      [t("pmac.bonds", "美國公債殖利率"), ["us2y", "us10y"]],
+      [t("pmac.bonds", "美國公債殖利率"), ["us2y", "us10y", "us30y"]],
       [t("pmac.cpi", "累積物價漲幅"), ["cpi_ytd", "cpi_5y", "cpi_10y"]]
     ];
     let html = "";
@@ -6516,9 +6666,14 @@ async function loadMacro(){
       const tiles = group[1].filter(k => byKey[k]).map(k => macroTile(byKey[k])).join("");
       if (tiles) html += `<div class="card"><h2>${group[0]}</h2><div class="macro-grid">${tiles}</div></div>`;
     });
+    html += yieldChart(data.yield_history);
+    if (data.yield_conclusions && data.yield_conclusions.length){
+      html += `<div class="card"><h2>${LANG==="en"?"Yield curve conclusions":"殖利率觀察結論"}</h2><ul class="yield-findings">${data.yield_conclusions.map(c=>`<li class="${c.level||""}">${c.text}</li>`).join("")}</ul><div class="status">${LANG==="en"?"Rules: 10/20-day reversals, 5-day 30Y moves, 3-year percentiles and curve spreads.":"規則：10／20 日趨勢反轉、30Y 五日急變、三年第 20／80 百分位與曲線利差。"}</div></div>`;
+    }
     if (!html) html = `<div class="status">${t("pmac.none", "暫時無法取得資料，請稍後再試。")}</div>`;
     else html += `<div class="status">${LANG === "en" ? "Checked" : "資料檢查日"}：${data.updated || "—"}</div>`;
     box.innerHTML = html;
+    setupYieldHover(box,data.yield_history);
   } catch(e){
     box.innerHTML = `<div class="status">${t("pmac.none", "暫時無法取得資料，請稍後再試。")}</div>`;
   }
@@ -7143,7 +7298,7 @@ def _update_note_html():
 
     ⚠️⚠️ **要誠實地講成一個區間，不是一個時間點。**
        排程是「17:00 ET 開始探測，探到當日收盤才跑全量」，
-       所以完成時間落在 17:00～19:00 ET 之間，取決於來源什麼時候備妥。
+       一般完成時間落在 17:00～19:00 ET；來源延遲時會在 20:00、21:00 再補抓。
        寫死一個「05:00 更新」看起來精準，但**那個精準是假的** ——
        使用者 05:05 來看發現沒更新，只會覺得網站壞了。
 
@@ -7156,7 +7311,8 @@ def _update_note_html():
         return ""
     tw_start = nxt + timedelta(hours=8)                      # UTC → 台北
     tw_end = tw_start + timedelta(
-        minutes=(UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES)
+        minutes=(UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES
+                + UPDATE_LATE_PROBES * UPDATE_LATE_RETRY_MINUTES)
     as_of = _home_screen_target_date() or ""
     zh = ("資料日期 <b>%s</b>　·　下次更新 <b>%s %s–%s</b>（台灣時間）"
           % (as_of.replace("-", "/") or "—",
@@ -7165,7 +7321,7 @@ def _update_note_html():
     en = ("Data as of <b>%s</b>　·　next update <b>%s %s–%s</b> Taipei time"
           % (as_of or "—", tw_start.strftime("%m/%d"),
              tw_start.strftime("%H:%M"), tw_end.strftime("%H:%M")))
-    tip_zh = "美股 16:00 收盤後，官方結算寫入才抓得到；來源備妥就更新，最晚不超過區間結束。"
+    tip_zh = "美股 16:00 收盤後，來源備妥就更新；若結算延遲，08:00、09:00 會再補抓。"
     tip_en = ("US markets close at 16:00 ET; the daily bar is only available after "
               "official settlement. We update as soon as the source is ready.")
     return ('<div class="updnote">'
@@ -8260,18 +8416,19 @@ def api_diag():
         w("  ⚠️ 骨幹錯誤     : %s" % SCHED_STATE["loop_error"])
     w("  開始嘗試時間     : 每個美東交易日 %02d:00 ET（收盤後 %d 小時）"
       % (UPDATE_HOUR_ET, UPDATE_HOUR_ET - 16))
-    w("  探測策略        : 每 %d 分鐘用 %s 探一次，最多 %d 次（到 %02d:%02d ET），"
-      "探到當日收盤才跑全量"
+    w("  探測策略        : 每 %d 分鐘用 %s 探一次，前段 %d 次（到 %02d:%02d ET）；"
+      "仍落後則每 %d 分鐘補探 %d 次"
       % (UPDATE_RETRY_MINUTES, PROBE_SYMBOL, UPDATE_MAX_PROBES,
          UPDATE_HOUR_ET + (UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES // 60,
-         (UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES % 60))
+         (UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES % 60,
+         UPDATE_LATE_RETRY_MINUTES, UPDATE_LATE_PROBES))
     w("  下次更新        : %s" % SCHED_STATE["next_run"])
     w("  上次探測        : %s" % SCHED_STATE.get("probe", "—"))
     if SCHED_STATE.get("probe_error"):
         w("  ⚠️ 探測錯誤     : %s" % SCHED_STATE["probe_error"])
     w("  上次更新        : %s" % SCHED_STATE["last_run"])
     w("  上次結果        : %s" % SCHED_STATE["last_result"])
-    # ⚠️ 「成功」只代表沒拋例外，不代表真的抓到新資料 ——
+    # 「成功」現在同時要求探測來源已到目標日；未到會明確顯示「來源延遲」。
     #    全部命中 TTL 快取也會回報成功。所以直接印資料本身有多新。
     try:
         _lat = {}

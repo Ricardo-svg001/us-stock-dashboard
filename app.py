@@ -8302,20 +8302,27 @@ def sitemap_xml():
         loc = SITE_URL + "/" + slug
         parts.append(url(loc, today, "0.9", "weekly", pair(loc)))
     arts = _load_articles()
+    en_dir = os.path.join(ARTICLES_DIR, "en")
+    # 英文版必須每篇都實際存在才建立整組 hreflang；半套翻譯不能送進 sitemap。
+    has_en = bool(arts) and os.path.isdir(en_dir) and all(
+        os.path.isfile(os.path.join(en_dir, a["id"] + ".md")) for a in arts)
     if arts:
         loc = SITE_URL + "/articles"
-        parts.append(url(loc, today, "0.8", "weekly", pair(loc)))
-        # ⚠️⚠️ 只有 `articles/en/` 真的存在時才列英文版本。
-        #    `_load_articles("en")` 在缺資料夾時會**退回中文**，直接拿它的長度判斷會誤判成
-        #    「有英文版」，然後 sitemap 送出一批指向 /en/article/... 但內容是中文的網址。
-        has_en = os.path.isdir(os.path.join(ARTICLES_DIR, "en"))
+        # 英文文章索引沿用 App 的參數網址；`/en/articles` 會 301 到這個正式網址。
+        eloc_list = SITE_URL + "/articles?lang=en"
+        list_alts = [("zh-Hant", loc), ("x-default", loc)]
+        if has_en:
+            list_alts.insert(1, ("en", eloc_list))
+        parts.append(url(loc, today, "0.8", "weekly", list_alts))
+        if has_en:
+            parts.append(url(eloc_list, today, "0.6", "weekly", list_alts))
         for a in arts:
             aloc = SITE_URL + "/article/" + quote(a["slug"])
             if has_en:
                 eloc = SITE_URL + "/en/article/" + quote(a["slug"])
                 alts = [("zh-Hant", aloc), ("en", eloc), ("x-default", aloc)]
                 parts.append(url(aloc, a.get("date") or today, "0.7", "monthly", alts))
-                parts.append(url(eloc, a.get("date") or today, "0.7", "monthly", alts))
+                parts.append(url(eloc, a.get("date") or today, "0.6", "monthly", alts))
             else:
                 parts.append(url(aloc, a.get("date") or today, "0.7", "monthly",
                                  [("zh-Hant", aloc), ("x-default", aloc)]))

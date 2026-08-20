@@ -8267,7 +8267,7 @@ def ads_txt():
 
 @app.route("/sitemap.xml")
 def sitemap_xml():
-    """動態產生 sitemap：首頁、可索引的功能頁、文章索引與每篇文章。
+    """動態產生 sitemap：首頁、可索引功能頁、文章與隱私權政策。
 
     ⚠️ `index: False` 的頁面不放進來 —— 送 noindex 又列進 sitemap 是自相矛盾的訊號。
     ⚠️ hreflang 必須**互相對應**（每個網址都列出全部語言版本，含自己），
@@ -8294,6 +8294,8 @@ def sitemap_xml():
              '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
              ' xmlns:xhtml="http://www.w3.org/1999/xhtml">']
     parts.append(url(SITE_URL + "/", today, "1.0", "daily", pair(SITE_URL + "/")))
+    # 隱私權政策為獨立公開頁；目前沒有真正的英文版，不列 hreflang 以免送出重複內容。
+    parts.append(url(SITE_URL + "/privacy", today, "0.3", "yearly"))
     for slug, cfg in PAGE_ROUTES.items():
         if not cfg["index"] or slug == "articles":
             continue

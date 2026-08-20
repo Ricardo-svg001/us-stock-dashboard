@@ -2061,7 +2061,8 @@ def get_growth():
 
 
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
-MACRO_CACHE_FILE = "us_rate_inflation_v3.json"   # v3: 新增 30Y、三年曲線與判讀
+MACRO_CACHE_FILE = "us_rate_inflation_v4.json"   # v4: 新增日債 2Y／10Y／30Y 三年曲線
+JGB_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
 # ⚠️ 新增欄位一定要換快取檔名。沿用舊檔會讓新那一格永遠讀到沒有它的舊快取，
 #    畫面上少一列、卻不會報錯 —— 這是 5.5「看起來正常才最危險」的同一類。
 
@@ -2090,6 +2091,24 @@ def _treasury_yields():
     rows.sort()
     cutoff = (datetime.utcnow() - timedelta(days=365 * 3 + 10)).strftime("%Y-%m-%d")
     return [row for row in rows if row[0] >= cutoff]
+
+
+def _jgb_yields():
+    """日本財務省近三年 constant-maturity JGB 2Y／10Y／30Y 日資料。"""
+    r = requests.get(JGB_CSV, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    reader = csv.DictReader(r.content.decode("utf-8-sig").splitlines()[1:])
+    cutoff = (datetime.utcnow() - timedelta(days=365 * 3 + 10)).strftime("%Y-%m-%d")
+    rows = []
+    for item in reader:
+        try:
+            date = datetime.strptime(item["Date"], "%Y/%m/%d").strftime("%Y-%m-%d")
+            row = (date, float(item["2Y"]), float(item["10Y"]), float(item["30Y"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if date >= cutoff:
+            rows.append(row)
+    return rows
 
 
 def _yield_analysis(treasury):
@@ -2187,19 +2206,24 @@ def _us_cpi_for_years(years):
 
 
 def _us_rate_inflation_data():
-    """美國 2Y／10Y／30Y 公債、三年走勢與累積 CPI。"""
+    """美日 2Y／10Y／30Y 公債、三年走勢與美國累積 CPI。"""
     cached = _load_cache(MACRO_CACHE_FILE, 6)
     if cached is not None:
         return cached
 
     now = datetime.utcnow()
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         treasury_future = ex.submit(_treasury_yields)
+        jgb_future = ex.submit(_jgb_yields)
         cpi_future = ex.submit(_cached_bls_cpi_series)
         try:
             treasury = treasury_future.result(timeout=40)
         except Exception:
             treasury = []
+        try:
+            jgb = jgb_future.result(timeout=40)
+        except Exception:
+            jgb = []
         try:
             cpi = cpi_future.result(timeout=60)
         except Exception:
@@ -2212,6 +2236,18 @@ def _us_rate_inflation_data():
         for key, label, value, col in (("us2y", "美國 2 年期公債", value2, 1),
                                        ("us10y", "美國 10 年期公債", value10, 2),
                                        ("us30y", "美國 30 年期公債", value30, 3)):
+            item = {"key": key, "label": label, "unit": "%",
+                    "value": round(value, 2), "date": date}
+            if previous:
+                item["chg"] = round(value - previous[col], 2)
+            items.append(item)
+
+    if jgb:
+        date, value2, value10, value30 = jgb[-1]
+        previous = jgb[-2] if len(jgb) > 1 else None
+        for key, label, value, col in (("jp2y", "日本 2 年期公債", value2, 1),
+                                       ("jp10y", "日本 10 年期公債", value10, 2),
+                                       ("jp30y", "日本 30 年期公債", value30, 3)):
             item = {"key": key, "label": label, "unit": "%",
                     "value": round(value, 2), "date": date}
             if previous:
@@ -2243,7 +2279,10 @@ def _us_rate_inflation_data():
         cumulative("cpi_10y", "近十年累積 CPI", ten_year)
 
     history, conclusions = _yield_analysis(treasury)
-    data = {"items": items, "yield_history": history, "yield_conclusions": conclusions,
+    jp_history = [{"date": r[0], "jp2y": r[1], "jp10y": r[2], "jp30y": r[3]}
+                  for r in jgb]
+    data = {"items": items, "yield_history": history, "jp_yield_history": jp_history,
+            "yield_conclusions": conclusions,
             "updated": now.strftime("%Y-%m-%d")}
     if items:
         _save_cache(MACRO_CACHE_FILE, data)
@@ -6614,6 +6653,7 @@ document.addEventListener("click",e=>{
 /* ---- 美國利率與購買力 ---- */
 const MACRO_EN = {
   us2y:"US 2Y Treasury", us10y:"US 10Y Treasury", us30y:"US 30Y Treasury",
+  jp2y:"Japan 2Y Government Bond", jp10y:"Japan 10Y Government Bond", jp30y:"Japan 30Y Government Bond",
   "br.snapTitle":"Today's Market Breadth",
   "br.snapIntro":"An index can be held up by a few heavyweights. This shows how many individual stocks are actually in trend — when the index and breadth diverge, breadth usually tells the truth first.",
   "br.above":"Above",
@@ -6636,30 +6676,32 @@ function macroTile(it){
   }
   return `<div class="mstat"><div class="ml">${name}</div><div class="mv">${it.value}${unit}</div><div class="msub">${sub}</div></div>`;
 }
-function yieldChart(rows){
+function yieldChart(rows,market="us"){
   if (!rows || rows.length < 2) return "";
-  const W=900,H=330,L=52,R=18,T=18,B=38,keys=["us2y","us10y","us30y"];
-  const colors={us2y:"#c87533",us10y:"#3f718c",us30y:"#7a5b9e"};
+  const W=900,H=330,L=52,R=18,T=18,B=38,keys=[market+"2y",market+"10y",market+"30y"];
+  const colors={[keys[0]]:"#c87533",[keys[1]]:"#3f718c",[keys[2]]:"#7a5b9e"};
   const vals=rows.flatMap(r=>keys.map(k=>Number(r[k])).filter(Number.isFinite));
   let min=Math.floor((Math.min(...vals)-.15)*2)/2,max=Math.ceil((Math.max(...vals)+.15)*2)/2;if(max<=min)max=min+1;
   const x=i=>L+i*(W-L-R)/(rows.length-1),y=v=>T+(max-v)*(H-T-B)/(max-min);
   let grid="";for(let i=0;i<=4;i++){const v=min+(max-min)*i/4,yy=y(v);grid+=`<line x1="${L}" y1="${yy}" x2="${W-R}" y2="${yy}" stroke="var(--grounds)"/><text x="${L-8}" y="${yy+4}" text-anchor="end" fill="var(--mocha)" font-size="11">${v.toFixed(1)}%</text>`;}
   const paths=keys.map(k=>{let d="";rows.forEach((r,i)=>{if(Number.isFinite(Number(r[k])))d+=(d?"L":"M")+x(i).toFixed(1)+" "+y(Number(r[k])).toFixed(1)+" ";});return `<path d="${d}" fill="none" stroke="${colors[k]}" stroke-width="2.2"/>`;}).join("");
   const ticks=[0,Math.floor((rows.length-1)/2),rows.length-1].map(i=>`<text x="${x(i)}" y="${H-10}" text-anchor="middle" fill="var(--mocha)" font-size="11">${rows[i].date.slice(0,7)}</text>`).join("");
-  return `<div class="card"><h2>${LANG==="en"?"US Treasury yields — 3 years":"美債 2Y／10Y／30Y 三年走勢"}</h2><div class="yield-legend"><span><i style="background:${colors.us2y}"></i>2Y</span><span><i style="background:${colors.us10y}"></i>10Y</span><span><i style="background:${colors.us30y}"></i>30Y</span></div><svg class="yield-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="US Treasury yield chart" data-min="${min}" data-max="${max}">${grid}${paths}${ticks}<g class="yield-hover" visibility="hidden" pointer-events="none"><line class="yield-cross" y1="${T}" y2="${H-B}" stroke="var(--espresso)" stroke-width="1" stroke-dasharray="4 3" opacity=".55"/><circle data-key="us2y" r="4" fill="${colors.us2y}" stroke="white" stroke-width="2"/><circle data-key="us10y" r="4" fill="${colors.us10y}" stroke="white" stroke-width="2"/><circle data-key="us30y" r="4" fill="${colors.us30y}" stroke="white" stroke-width="2"/><g class="yield-tip"><rect width="164" height="78" rx="7" fill="var(--espresso)" opacity=".94"/><text x="10" y="18" fill="white" font-size="11"></text><text data-key="us2y" x="10" y="36" fill="white" font-size="11"></text><text data-key="us10y" x="10" y="53" fill="white" font-size="11"></text><text data-key="us30y" x="10" y="70" fill="white" font-size="11"></text></g></g><rect class="yield-hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent" style="cursor:crosshair;touch-action:none"/></svg><div class="status">${LANG==="en"?"Hover or drag to inspect daily yields.":"將滑鼠移到圖上，或用手指拖曳，可查看每日利率。"}</div></div>`;
+  const title=market==="jp"?(LANG==="en"?"Japan government bond yields — 3 years":"日圓利率｜日債 2Y／10Y／30Y 三年走勢"):(LANG==="en"?"US Treasury yields — 3 years":"美債 2Y／10Y／30Y 三年走勢");
+  return `<div class="card"><h2>${title}</h2><div class="yield-legend"><span><i style="background:${colors[keys[0]]}"></i>2Y</span><span><i style="background:${colors[keys[1]]}"></i>10Y</span><span><i style="background:${colors[keys[2]]}"></i>30Y</span></div><svg class="yield-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${market==='jp'?'Japan government bond':'US Treasury'} yield chart" data-market="${market}" data-min="${min}" data-max="${max}">${grid}${paths}${ticks}<g class="yield-hover" visibility="hidden" pointer-events="none"><line class="yield-cross" y1="${T}" y2="${H-B}" stroke="var(--espresso)" stroke-width="1" stroke-dasharray="4 3" opacity=".55"/>${keys.map(k=>`<circle data-key="${k}" r="5" fill="${colors[k]}" stroke="white" stroke-width="2"/>`).join("")}<g class="yield-tip"><rect width="220" height="124" rx="10" fill="var(--espresso)" opacity=".96"/><text x="15" y="27" fill="white" font-size="18" font-weight="700"></text><text data-key="${keys[0]}" x="15" y="56" fill="white" font-size="18"></text><text data-key="${keys[1]}" x="15" y="84" fill="white" font-size="18"></text><text data-key="${keys[2]}" x="15" y="112" fill="white" font-size="18"></text></g></g><rect class="yield-hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent" style="cursor:crosshair;touch-action:none"/></svg><div class="status">${LANG==="en"?"Hover or drag to inspect daily yields.":"將滑鼠移到圖上，或用手指拖曳，可查看每日利率。"}</div></div>`;
 }
-function setupYieldHover(box,rows){
-  const svg=box.querySelector(".yield-chart");if(!svg||!rows||rows.length<2)return;
+function setupYieldHover(svg,rows){
+  if(!svg||!rows||rows.length<2)return;
   const W=900,H=330,L=52,R=18,T=18,B=38,min=Number(svg.dataset.min),max=Number(svg.dataset.max);
+  const market=svg.dataset.market||"us",keys=[market+"2y",market+"10y",market+"30y"];
   const hover=svg.querySelector(".yield-hover"),cross=svg.querySelector(".yield-cross"),tip=svg.querySelector(".yield-tip");
   const x=i=>L+i*(W-L-R)/(rows.length-1),y=v=>T+(max-v)*(H-T-B)/(max-min);
   function show(ev){
     const rect=svg.getBoundingClientRect(),px=(ev.clientX-rect.left)*W/rect.width;
     const i=Math.max(0,Math.min(rows.length-1,Math.round((px-L)*(rows.length-1)/(W-L-R)))),row=rows[i],xx=x(i);
     hover.setAttribute("visibility","visible");cross.setAttribute("x1",xx);cross.setAttribute("x2",xx);
-    ["us2y","us10y","us30y"].forEach(k=>{const c=hover.querySelector(`circle[data-key="${k}"]`);c.setAttribute("cx",xx);c.setAttribute("cy",y(Number(row[k])));hover.querySelector(`text[data-key="${k}"]`).textContent=`${k.slice(2).toUpperCase()}: ${Number(row[k]).toFixed(2)}%`;});
+    keys.forEach(k=>{const c=hover.querySelector(`circle[data-key="${k}"]`);c.setAttribute("cx",xx);c.setAttribute("cy",y(Number(row[k])));hover.querySelector(`text[data-key="${k}"]`).textContent=`${k.slice(2).toUpperCase()}: ${Number(row[k]).toFixed(2)}%`;});
     hover.querySelector("text:not([data-key])").textContent=row.date;
-    tip.setAttribute("transform",`translate(${xx>W-190?xx-174:xx+10} ${T+8})`);
+    tip.setAttribute("transform",`translate(${xx>W-245?xx-230:xx+10} ${T+8})`);
   }
   svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);
   svg.addEventListener("pointerleave",()=>hover.setAttribute("visibility","hidden"));
@@ -6674,6 +6716,7 @@ async function loadMacro(){
     (data.items || []).forEach(it => byKey[it.key] = it);
     const groups = [
       [t("pmac.bonds", "美國公債殖利率"), ["us2y", "us10y", "us30y"]],
+      [LANG==="en"?"Japan government bonds":"日本公債（日圓利率）", ["jp2y", "jp10y", "jp30y"]],
       [t("pmac.cpi", "累積物價漲幅"), ["cpi_ytd", "cpi_5y", "cpi_10y"]]
     ];
     let html = "";
@@ -6682,13 +6725,15 @@ async function loadMacro(){
       if (tiles) html += `<div class="card"><h2>${group[0]}</h2><div class="macro-grid">${tiles}</div></div>`;
     });
     html += yieldChart(data.yield_history);
+    html += yieldChart(data.jp_yield_history,"jp");
     if (data.yield_conclusions && data.yield_conclusions.length){
       html += `<div class="card"><h2>${LANG==="en"?"Yield curve conclusions":"殖利率觀察結論"}</h2><ul class="yield-findings">${data.yield_conclusions.map(c=>`<li class="${c.level||""}">${c.text}</li>`).join("")}</ul><div class="status">${LANG==="en"?"Rules: 10/20-day reversals, 5-day 30Y moves, 3-year percentiles and curve spreads.":"規則：10／20 日趨勢反轉、30Y 五日急變、三年第 20／80 百分位與曲線利差。"}</div></div>`;
     }
     if (!html) html = `<div class="status">${t("pmac.none", "暫時無法取得資料，請稍後再試。")}</div>`;
     else html += `<div class="status">${LANG === "en" ? "Checked" : "資料檢查日"}：${data.updated || "—"}</div>`;
     box.innerHTML = html;
-    setupYieldHover(box,data.yield_history);
+    setupYieldHover(box.querySelector('.yield-chart[data-market="us"]'),data.yield_history);
+    setupYieldHover(box.querySelector('.yield-chart[data-market="jp"]'),data.jp_yield_history);
   } catch(e){
     box.innerHTML = `<div class="status">${t("pmac.none", "暫時無法取得資料，請稍後再試。")}</div>`;
   }

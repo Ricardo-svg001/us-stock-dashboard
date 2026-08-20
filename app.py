@@ -3990,6 +3990,10 @@ __SEO_HEAD__
   /* App 裡隱藏跨網域的台股入口 —— 見 <head> 的 in-app 偵測 */
   html.in-app #mktBtn { display:none; }
   @media(max-width:420px){ #mktBtn, #topBtns #langBtn { padding:0 11px; font-size:12.5px; } }
+  .site-footer { max-width:1180px; margin:0 auto 28px; padding:0 18px; text-align:center;
+                 color:var(--mocha); font-size:12px; line-height:1.8; }
+  .site-footer a { color:var(--caramel-2); text-decoration:none; font-weight:700; }
+  .site-footer a:hover { text-decoration:underline; }
 </style>
 </head>
 <body>
@@ -4635,6 +4639,12 @@ __QUOTES_HTML__
 </div>
 
 </div><!-- /wrap -->
+
+<footer class="site-footer">
+  <div>本網站資料僅供投資研究與教育用途，不構成投資建議。</div>
+  <div><a href="/privacy">隱私權政策 / Privacy Policy</a> ·
+    <a href="mailto:seer51000@gmail.com?subject=US%20Stock%20Coffee%20Feedback">聯絡我們 / Contact</a></div>
+</footer>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -7115,6 +7125,7 @@ ARTICLE_PAGE = r"""<!doctype html><html lang="__HTMLLANG__"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>__TITLE__｜美股咖啡館 US Stock Coffee</title>
 <meta name="description" content="__DESC__"><link rel="canonical" href="__URL__">
+<meta name="google-adsense-account" content="ca-pub-4558422800482658">
 __ALTS__
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta property="og:type" content="article"><meta property="og:site_name" content="美股咖啡館 US Stock Coffee">
@@ -7522,6 +7533,7 @@ def _seo_head(slug, lang):
     lines = [
         "<title>" + e(title) + "</title>",
         '<meta name="description" content="' + e(desc) + '">',
+        '<meta name="google-adsense-account" content="ca-pub-4558422800482658">',
         '<link rel="canonical" href="' + e(canon) + '">',
         '<link rel="alternate" hreflang="zh-Hant" href="' + e(zh_url) + '">',
         '<link rel="alternate" hreflang="en" href="' + e(en_url) + '">',
@@ -8245,6 +8257,14 @@ def robots_txt():
     return app.response_class(body, mimetype="text/plain")
 
 
+@app.route("/ads.txt")
+def ads_txt():
+    """AdSense 授權賣方宣告；由網站根目錄直接回傳純文字。"""
+    return app.response_class(
+        "google.com, pub-4558422800482658, DIRECT, f08c47fec0942fa0\\n",
+        mimetype="text/plain")
+
+
 @app.route("/sitemap.xml")
 def sitemap_xml():
     """動態產生 sitemap：首頁、可索引的功能頁、文章索引與每篇文章。
@@ -8299,6 +8319,30 @@ def sitemap_xml():
                                  [("zh-Hant", aloc), ("x-default", aloc)]))
     parts.append("</urlset>")
     return app.response_class("\n".join(parts), mimetype="application/xml")
+
+
+@app.route("/privacy")
+def privacy():
+    """公開的隱私權政策，讓使用者與 AdSense 審查都能直接查閱。"""
+    return render_template_string(PRIVACY_PAGE)
+
+
+PRIVACY_PAGE = r"""<!doctype html><html lang="zh-Hant-TW"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>隱私權政策｜美股咖啡館 US Stock Coffee</title>
+<meta name="description" content="美股咖啡館的隱私權、Cookie、推播資料與投資免責聲明。">
+<link rel="canonical" href="https://us.stock-coffee.com/privacy"><meta name="robots" content="index,follow">
+<meta name="google-adsense-account" content="ca-pub-4558422800482658">
+<style>:root{--milk:#f1ead9;--foam:#fbf6ec;--grounds:#e4d7c1;--espresso:#33241a;--caramel:#a56c24}*{box-sizing:border-box}body{margin:0;background:var(--milk);color:var(--espresso);font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",sans-serif;line-height:1.9}main{max-width:760px;margin:auto;padding:28px 20px 56px}.top{background:var(--espresso);padding:13px 20px}.top a{color:var(--foam);text-decoration:none;font-weight:800}h1{font-size:29px;line-height:1.45}h2{font-size:19px;margin:30px 0 8px;color:var(--caramel)}p,li{font-size:16px}a{color:var(--caramel);font-weight:700}.note{padding:12px 15px;border-radius:10px;background:var(--foam);border:1px solid var(--grounds)}.updated{color:#6b5540;font-size:13px}</style>
+</head><body><div class="top"><a href="/">☕ 美股咖啡館 US Stock Coffee</a></div><main>
+<h1>隱私權政策 / Privacy Policy</h1><p class="updated">最後更新：2026 年 8 月 20 日</p>
+<p class="note">美股咖啡館提供公開市場資料整理、選股與試算工具。本站不要求建立帳號，並以最少必要資料為原則。</p>
+<h2>一、我們處理的資料</h2><p>你在績效試算、觀察清單等工具輸入的內容，原則上儲存在你的瀏覽器裝置中（例如 localStorage），不會因使用這些工具自動傳送給本站。若你主動啟用到價推播，推播訂閱識別碼、股票代號與目標價格會儲存於伺服器，僅用來發送你要求的通知；你可隨時在網站中刪除提醒。</p>
+<h2>二、Cookie、廣告與第三方服務</h2><p>本站可能使用 Google AdSense 顯示廣告。Google 與其他第三方廣告供應商可能使用 Cookie 或類似技術，依你造訪本站或其他網站的紀錄提供及衡量廣告。你可在 <a href="https://adssettings.google.com/" rel="noopener noreferrer">Google 廣告設定</a> 管理個人化廣告，並可參閱 <a href="https://policies.google.com/technologies/partner-sites" rel="noopener noreferrer">Google 如何使用合作夥伴網站資料</a>。</p><p>依法需要取得同意的地區，本站將透過適用的同意管理機制提供 Cookie 與個人化廣告選擇。</p>
+<h2>三、資料來源與用途</h2><p>股價、公司基本面與總體資料取自公開市場資料與第三方資料服務，僅用於呈現網站功能與維護服務。我們不販售你的個人資料，也不會將推播資料用於行銷目的。</p>
+<h2>四、投資免責聲明</h2><p>本站的篩選條件、技術指標、財務數字與文章均為資料整理及教育用途，<strong>不構成投資建議、招攬或保證報酬</strong>。市場投資有風險，請依自己的判斷、投資經驗與風險承受度作出決定。</p>
+<h2>五、聯絡與資料刪除</h2><p>如需協助刪除推播提醒，或對本政策有問題，請來信：<a href="mailto:seer51000@gmail.com">seer51000@gmail.com</a>。</p>
+<p><a href="/">← 回到美股咖啡館</a></p></main></body></html>"""
 
 
 @app.route("/api/diag")

@@ -3033,17 +3033,14 @@ def prefetch(universe_n=300, force=False):
 # 現在可以提前，是因為改成「**先探測、抓到才跑全量**」：
 #   17:00 用單一檔股票探測今天的收盤有沒有出來（1 次請求，很便宜）
 #   → 有：立刻跑全量 300 檔
-#   → 沒有：等 UPDATE_RETRY_MINUTES 再探測一次，最多 UPDATE_MAX_PROBES 次
-#   → 19:00 仍沒有：20:00、21:00 再低頻補探測，避免來源晚補時慢一整天
-#   → 都沒有（例如國定假日）：最後仍跑一次全量，但狀態標示「來源延遲」
+#   → 沒有：每 UPDATE_RETRY_MINUTES 再探測一次，直到來源出現目標日收盤
+#   → 有：跑全量更新；若全量更新失敗，一樣 20 分鐘後重試
+#   國定假日不會有當日 K 線，排程會等到下個交易日出現較新日期後完成。
 #
 # 📌 所以提前的風險被吸收掉了：來源準備好就早一小時拿到，
 #    來源還沒好也不會像以前那樣「錯過就等明天」。
 UPDATE_HOUR_ET = int(os.environ.get("UPDATE_HOUR_ET", "17"))
 UPDATE_RETRY_MINUTES = int(os.environ.get("UPDATE_RETRY_MINUTES", "20"))
-UPDATE_MAX_PROBES = int(os.environ.get("UPDATE_MAX_PROBES", "7"))   # 17:00～19:00
-UPDATE_LATE_PROBES = int(os.environ.get("UPDATE_LATE_PROBES", "2"))
-UPDATE_LATE_RETRY_MINUTES = int(os.environ.get("UPDATE_LATE_RETRY_MINUTES", "60"))
 PROBE_SYMBOL = os.environ.get("PROBE_SYMBOL", "AAPL")
 # ⚠️ 行程啟動時刻。診斷要靠它判斷「是不是每次看都剛重啟」——
 #    gunicorn 的 --timeout 太短時 worker 會被反覆砍掉，PID 每次都不同。
@@ -3059,11 +3056,12 @@ PROCESS_STARTED_TS = time.time()
 IMPORT_PID = os.getpid()
 
 SCHED_STATE = {"enabled": False, "next_run": "—", "last_run": "—", "last_result": "—",
+               "completed_session": "", "completed_at_et": "",
                "alerts_result": "—", "loop_error": "", "heartbeat": "—", "heartbeat_ts": 0,
                "probe": "—", "probe_error": ""}
 
 # 上次更新紀錄寫在持久化磁碟，重啟後仍看得到。
-# 只存 last_run / last_result 兩個欄位 —— next_run 每次啟動都會重算，存了反而會誤導。
+# next_run 每次啟動都會重算，不寫入磁碟；完成的資料日與美東時間則要保留。
 SCHED_FILE = os.path.join(CACHE_DIR, ".sched_state.json")
 
 
@@ -3071,7 +3069,7 @@ def _sched_load():
     try:
         with open(SCHED_FILE, "r", encoding="utf-8") as f:
             d = json.load(f)
-        for k in ("last_run", "last_result"):
+        for k in ("last_run", "last_result", "completed_session", "completed_at_et"):
             if d.get(k):
                 SCHED_STATE[k] = d[k]
     except Exception:
@@ -3087,7 +3085,10 @@ def _sched_save():
         tmp = SCHED_FILE + "." + uuid.uuid4().hex + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"last_run": SCHED_STATE["last_run"],
-                       "last_result": SCHED_STATE["last_result"]}, f, ensure_ascii=False)
+                       "last_result": SCHED_STATE["last_result"],
+                       "completed_session": SCHED_STATE["completed_session"],
+                       "completed_at_et": SCHED_STATE["completed_at_et"]},
+                      f, ensure_ascii=False)
         os.replace(tmp, SCHED_FILE)
     except Exception:
         pass        # 寫不進去頂多是紀錄不見，不能因此讓排程掛掉
@@ -3145,6 +3146,14 @@ def _fmt_et(dt):
         (dt - timedelta(hours=off)).strftime("%m-%d %H:%M"))
 
 
+def _completed_at_et(dt=None):
+    """網站對外顯示的完成時間：美東日期與時分，含 EST/EDT。"""
+    dt = dt or _utcnow()
+    off = _et_offset_hours(dt)
+    return "%s %s" % ((dt - timedelta(hours=off)).strftime("%Y-%m-%d %H:%M"),
+                       "EDT" if off == 4 else "EST")
+
+
 def _beat():
     """心跳。用來判斷執行緒還活著 —— 只靠 enabled 旗標看不出來，
     那個旗標設過一次就不會變，執行緒死掉了它還是顯示「是」。"""
@@ -3171,8 +3180,8 @@ def _sleep_beats(seconds):
 def _target_session_et():
     """這次排程「應該要抓到」的交易日：美東今天（平日）。
 
-    ⚠️ 不處理國定假日 —— 假日時這個日期不存在，探測永遠追不上，
-       所以呼叫端一定要有次數上限（`UPDATE_MAX_PROBES`），不能無限等。
+    ⚠️ 不處理國定假日。假日時會持續等待，直到下個交易日的較新 K 線出現；
+       這樣不需要在程式裡維護可能變動的美股休市表。
     """
     et = _utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))
     return et.strftime("%Y-%m-%d") if et.weekday() < 5 else None
@@ -3247,47 +3256,48 @@ def _daily_updater_inner():
                 time.sleep(min(300.0, remain))
                 _beat()
             # ---- 先探測：來源今天的收盤出來了沒 ----
-            # ⚠️ 探測失敗**不能**讓這一輪跳過全量預抓：探測只有一檔，
-            #    它可能剛好抓失敗、或那一檔停牌。探不到最後還是要跑一次，
-            #    否則「探測壞掉」會變成「整天不更新」，而且沒有任何錯誤。
+            # ⚠️ 探測失敗不能讓這一輪結束。單檔請求可能剛好失敗，
+            #    因此沒探到就繼續每 20 分鐘重試，不以一次失敗推論整個來源無資料。
             target = _target_session_et()
             probes, got = 0, None
-            total_probes = UPDATE_MAX_PROBES + UPDATE_LATE_PROBES
-            while target and probes < UPDATE_MAX_PROBES:
+            while target:
                 got = _probe_last_session()
                 probes += 1
-                SCHED_STATE["probe"] = ("第 %d/%d 次：來源最新 %s（目標 %s）"
-                                        % (probes, total_probes, got or "—", target))
+                SCHED_STATE["probe"] = ("第 %d 次：來源最新 %s（目標 %s）"
+                                        % (probes, got or "—", target))
                 _beat()
                 if got and got >= target:
                     break
-                if probes >= UPDATE_MAX_PROBES:
-                    break
                 _sleep_beats(UPDATE_RETRY_MINUTES * 60)
-            # 17:00～19:00 ET 仍缺資料時，不要直接放棄到隔天；改在 20:00、21:00
-            # 各低頻探測一次。Nasdaq 偶爾在晚間才補日 K，這兩次就是補那個缺口。
-            late = 0
-            while (target and not (got and got >= target)
-                   and late < UPDATE_LATE_PROBES):
-                _sleep_beats(UPDATE_LATE_RETRY_MINUTES * 60)
-                got = _probe_last_session()
-                probes += 1
-                late += 1
-                SCHED_STATE["probe"] = ("延後探測第 %d/%d 次：來源最新 %s（目標 %s）"
-                                        % (probes, total_probes, got or "—", target))
-                _beat()
             if target:
-                SCHED_STATE["probe"] += (
-                    "　✅ 探到當日收盤，開始全量更新" if (got and got >= target)
-                    else "　⚠️ 延後探測仍未見當日收盤（可能休市或來源延遲），仍跑一次全量")
+                SCHED_STATE["probe"] += "　✅ 探到當日收盤，開始全量更新"
+
+            # 來源已就緒後，全量更新本身也要重試；不能因為一次網路錯誤
+            # 就直接等到隔天。成功標準至少要求探測標的的本地快取到目標日。
+            while True:
+                try:
+                    prefetch(300, force=True)   # ⚠️ 收盤後必須繞過 TTL
+                    cached_probe = _load_cache("hist_%s.json" % PROBE_SYMBOL.upper(), None) or []
+                    cached_last = cached_probe[-1][0] if cached_probe else None
+                    if target and (not cached_last or cached_last < target):
+                        raise RuntimeError("快取最新 %s，尚未到目標 %s"
+                                           % (cached_last or "—", target))
+                    break
+                except Exception as e:
+                    SCHED_STATE["last_result"] = "更新失敗，%d 分鐘後重試：%s" % (
+                        UPDATE_RETRY_MINUTES, str(e)[:100])
+                    SCHED_STATE["last_run"] = _fmt_et(_utcnow())
+                    _sched_save()
+                    _sleep_beats(UPDATE_RETRY_MINUTES * 60)
+
             try:
-                prefetch(300, force=True)   # ⚠️ 收盤後必須繞過 TTL，見 load_histories
                 # 「程式跑完」不等於「資料追到目標日」。以前這裡無條件寫成功，
                 # 導致來源只到前一日卻顯示綠燈，使用者只能從頁面日期猜出有問題。
-                SCHED_STATE["last_result"] = (
-                    "成功（無交易日目標）" if not target else
-                    "成功（資料到 %s）" % target if got and got >= target else
-                    "來源延遲（最新 %s，目標 %s）" % (got or "—", target))
+                completed_session = cached_last or got or target or ""
+                SCHED_STATE["last_result"] = ("成功（無交易日目標）" if not target else
+                                              "成功（資料到 %s）" % completed_session)
+                SCHED_STATE["completed_session"] = completed_session
+                SCHED_STATE["completed_at_et"] = _completed_at_et()
                 # 價格快取已更新完才檢查提醒，避免用舊收盤價發通知。
                 # 推播失敗不反過來把整個每日預抓標成失敗。
                 try:
@@ -7355,36 +7365,31 @@ def _quotes_html():
 
 
 def _update_note_html():
-    """首頁的「資料日期 ＋ 下次預計更新」。**只讀快取與時間，不連網。**
+    """首頁的資料日期、實際完成時間與下次排程。只讀快取，不連網。
 
-    ⚠️⚠️ **要誠實地講成一個區間，不是一個時間點。**
-       排程是「17:00 ET 開始探測，探到當日收盤才跑全量」，
-       一般完成時間落在 17:00～19:00 ET；來源延遲時會在 20:00、21:00 再補抓。
-       寫死一個「05:00 更新」看起來精準，但**那個精準是假的** ——
-       使用者 05:05 來看發現沒更新，只會覺得網站壞了。
-
-    ⚠️ 夏令／冬令的台灣時間不一樣（差一小時），所以**用 `_next_update_utc()`
-       實際算出來的那個時間點換算**，不要在畫面上寫死「05:00」。
+    排程從 17:00 ET 開始，來源還沒有當日 K 線就每 20 分鐘重試，因此不預告
+    一個假的「完成區間」；改為顯示上次真正完成的美東時間。
     """
     try:
         nxt = _next_update_utc()
     except Exception:
         return ""
-    tw_start = nxt + timedelta(hours=8)                      # UTC → 台北
-    tw_end = tw_start + timedelta(
-        minutes=(UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES
-                + UPDATE_LATE_PROBES * UPDATE_LATE_RETRY_MINUTES)
     as_of = _home_screen_target_date() or ""
-    zh = ("資料日期 <b>%s</b>　·　下次更新 <b>%s %s–%s</b>（台灣時間）"
-          % (as_of.replace("-", "/") or "—",
-             tw_start.strftime("%m/%d"), tw_start.strftime("%H:%M"),
-             tw_end.strftime("%H:%M")))
-    en = ("Data as of <b>%s</b>　·　next update <b>%s %s–%s</b> Taipei time"
-          % (as_of or "—", tw_start.strftime("%m/%d"),
-             tw_start.strftime("%H:%M"), tw_end.strftime("%H:%M")))
-    tip_zh = "美股 16:00 收盤後，來源備妥就更新；若結算延遲，08:00、09:00 會再補抓。"
-    tip_en = ("US markets close at 16:00 ET; the daily bar is only available after "
-              "official settlement. We update as soon as the source is ready.")
+    completed_session = str(SCHED_STATE.get("completed_session") or "")
+    completed_at = str(SCHED_STATE.get("completed_at_et") or "")
+    completed_zh = ("　·　當日更新完成 <b>%s</b>（美東時間）" % completed_at
+                    if completed_at and completed_session == as_of else "")
+    completed_en = ("　·　daily update completed <b>%s</b>" % completed_at
+                    if completed_at and completed_session == as_of else "")
+    et_start = nxt - timedelta(hours=_et_offset_hours(nxt))
+    zh = ("資料日期 <b>%s</b>%s　·　下次於美東 <b>%s</b> 開始檢查"
+          % (as_of.replace("-", "/") or "—", completed_zh,
+             et_start.strftime("%m/%d %H:%M")))
+    en = ("Data as of <b>%s</b>%s　·　next check starts <b>%s ET</b>"
+          % (as_of or "—", completed_en, et_start.strftime("%m/%d %H:%M")))
+    tip_zh = "美股 16:00 收盤後，自 17:00 ET 起每 %d 分鐘檢查，直到成功更新當日收盤價。" % UPDATE_RETRY_MINUTES
+    tip_en = ("After the 16:00 ET close, we check every %d minutes from 17:00 ET "
+              "until that session's closing prices are updated." % UPDATE_RETRY_MINUTES)
     return ('<div class="updnote">'
             '<span class="q-zh">' + zh + '<small>' + tip_zh + '</small></span>'
             '<span class="q-en" style="display:none">' + en
@@ -8519,18 +8524,16 @@ def api_diag():
         w("  ⚠️ 骨幹錯誤     : %s" % SCHED_STATE["loop_error"])
     w("  開始嘗試時間     : 每個美東交易日 %02d:00 ET（收盤後 %d 小時）"
       % (UPDATE_HOUR_ET, UPDATE_HOUR_ET - 16))
-    w("  探測策略        : 每 %d 分鐘用 %s 探一次，前段 %d 次（到 %02d:%02d ET）；"
-      "仍落後則每 %d 分鐘補探 %d 次"
-      % (UPDATE_RETRY_MINUTES, PROBE_SYMBOL, UPDATE_MAX_PROBES,
-         UPDATE_HOUR_ET + (UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES // 60,
-         (UPDATE_MAX_PROBES - 1) * UPDATE_RETRY_MINUTES % 60,
-         UPDATE_LATE_RETRY_MINUTES, UPDATE_LATE_PROBES))
+    w("  探測策略        : 每 %d 分鐘用 %s 探一次，直到當日收盤出現並完成全量更新"
+      % (UPDATE_RETRY_MINUTES, PROBE_SYMBOL))
     w("  下次更新        : %s" % SCHED_STATE["next_run"])
     w("  上次探測        : %s" % SCHED_STATE.get("probe", "—"))
     if SCHED_STATE.get("probe_error"):
         w("  ⚠️ 探測錯誤     : %s" % SCHED_STATE["probe_error"])
     w("  上次更新        : %s" % SCHED_STATE["last_run"])
     w("  上次結果        : %s" % SCHED_STATE["last_result"])
+    w("  完成資料日     : %s" % (SCHED_STATE.get("completed_session") or "—"))
+    w("  完成美東時間   : %s" % (SCHED_STATE.get("completed_at_et") or "—"))
     # 「成功」現在同時要求探測來源已到目標日；未到會明確顯示「來源延遲」。
     #    全部命中 TTL 快取也會回報成功。所以直接印資料本身有多新。
     try:

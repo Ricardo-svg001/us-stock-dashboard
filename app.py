@@ -2026,6 +2026,8 @@ PHASE_STICKY = 3            # 連續幾天成立才切換狀態
 # ⚠️ 種子檔只有每天一個百分比，不會把 300 檔長歷史帶進正式環境。
 BREADTH_KEEP = 5 * 252
 BREADTH_SEED_FILE = os.path.join(BASE_DIR, "breadth_5y_seed.json")
+MARKET_COUNT_KEEP = 3 * 252
+MARKET_COUNT_CACHE = "market_count_3y.json"
 
 # 洗盤記憶維持近 90 日最低寬度 ≤30%。收復 50MA 是初步復甦，收復 100MA
 # 是復甦確認；三日黏著消除單日假突破。歷史寬度以今日前 300 大回算，仍有
@@ -2599,6 +2601,68 @@ def build_breadth():
     return None
 
 
+def build_market_count_history(universe=None, histories=None):
+    """建立首頁三張「大盤家數」三年折線圖快取。
+
+    三條序列固定使用同一批市值前 300 大股票與同一段交易日：
+    ① 嚴格多頭排列（10>20>50>150）且收盤站上 10MA
+    ② 收盤站上 100MA
+    ③ 收盤站上 150MA
+
+    只能由預抓／背景更新呼叫；首頁 API 只讀彙總快取。
+    """
+    universe = universe or get_universe(300)
+    if histories is None:
+        histories = {}
+        for u in universe:
+            sym = u["symbol"]
+            h = _load_cache("hist_%s.json" % sym, None) or []
+            if h:
+                histories[sym] = h
+
+    counts = {"strict10": {}, "above100": {}, "above150": {}}
+    all_dates = set()
+    for u in universe:
+        rows = histories.get(u["symbol"]) or []
+        clean = [(r[0], float(r[1])) for r in rows
+                 if r and len(r) >= 2 and r[0] and r[1] is not None]
+        if len(clean) < 100:
+            continue
+        dates = [r[0] for r in clean]
+        closes = [r[1] for r in clean]
+        sums = {p: 0.0 for p in (10, 20, 50, 100, 150)}
+        for i, (d, close) in enumerate(clean):
+            mas = {}
+            for p in sums:
+                sums[p] += close
+                if i >= p:
+                    sums[p] -= closes[i - p]
+                if i >= p - 1:
+                    mas[p] = sums[p] / p
+            if i >= 99:
+                all_dates.add(d)
+                if close > mas[100]:
+                    counts["above100"][d] = counts["above100"].get(d, 0) + 1
+            if i >= 149:
+                if close > mas[150]:
+                    counts["above150"][d] = counts["above150"].get(d, 0) + 1
+                if (close > mas[10] and mas[10] > mas[20] > mas[50] > mas[150]):
+                    counts["strict10"][d] = counts["strict10"].get(d, 0) + 1
+
+    days = sorted(all_dates)[-MARKET_COUNT_KEEP:]
+    if not days:
+        return None
+    out = {
+        "years": 3,
+        "universe": len(universe),
+        "as_of": days[-1],
+        "series": {key: [[d, values.get(d, 0)] for d in days]
+                   for key, values in counts.items()},
+    }
+    _save_cache(MARKET_COUNT_CACHE, out)
+    return out
+
+
 # ---------------------------------------------------------------- 本日推薦
 #
 # 首頁的「本日推薦」＝ 市值前 300 大 ＋ 均線嚴格多頭 ＋ 站上 10 日線。
@@ -2856,6 +2920,7 @@ def _maybe_rebuild_breadth():
                 build_breadth()
                 # ⚠️ 順便算，因為讀的是同一批 hist_ 快取檔 —— 分開跑等於讀兩次。
                 build_ma_breadth_snapshot()
+                build_market_count_history()
                 _PHASE_MEMO.update(at=0, val=None)   # 讓下一次讀到新結果
             except Exception as e:
                 _PHASE_WHY.update(why="背景重算寬度失敗 %s: %s"
@@ -2992,6 +3057,7 @@ def prefetch(universe_n=300, force=False):
         # ⚠️ 順便算今日快照（50／150／200MA 家數 ＋ 創 60 日新高）——
         #    讀的是同一批 hist_ 快取檔，分開跑等於整批讀兩次。
         build_ma_breadth_snapshot()
+        build_market_count_history(universe=uni, histories=histories)
     except Exception:
         pass
     PREFETCH_STATE["stage"] = "本日推薦"
@@ -5540,6 +5606,7 @@ brBox && brBox.addEventListener("toggle", () => {
       $("#brStatus").textContent = "";
       $("#brBody").innerHTML = breadthHtml(j);
       wireBreadthHover(j);        /* ⚠️ innerHTML 之後才綁，元素這時才存在 */
+      wireMarketCountHover(j);
     })
     .catch(() => {
       /* ⚠️ 讀不到就整塊收掉，**不要顯示「無法判斷」** —— 那看起來像壞掉。 */
@@ -5630,6 +5697,65 @@ function maSnapshotHtml(j){
     ${t("br.snapNote","分母是「有足夠交易日可以計算該均線」的家數，所以三條線的分母不同（新上市股票湊不滿 200 天）。創新高採 2% 容差（收盤達 60 日高點的 98% 即算）。均線家數看「還站在趨勢上」，創新高家數看「正在突破」——後者通常掉得更早，因為它需要新的買盤。")}
     ${s.date ? "<br>" + t("br.snapAsOf","資料日期") + " " + s.date : ""}</div></div>`;
   return h;
+}
+
+/* 市值前 300 大的三年家數趨勢。三張圖共用日期範圍與 0~300 刻度，
+   才能直接比較不同條件的擴散／收縮，而不會被各圖自動縮放誤導。 */
+function marketCountHtml(j){
+  const m = j.market_counts, series = m && m.series;
+  if (!series) return "";
+  const defs = [
+    ["strict10", LANG === "en" ? "Strict bullish and above 10MA" : "嚴格多頭排列且站上 10 日線"],
+    ["above100", LANG === "en" ? "Price above 100MA" : "股價站上 100 日線"],
+    ["above150", LANG === "en" ? "Price above 150MA" : "股價站上 150 日線"]
+  ];
+  const W=560,H=132,L=30,R=8,T=8,B=18, max=Math.max(1,Number(m.universe)||300);
+  const y=v=>T+(max-v)/max*(H-T-B);
+  const chart=(key,title)=>{
+    const S=series[key]||[];
+    if(!S.length)return "";
+    const x=i=>L+(S.length<2?0:i/(S.length-1)*(W-L-R));
+    const pts=S.map((r,i)=>`${x(i).toFixed(1)},${y(r[1]).toFixed(1)}`).join(" ");
+    const first=S[0][0],last=S[S.length-1][0],cur=S[S.length-1][1];
+    return `<div style="margin:0 0 18px">
+      <div style="display:flex;justify-content:space-between;gap:12px;font-size:13px;margin-bottom:3px">
+        <b>${title}</b><span id="mcRead-${key}" style="font-family:var(--font-num);color:var(--mocha)">${last} · ${cur}</span>
+      </div>
+      <svg class="mcSvg" data-key="${key}" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;touch-action:none">
+        <text x="${L-4}" y="${y(max)+3}" text-anchor="end" font-size="9" fill="#aaa">${max}</text>
+        <text x="${L-4}" y="${y(0)+3}" text-anchor="end" font-size="9" fill="#aaa">0</text>
+        <line x1="${L}" x2="${W-R}" y1="${y(0)}" y2="${y(0)}" stroke="#ddd"/>
+        <polyline points="${pts}" fill="none" stroke="var(--caramel-2)" stroke-width="1.7" stroke-linejoin="round"/>
+        <line class="mcGuide" y1="${T}" y2="${H-B}" stroke="var(--mocha)" opacity="0"/>
+        <circle class="mcDot" r="3.2" fill="var(--espresso)" opacity="0"/>
+        <text x="${L}" y="${H-4}" font-size="9" fill="#aaa">${first}</text>
+        <text x="${W-R}" y="${H-4}" text-anchor="end" font-size="9" fill="#aaa">${last}</text>
+      </svg></div>`;
+  };
+  return `<div class="card"><h2>${LANG==="en"?"Market stock counts · 3 years":"大盤家數走勢 · 三年"}</h2>`+
+    defs.map(d=>chart(d[0],d[1])).join("")+
+    `<div style="font-size:12px;color:#999">${LANG==="en"?"Same top-300 universe, date range and vertical scale across all three charts.":"三張圖統一使用市值前 300 大、三年日期範圍與相同縱軸刻度。"}</div></div>`;
+}
+
+function wireMarketCountHover(j){
+  const m=j.market_counts, all=m&&m.series;
+  if(!all)return;
+  document.querySelectorAll(".mcSvg").forEach(svg=>{
+    const key=svg.dataset.key,S=all[key]||[],read=$("#mcRead-"+key);
+    if(!S.length||!read)return;
+    const W=560,H=132,L=30,R=8,T=8,B=18,max=Math.max(1,Number(m.universe)||300);
+    const x=i=>L+(S.length<2?0:i/(S.length-1)*(W-L-R));
+    const y=v=>T+(max-v)/max*(H-T-B),guide=svg.querySelector(".mcGuide"),dot=svg.querySelector(".mcDot");
+    const rest=()=>{const r=S[S.length-1];read.textContent=`${r[0]} · ${r[1]}`;guide.setAttribute("opacity","0");dot.setAttribute("opacity","0");};
+    const at=clientX=>{const r=svg.getBoundingClientRect(),vx=(clientX-r.left)/r.width*W;
+      let i=Math.round((vx-L)/(W-L-R)*(S.length-1));i=Math.max(0,Math.min(S.length-1,i));
+      const row=S[i],gx=x(i).toFixed(1);read.textContent=`${row[0]} · ${row[1]}`;
+      guide.setAttribute("x1",gx);guide.setAttribute("x2",gx);guide.setAttribute("opacity",".35");
+      dot.setAttribute("cx",gx);dot.setAttribute("cy",y(row[1]).toFixed(1));dot.setAttribute("opacity","1");};
+    svg.addEventListener("pointermove",e=>{e.preventDefault();at(e.clientX)});
+    svg.addEventListener("pointerdown",e=>{e.preventDefault();at(e.clientX)});
+    svg.addEventListener("pointerleave",rest);svg.addEventListener("pointercancel",rest);rest();
+  });
 }
 
 function breadthHtml(j){
@@ -5740,6 +5866,7 @@ function breadthHtml(j){
 
   /* 今日快照放在折線圖之後：先看「歷史上算高還是低」，再看「今天是誰在撐」。 */
   return idxHtml
+       + marketCountHtml(j)
        + `<div style="font-size:12.5px;color:var(--mocha);margin:2px 0 6px">${head}</div>`
        + svg + `<div style="margin-top:10px">${stats}</div>` + note
        + maSnapshotHtml(j);
@@ -7720,6 +7847,7 @@ def api_breadth():
         # 今日快照：站上 50／150／200MA 的家數 ＋ 創 60 日新高家數
         # ⚠️ 一樣只讀快取，不重算（見上面的原則）。
         snapshot=get_ma_breadth_snapshot(),
+        market_counts=_load_cache(MARKET_COUNT_CACHE, 24 * 365) or {},
     )
 
 

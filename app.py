@@ -2028,6 +2028,7 @@ BREADTH_KEEP = 5 * 252
 BREADTH_SEED_FILE = os.path.join(BASE_DIR, "breadth_5y_seed.json")
 MARKET_COUNT_KEEP = 3 * 252
 MARKET_COUNT_CACHE = "market_count_3y.json"
+MARKET_INDEX_KEEP = 3 * 252       # 首頁大盤折線圖：近三年納斯達克綜合指數
 
 # 洗盤記憶維持近 90 日最低寬度 ≤30%。收復 50MA 是初步復甦，收復 100MA
 # 是復甦確認；三日黏著消除單日假突破。歷史寬度以今日前 300 大回算，仍有
@@ -3392,7 +3393,7 @@ PAGE = r"""<!DOCTYPE html>
 <html lang="zh-Hant-TW">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 __SEO_HEAD__
 <meta name="theme-color" content="#33241A">
 <link rel="icon" href="/icon.png?v=2" type="image/png" sizes="any">
@@ -3434,11 +3435,15 @@ __SEO_HEAD__
     --font-num:"Space Mono",ui-monospace,monospace;
     --shadow:0 14px 34px -20px rgba(51,36,26,.45);
   }
+  html { min-height:100%; background:#EADFC9; overscroll-behavior-y:none; }
   * { box-sizing:border-box; font-family:var(--font-body); }
   body { margin:0; color:var(--espresso);
-    background:radial-gradient(120% 80% at 50% -10%, #F7F1E4 0%, var(--milk) 55%, #EADFC9 100%);
+    background:#EADFC9 radial-gradient(120% 80% at 50% -10%, #F7F1E4 0%, var(--milk) 55%, #EADFC9 100%);
     min-height:100vh;            /* 舊瀏覽器 fallback */
+    min-height:100svh;           /* 手機：網址列展開時的穩定可視高度 */
     min-height:100dvh;           /* 手機：跟著網址列伸縮的實際可視高度 */
+    overflow-x:clip;
+    overscroll-behavior-y:none;
     -webkit-font-smoothing:antialiased; }
   .wrap { max-width:960px; margin:0 auto; padding:16px; padding-top:70px;
           padding-bottom:calc(24px + env(safe-area-inset-bottom)); }
@@ -4105,7 +4110,7 @@ __SEO_HEAD__
   /* App 裡隱藏跨網域的台股入口 —— 見 <head> 的 in-app 偵測 */
   html.in-app #mktBtn { display:none; }
   @media(max-width:420px){ #mktBtn, #topBtns #langBtn { padding:0 11px; font-size:12.5px; } }
-  .site-footer { max-width:1180px; margin:0 auto 28px; padding:0 18px; text-align:center;
+  .site-footer { max-width:1180px; margin:0 auto; padding:0 18px calc(28px + env(safe-area-inset-bottom)); text-align:center;
                  color:var(--mocha); font-size:12px; line-height:1.8; }
   .site-footer a { color:var(--caramel-2); text-decoration:none; font-weight:700; }
   .site-footer a:hover { text-decoration:underline; }
@@ -5614,7 +5619,7 @@ brBox && brBox.addEventListener("toggle", () => {
     });
 });
 
-/* 折線圖的游標互動：移到哪一天就顯示那天的日期與寬度。
+/* 大盤折線圖的游標互動：顯示日期、指數與相對三年中位數的位置。
    ⚠️ 用 pointer 事件（滑鼠與觸控共用一套），不要分別綁 mouse/touch。
    ⚠️ SVG 是 width:100% 縮放的，**client 座標不等於 viewBox 座標**，
       一定要用 getBoundingClientRect() 換算，否則在手機上會整個對不準。 */
@@ -5622,21 +5627,22 @@ function wireBreadthHover(j){
   const svg = $("#brSvg"), read = $("#brRead"),
         guide = $("#brGuide"), dot = $("#brDot");
   if (!svg || !read) return;
-  const S = j.series || [];
+  const S = j.market_series || [];
   if (!S.length) return;
   const PAD_L = +svg.dataset.padl, PAD_R = +svg.dataset.padr,
         PAD_T = +svg.dataset.padt, PAD_B = +svg.dataset.padb,
         W = +svg.dataset.w, H = +svg.dataset.h;
   const iw = W - PAD_L - PAD_R, ih = H - PAD_T - PAD_B;
+  const ymin = +svg.dataset.ymin, ymax = +svg.dataset.ymax;
   const xOf = i => PAD_L + (S.length < 2 ? 0 : i / (S.length - 1) * iw);
-  const yOf = v => PAD_T + (100 - v) / 100 * ih;
+  const yOf = v => PAD_T + (ymax - v) / Math.max(.01, ymax - ymin) * ih;
 
-  const fmt = (d, v) => (LANG === "en")
-    ? `${d} · ${v.toFixed(1)}% above ${j.breadth_ma}MA`
-    : `${d} · ${v.toFixed(1)}% 站上 ${j.breadth_ma} 日均線`;
+  const fmt = (d, close, pct) => (LANG === "en")
+    ? `${d} · ${Number(close).toLocaleString()} · ${pct >= 0 ? "+" : ""}${pct.toFixed(1)}% vs 3y median`
+    : `${d} · ${Number(close).toLocaleString()} · 相對三年中位數 ${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
   /* 沒在指的時候顯示最新一天，不要留白 */
   const rest = () => {
-    read.textContent = fmt(S[S.length - 1][0], S[S.length - 1][1]);
+    read.textContent = fmt(S[S.length - 1][0], S[S.length - 1][1], S[S.length - 1][2]);
     guide.setAttribute("opacity", "0");
     dot.setAttribute("opacity", "0");
   };
@@ -5647,12 +5653,12 @@ function wireBreadthHover(j){
     const vx = (clientX - r.left) / r.width * W;          // client → viewBox
     let i = Math.round((vx - PAD_L) / iw * (S.length - 1));
     i = Math.max(0, Math.min(S.length - 1, i));
-    const [d, v] = S[i];
-    read.textContent = fmt(d, v);
+    const [d, close, pct] = S[i];
+    read.textContent = fmt(d, close, pct);
     const gx = xOf(i).toFixed(1);
     guide.setAttribute("x1", gx); guide.setAttribute("x2", gx);
     guide.setAttribute("opacity", ".35");
-    dot.setAttribute("cx", gx); dot.setAttribute("cy", yOf(v).toFixed(1));
+    dot.setAttribute("cx", gx); dot.setAttribute("cy", yOf(pct).toFixed(1));
     dot.setAttribute("opacity", "1");
   }
   svg.addEventListener("pointermove", e => { e.preventDefault(); at(e.clientX); });
@@ -5758,7 +5764,7 @@ function wireMarketCountHover(j){
   });
 }
 
-function breadthHtml(j){
+function breadthHtmlLegacy(j){
   const S = j.series || [];
   if (!S.length) return maSnapshotHtml(j);   /* 折線圖沒資料時，至少把快照顯示出來 */
   const W = 560, H = 150, PAD_L = 30, PAD_R = 8, PAD_T = 10, PAD_B = 18;
@@ -5870,6 +5876,54 @@ function breadthHtml(j){
        + `<div style="font-size:12.5px;color:var(--mocha);margin:2px 0 6px">${head}</div>`
        + svg + `<div style="margin-top:10px">${stats}</div>` + note
        + maSnapshotHtml(j);
+}
+
+/* 近三年納斯達克綜合指數。縱軸不是一般報酬率：三年價格中位數固定為 0%，
+   每一天顯示相對該中位數的位置；圖頂就是三年最高點。 */
+function breadthHtml(j){
+  const S = j.market_series || [];
+  let idxHtml = "";
+  if (j.idx){
+    const q=j.idx, col=q.close>q.ma100?"#CB4B3A":"#4A7C64";
+    idxHtml=`<div style="font-size:12.5px;color:var(--mocha);margin:2px 0 6px">${LANG==="en"?"Nasdaq Composite":"納斯達克綜合指數"} <span style="font-family:var(--font-num)">${q.date}</span></div>
+      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <b style="font-family:var(--font-num);font-size:24px;color:var(--espresso)">${q.close.toLocaleString()}</b>
+      <span style="font-size:12.5px;color:${col}">50MA ${q.ma50.toLocaleString()} (${q.gap50>0?"+":""}${q.gap50}%) · 100MA ${q.ma100.toLocaleString()} (${q.gap100>0?"+":""}${q.gap100}%)</span></div>`;
+  }
+  if (!S.length) return idxHtml + marketCountHtml(j) + maSnapshotHtml(j);
+
+  const W=560,H=178,L=46,R=10,T=14,B=22,iw=W-L-R,ih=H-T-B;
+  const pcts=S.map(r=>Number(r[2]));
+  const ymin=Math.min(0,...pcts), ymax=Math.max(0,...pcts);
+  const span=Math.max(.01,ymax-ymin);
+  const x=i=>L+(S.length<2?0:i/(S.length-1)*iw);
+  const y=v=>T+(ymax-v)/span*ih;
+  const pts=S.map((r,i)=>`${x(i).toFixed(1)},${y(r[2]).toFixed(1)}`).join(" ");
+  const pct=v=>`${v>0?"+":""}${Number(v).toFixed(1)}%`;
+  const first=S[0][0], last=S[S.length-1][0], cur=S[S.length-1];
+  const axis=(v,label)=>`<text x="${L-5}" y="${(y(v)+3).toFixed(1)}" text-anchor="end" font-size="9" fill="#888" font-family="var(--font-num)">${label}</text>`;
+  const chart=`<div class="card"><h2>${LANG==="en"?"Nasdaq Composite · 3 years":"大盤指數走勢 · 近三年"}</h2>
+    <div id="brRead" style="font-family:var(--font-num);font-size:12px;color:var(--mocha);height:18px;margin-bottom:3px"></div>
+    <svg id="brSvg" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;touch-action:none"
+      data-padl="${L}" data-padr="${R}" data-padt="${T}" data-padb="${B}" data-w="${W}" data-h="${H}" data-ymin="${ymin}" data-ymax="${ymax}">
+      ${axis(ymax,pct(ymax))}${axis(0,"0%")}${ymin<0?axis(ymin,pct(ymin)):""}
+      <line x1="${L}" x2="${W-R}" y1="${y(0)}" y2="${y(0)}" stroke="var(--mocha)" stroke-width="1.2" opacity=".55"/>
+      <polyline points="${pts}" fill="none" stroke="var(--caramel-2)" stroke-width="1.8" stroke-linejoin="round"/>
+      <circle cx="${x(S.length-1).toFixed(1)}" cy="${y(cur[2]).toFixed(1)}" r="2.8" fill="var(--caramel-2)"/>
+      <line id="brGuide" y1="${T}" y2="${H-B}" stroke="var(--mocha)" stroke-width="1" opacity="0"/>
+      <circle id="brDot" r="3.2" fill="var(--espresso)" opacity="0"/>
+      <text x="${L}" y="${H-4}" font-size="9" fill="#aaa">${first}</text>
+      <text x="${W-R}" y="${H-4}" text-anchor="end" font-size="9" fill="#aaa">${last}</text>
+    </svg>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px;font-size:12px;text-align:center">
+      <div><span style="color:var(--mocha)">${LANG==="en"?"3y median · 0%":"三年中位數 · 0%"}</span><br><b>${Number(j.market_median).toLocaleString()}</b></div>
+      <div><span style="color:var(--mocha)">${LANG==="en"?"3y high":"三年最高點"}</span><br><b>${Number(j.market_high).toLocaleString()} · ${pct(ymax)}</b></div>
+      <div><span style="color:var(--mocha)">${LANG==="en"?"Latest":"最新"}</span><br><b>${Number(cur[1]).toLocaleString()} · ${pct(cur[2])}</b></div>
+    </div>
+    <p style="font-size:12px;color:var(--mocha);line-height:1.8;margin:10px 0 0">${LANG==="en"
+      ?"The vertical-axis 0% is the median Nasdaq Composite close over the displayed three years. Values above or below show distance from that median; this is not a return from the first date."
+      :"縱軸 0% 是圖中近三年納斯達克綜合指數收盤中位數；向上最高點就是三年最高點，向下則是低於中位數的位置。這不是從起始日計算的報酬率。"}</p></div>`;
+  return idxHtml + chart + marketCountHtml(j) + maSnapshotHtml(j);
 }
 
 /* ---- 升級專業版：創新高／RS ---- */
@@ -7304,7 +7358,7 @@ def _find_article(aid, lang="zh"):
 
 
 ARTICLE_PAGE = r"""<!doctype html><html lang="__HTMLLANG__"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>__TITLE__｜美股咖啡館 US Stock Coffee</title>
 <meta name="description" content="__DESC__"><link rel="canonical" href="__URL__">
 <meta name="google-adsense-account" content="ca-pub-4558422800482658">
@@ -7316,9 +7370,9 @@ __ALTS__
 <script type="application/ld+json">__JSONLD__</script>
 <style>
 :root{--milk:#f1ead9;--foam:#fbf6ec;--grounds:#e4d7c1;--espresso:#33241a;--mocha:#6b5540;--caramel:#c68a3e;--caramel2:#a56c24}
-*{box-sizing:border-box}body{margin:0;background:var(--milk);color:var(--espresso);font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",sans-serif;line-height:1.95}
+*{box-sizing:border-box}html{min-height:100%;background:var(--milk);overscroll-behavior-y:none}body{margin:0;min-height:100vh;min-height:100dvh;background:var(--milk);color:var(--espresso);font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",sans-serif;line-height:1.95;overflow-x:clip;overscroll-behavior-y:none}
 .top{background:var(--espresso);padding:12px 18px;display:flex;justify-content:space-between}.top a{color:var(--foam);text-decoration:none;font-weight:800}.top .go{color:#f0c88a}
-main{max-width:760px;margin:auto;padding:24px 18px 60px}.crumb{font-size:13px;color:var(--mocha)}.crumb a{color:var(--caramel2);text-decoration:none}.tag{display:inline-block;margin-top:18px;background:var(--caramel);color:white;border-radius:999px;padding:2px 11px;font-size:12px;font-weight:700}
+main{max-width:760px;margin:auto;padding:24px 18px calc(60px + env(safe-area-inset-bottom))}.crumb{font-size:13px;color:var(--mocha)}.crumb a{color:var(--caramel2);text-decoration:none}.tag{display:inline-block;margin-top:18px;background:var(--caramel);color:white;border-radius:999px;padding:2px 11px;font-size:12px;font-weight:700}
 h1{font-size:28px;line-height:1.45;margin:12px 0 5px}.meta{font-size:12px;color:var(--mocha)}.summary{margin:18px 0 28px;background:var(--foam);border:1px solid var(--grounds);border-left:4px solid var(--caramel);border-radius:0 12px 12px 0;padding:12px 16px;color:var(--mocha)}
 article{font-size:16.5px}article h2{font-size:20px;margin:34px 0 10px;border-left:4px solid var(--caramel);padding-left:10px}article h3{font-size:17px;color:var(--caramel2);margin:26px 0 8px}article p{margin:12px 0}article li{margin:7px 0}article strong{color:var(--espresso)}
 .cta{display:block;margin-top:36px;padding:13px;text-align:center;background:var(--caramel);color:white;border-radius:999px;text-decoration:none;font-weight:800}.more{margin-top:35px;border-top:1px solid var(--grounds);padding-top:18px}.more a{color:var(--caramel2);text-decoration:none}
@@ -7817,6 +7871,10 @@ def api_breadth():
     # ⚠️ 指數與寬度**日期未必對齊**（FRED 常慢一個交易日），
     #    所以回傳指數自己的日期，前端要照實顯示，不要沿用寬度的日期。
     idx_out = None
+    idx_series = []
+    idx_median = None
+    idx_high = None
+    idx_low = None
     try:
         idx = _load_cache("nasdaq_index.json", 24 * 365) or {}
         ids = sorted(idx)
@@ -7828,11 +7886,32 @@ def api_breadth():
                        "ma50": round(ma50, 2), "ma100": round(ma100, 2),
                        "gap50": round((idx[d] - ma50) / ma50 * 100, 2),
                        "gap100": round((idx[d] - ma100) / ma100 * 100, 2)}
+
+        # 近三年大盤走勢以「這段期間的指數中位數」為 0%。這不是報酬率，
+        # 而是讓使用者直接看每一天位於三年價格分布的上方或下方多少。
+        chart_days = ids[-MARKET_INDEX_KEEP:]
+        chart_vals = [float(idx[d]) for d in chart_days]
+        if chart_vals:
+            ordered = sorted(chart_vals)
+            n = len(ordered)
+            idx_median = (ordered[n // 2] if n % 2 else
+                          (ordered[n // 2 - 1] + ordered[n // 2]) / 2.0)
+            idx_high = max(chart_vals)
+            idx_low = min(chart_vals)
+            idx_series = [[d, round(float(idx[d]), 2),
+                           round((float(idx[d]) / idx_median - 1) * 100, 2)]
+                          for d in chart_days]
     except Exception:
         idx_out = None            # ⚠️ 指數讀不到不能影響寬度那半邊
+        idx_series = []
 
     return jsonify(
         idx=idx_out,
+        market_series=idx_series,
+        market_median=round(idx_median, 2) if idx_median is not None else None,
+        market_high=round(idx_high, 2) if idx_high is not None else None,
+        market_low=round(idx_low, 2) if idx_low is not None else None,
+        market_span_years=3,
         ok=True,
         series=[[d, br[d]] for d in days],
         cur=cur, cur_pct=pct_of(cur), date=days[-1],
@@ -8515,12 +8594,12 @@ def privacy():
 
 
 PRIVACY_PAGE = r"""<!doctype html><html lang="zh-Hant-TW"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>隱私權政策｜美股咖啡館 US Stock Coffee</title>
 <meta name="description" content="美股咖啡館的隱私權、Cookie、推播資料與投資免責聲明。">
 <link rel="canonical" href="https://us.stock-coffee.com/privacy"><meta name="robots" content="index,follow">
 <meta name="google-adsense-account" content="ca-pub-4558422800482658">
-<style>:root{--milk:#f1ead9;--foam:#fbf6ec;--grounds:#e4d7c1;--espresso:#33241a;--caramel:#a56c24}*{box-sizing:border-box}body{margin:0;background:var(--milk);color:var(--espresso);font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",sans-serif;line-height:1.9}main{max-width:760px;margin:auto;padding:28px 20px 56px}.top{background:var(--espresso);padding:13px 20px}.top a{color:var(--foam);text-decoration:none;font-weight:800}h1{font-size:29px;line-height:1.45}h2{font-size:19px;margin:30px 0 8px;color:var(--caramel)}p,li{font-size:16px}a{color:var(--caramel);font-weight:700}.note{padding:12px 15px;border-radius:10px;background:var(--foam);border:1px solid var(--grounds)}.updated{color:#6b5540;font-size:13px}</style>
+<style>:root{--milk:#f1ead9;--foam:#fbf6ec;--grounds:#e4d7c1;--espresso:#33241a;--caramel:#a56c24}*{box-sizing:border-box}html{min-height:100%;background:var(--milk);overscroll-behavior-y:none}body{margin:0;min-height:100vh;min-height:100dvh;background:var(--milk);color:var(--espresso);font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",sans-serif;line-height:1.9;overflow-x:clip;overscroll-behavior-y:none}main{max-width:760px;margin:auto;padding:28px 20px calc(56px + env(safe-area-inset-bottom))}.top{background:var(--espresso);padding:13px 20px}.top a{color:var(--foam);text-decoration:none;font-weight:800}h1{font-size:29px;line-height:1.45}h2{font-size:19px;margin:30px 0 8px;color:var(--caramel)}p,li{font-size:16px}a{color:var(--caramel);font-weight:700}.note{padding:12px 15px;border-radius:10px;background:var(--foam);border:1px solid var(--grounds)}.updated{color:#6b5540;font-size:13px}</style>
 </head><body><div class="top"><a href="/">☕ 美股咖啡館 US Stock Coffee</a></div><main>
 <h1>隱私權政策 / Privacy Policy</h1><p class="updated">最後更新：2026 年 8 月 20 日</p>
 <p class="note">美股咖啡館提供公開市場資料整理、選股與試算工具。本站不要求建立帳號，並以最少必要資料為原則。</p>

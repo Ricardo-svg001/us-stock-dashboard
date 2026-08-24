@@ -2490,6 +2490,7 @@ def get_nasdaq_index():
 SNAP_MAS = ((50, "50MA"), (150, "150MA"), (200, "200MA"))
 SNAP_NH_WINDOW = 60          # 創新高看幾個交易日
 SNAP_NH_TOL = 0.02           # 2% 容差，與創新高篩選頁一致
+SNAP_CACHE = "ma_breadth_snapshot_v2.json"  # v2: 強制限定當前前 300 大
 
 
 def build_ma_breadth_snapshot(universe=None, histories=None):
@@ -2534,6 +2535,7 @@ def build_ma_breadth_snapshot(universe=None, histories=None):
     if not nh_base:
         return None
     data = {
+        "universe": len(universe),
         "rows": [{"period": p, "label": lab, "above": above[p], "base": base[p],
                   "pct": round(above[p] / base[p] * 100, 1) if base[p] else None}
                  for p, lab in SNAP_MAS],
@@ -2542,13 +2544,22 @@ def build_ma_breadth_snapshot(universe=None, histories=None):
                     "pct": round(nh_above / nh_base * 100, 1)},
         "date": last_date,
     }
-    _save_cache("ma_breadth_snapshot_v1.json", data)
+    _save_cache(SNAP_CACHE, data)
     return data
 
 
 def get_ma_breadth_snapshot():
     """⚠️ 只讀快取，不計算、不連網。資料由預抓的 `build_ma_breadth_snapshot()` 產生。"""
-    return _load_cache("ma_breadth_snapshot_v1.json", 24) or {}
+    data = _load_cache(SNAP_CACHE, 24) or {}
+    # 最後防線：即使持久化磁碟殘留了舊口徑快取，也不在首頁顯示
+    # 不可能的 >300 家數。等背景預抓建好 v2 後再顯示正確數字。
+    universe = data.get("universe")
+    if universe != 300:
+        return {}
+    if any((r.get("base") or 0) > universe or (r.get("above") or 0) > universe
+           for r in data.get("rows", [])):
+        return {}
+    return data
 
 
 def build_breadth(universe=None, histories=None):
@@ -2940,7 +2951,8 @@ def _maybe_rebuild_breadth():
     """
     try:
         br = _load_cache("breadth.json", 24 * 365) or {}
-        if br and max(br) >= _expected_last_session():
+        snap = get_ma_breadth_snapshot()
+        if br and max(br) >= _expected_last_session() and snap:
             return
         now = time.time()
         with _BREADTH_LOCK:
@@ -5644,7 +5656,6 @@ brBox && brBox.addEventListener("toggle", () => {
       $("#brStatus").textContent = "";
       $("#brBody").innerHTML = breadthHtml(j);
       wireBreadthHover(j);        /* ⚠️ innerHTML 之後才綁，元素這時才存在 */
-      wireMarketCountHover(j);
     })
     .catch(() => {
       /* ⚠️ 讀不到就整塊收掉，**不要顯示「無法判斷」** —— 那看起來像壞掉。 */
@@ -5707,13 +5718,18 @@ function wireBreadthHover(j){
    📌 折線圖看的是「150MA 寬度的歷史走勢」，這裡看的是「今天各條線的橫斷面」——
       兩者互補：一個回答「現在算高還是低」，一個回答「現在是誰在撐」。 */
 function maSnapshotHtml(j){
-  const s = j.snapshot;
-  if (!s || !s.rows || !s.rows.length) return "";
+  const s = j.snapshot || {}, recent = recentReturnHtml(j.market_counts);
+  if ((!s.rows || !s.rows.length) && !recent) return "";
   /* 美股慣例：漲綠跌紅（跟台股相反，不要照抄台股配色） */
   const col = (v, mid) => v >= mid ? "#1e8e4e" : "#c0392b";
-  let h = `<div class="card"><h2>${t("br.snapTitle","今日市場寬度")}</h2>`;
+  let h = `<div class="card"><h2>${LANG==="en"?"View 2 · Market breadth":"觀點二：市場寬度分析"}</h2>`;
   h += `<div style="font-size:13px;color:#666;margin-bottom:8px">
     ${t("br.snapIntro","指數會被少數權值股撐住。這裡看的是「有多少家個股真的站在趨勢上」——指數與寬度背離時，通常是寬度先說實話。")}</div>`;
+  h += recent;
+  if (!s.rows || !s.rows.length) {
+    return h + `<div style="font-size:13px;color:#999">${t("br.nodata","市場寬度更新中…")}</div></div>`;
+  }
+  h += `<div style="margin-top:4px;font-size:14px;color:#666">${LANG==="en"?"Top 300 by market cap: stocks above each average":"市值前 300 大：站上均線的家數"}</div>`;
   for (const r of s.rows) {
     if (r.pct === null || r.pct === undefined) {
       h += `<div class="baro-row"><span>${t("br.above","站上")} ${r.label}</span>
@@ -5762,9 +5778,9 @@ function recentReturnHtml(m){
     <div style="font-size:13px;line-height:1.7;margin-top:3px">${ease(Number(r.win_pct))} ${strength(Number(r.median_return))}</div>
     <div style="font-size:12px;color:#888">${LANG==="en"?"Median stock return":"個股報酬中位數"} <b style="color:${Number(r.median_return)>=0?'#1e8e4e':'#c0392b'}">${sign(r.median_return)}</b></div>
   </div>`).join("");
-  return `<div style="margin:4px 0 16px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.48)">
+  return `<div style="margin:12px 0 16px;padding:12px 14px;border-radius:12px;background:rgba(255,255,255,.48)">
     <b>${LANG==="en"?"Recent stock-selection environment (backward-looking)":"近期選股環境（回顧）"}</b>${body}
-    <div style="font-size:11.5px;color:#999;line-height:1.6">${LANG==="en"?"Based on the current top 300 stocks. This summarizes realised returns and does not predict future performance.":"以目前市值前 300 大為樣本，只總結已實現的過去報酬，不預測未來。"}</div></div>`;
+    <div style="font-size:11.5px;color:#999;line-height:1.6">${LANG==="en"?"Based on the current top 300 stocks. This summarizes realised returns and does not predict future performance.":`資料截至 ${q.as_of||"—"}，以目前市值前 300 大為樣本；只總結已實現的過去報酬，不預測未來。`}</div></div>`;
 }
 
 function marketCountHtml(j){
@@ -5951,7 +5967,7 @@ function breadthHtml(j){
       <b style="font-family:var(--font-num);font-size:24px;color:var(--espresso)">${q.close.toLocaleString()}</b>
       <span style="font-size:12.5px;color:${col}">50MA ${q.ma50.toLocaleString()} (${q.gap50>0?"+":""}${q.gap50}%) · 100MA ${q.ma100.toLocaleString()} (${q.gap100>0?"+":""}${q.gap100}%)</span></div>`;
   }
-  if (!S.length) return idxHtml + marketCountHtml(j) + maSnapshotHtml(j);
+  if (!S.length) return maSnapshotHtml(j);
 
   const W=560,H=178,L=46,R=10,T=14,B=22,iw=W-L-R,ih=H-T-B;
   const pcts=S.map(r=>Number(r[2]));
@@ -5963,7 +5979,8 @@ function breadthHtml(j){
   const pct=v=>`${v>0?"+":""}${Number(v).toFixed(1)}%`;
   const first=S[0][0], last=S[S.length-1][0], cur=S[S.length-1];
   const axis=(v,label)=>`<text x="${L-5}" y="${(y(v)+3).toFixed(1)}" text-anchor="end" font-size="9" fill="#888" font-family="var(--font-num)">${label}</text>`;
-  const chart=`<div class="card"><h2>${LANG==="en"?"Nasdaq Composite · 3 years":"大盤指數走勢 · 近三年"}</h2>
+  const chart=`<div class="card"><h2>${LANG==="en"?"View 3 · Nasdaq position over 3 years":"觀點三：大盤近三年位置"}</h2>
+    ${idxHtml}
     <div id="brRead" style="font-family:var(--font-num);font-size:12px;color:var(--mocha);height:18px;margin-bottom:3px"></div>
     <svg id="brSvg" viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;touch-action:none"
       data-padl="${L}" data-padr="${R}" data-padt="${T}" data-padb="${B}" data-w="${W}" data-h="${H}" data-ymin="${ymin}" data-ymax="${ymax}">
@@ -5984,7 +6001,7 @@ function breadthHtml(j){
     <p style="font-size:12px;color:var(--mocha);line-height:1.8;margin:10px 0 0">${LANG==="en"
       ?"The vertical-axis 0% is the median Nasdaq Composite close over the displayed three years. Values above or below show distance from that median; this is not a return from the first date."
       :"縱軸 0% 是圖中近三年納斯達克綜合指數收盤中位數；向上最高點就是三年最高點，向下則是低於中位數的位置。這不是從起始日計算的報酬率。"}</p></div>`;
-  return idxHtml + chart + marketCountHtml(j) + maSnapshotHtml(j);
+  return maSnapshotHtml(j) + chart;
 }
 
 /* ---- 升級專業版：創新高／RS ---- */

@@ -2035,7 +2035,7 @@ MARKET_INDEX_KEEP = 3 * 252       # 首頁大盤折線圖：近三年納斯達�
 # 存活者偏誤，門檻只應保守解讀。
 
 # ---- 長期成長股列表 ----------------------------------------------------
-# ⚠️⚠️ 這份資料**不在線上計算**，由本機 `長期成長股列表.py` 算好、
+# ⚠️⚠️ 這份資料**不在線上計算**，由本機 `研究/腳本/長期成長股列表.py` 算好、
 #      隨程式一起部署。原因有兩個：
 #        ① 線上沒有 `cache/long_term/`（300 檔十年報價，營運快取只留 1260 筆）。
 #        ② 十年報酬變動極慢，每天重算沒有意義。
@@ -2492,7 +2492,7 @@ SNAP_NH_WINDOW = 60          # 創新高看幾個交易日
 SNAP_NH_TOL = 0.02           # 2% 容差，與創新高篩選頁一致
 
 
-def build_ma_breadth_snapshot():
+def build_ma_breadth_snapshot(universe=None, histories=None):
     """今天有多少家站上 50／150／200MA，以及多少家創 60 日新高。
 
     ⚠️ **只能在預抓流程裡呼叫**（同 `build_breadth()`）：要讀幾百個快取檔。
@@ -2506,14 +2506,14 @@ def build_ma_breadth_snapshot():
     base = {p: 0 for p, _ in SNAP_MAS}
     nh_above = nh_base = 0
     last_date = None
-    try:
-        files = [f for f in os.listdir(CACHE_DIR)
-                 if f.startswith("hist_") and f.endswith(".json")]
-    except Exception:
-        return None
-    for f in files:
+    # 只算當前市值前 300 大。CACHE_DIR 會保留過去掉出榜外或曾經
+    # 預抓前 500 大的 hist_ 檔，直接掃目錄會使家數超過 300。
+    universe = universe or get_universe(300)
+    histories = histories or {}
+    for u in universe:
+        sym = u["symbol"]
         try:
-            rows = _load_cache(f, 24 * 365) or []
+            rows = histories.get(sym) or _load_cache("hist_%s.json" % sym, 24 * 365) or []
         except Exception:
             continue
         closes = [r[1] for r in rows if r and len(r) >= 2 and r[1] is not None]
@@ -2551,7 +2551,7 @@ def get_ma_breadth_snapshot():
     return _load_cache("ma_breadth_snapshot_v1.json", 24) or {}
 
 
-def build_breadth():
+def build_breadth(universe=None, histories=None):
     """從 hist_ 快取算市場寬度，存成 breadth.json。
 
     ⚠️ **只能在預抓流程裡呼叫。** 要讀幾百個快取檔、每檔算 BREADTH_MA，
@@ -2559,12 +2559,15 @@ def build_breadth():
     """
     out = {}
     try:
-        files = [f for f in os.listdir(CACHE_DIR)
-                 if f.startswith("hist_") and f.endswith(".json")]
+        # 與選股器共用同一批當前市值前 300 大，不把殘留的 hist_
+        # 快取（舊成分股／曾經的前 500 大）誤當成市場寬度成分股。
+        universe = universe or get_universe(300)
+        histories = histories or {}
         above, total = {}, {}
-        for f in files:
+        for u in universe:
+            sym = u["symbol"]
             try:
-                rows = _load_cache(f, 24 * 365) or []
+                rows = histories.get(sym) or _load_cache("hist_%s.json" % sym, 24 * 365) or []
             except Exception:
                 continue
             if len(rows) < BREADTH_MA + 20:
@@ -2622,6 +2625,7 @@ def build_market_count_history(universe=None, histories=None):
                 histories[sym] = h
 
     counts = {"strict10": {}, "above100": {}, "above150": {}}
+    coverage = {}
     all_dates = set()
     for u in universe:
         rows = histories.get(u["symbol"]) or []
@@ -2642,6 +2646,7 @@ def build_market_count_history(universe=None, histories=None):
                     mas[p] = sums[p] / p
             if i >= 99:
                 all_dates.add(d)
+                coverage[d] = coverage.get(d, 0) + 1
                 if close > mas[100]:
                     counts["above100"][d] = counts["above100"].get(d, 0) + 1
             if i >= 149:
@@ -2650,13 +2655,41 @@ def build_market_count_history(universe=None, histories=None):
                 if (close > mas[10] and mas[10] > mas[20] > mas[50] > mas[150]):
                     counts["strict10"][d] = counts["strict10"].get(d, 0) + 1
 
-    days = sorted(all_dates)[-MARKET_COUNT_KEEP:]
+    # 不把「只有少數股票已更新」的半成品交易日放進首頁。
+    # 否則三條家數會在最後一天假性暴跌，近期報酬也只會算到少數檔。
+    min_coverage = max(60, int(len(universe) * 0.8))
+    days = [d for d in sorted(all_dates) if coverage.get(d, 0) >= min_coverage][-MARKET_COUNT_KEEP:]
     if not days:
         return None
+    # 首頁評論只描述「已經發生」的選股環境：過去 20／60 日有多少檔
+    # 上漲，以及全體個股報酬中位數。不把廣度寫成未來預測。
+    recent_rows = []
+    as_of = days[-1]
+    for horizon in (20, 60):
+        returns = []
+        for u in universe:
+            clean = [(r[0], float(r[1])) for r in (histories.get(u["symbol"]) or [])
+                     if r and len(r) >= 2 and r[0] and r[1] is not None and r[0] <= as_of]
+            if len(clean) <= horizon or clean[-1][1] <= 0 or clean[-1][0] != as_of:
+                continue
+            start, last = clean[-horizon - 1][1], clean[-1][1]
+            if start > 0:
+                returns.append((last / start - 1) * 100)
+        if returns:
+            ordered = sorted(returns)
+            n = len(ordered)
+            median = (ordered[n // 2] if n % 2 else
+                      (ordered[n // 2 - 1] + ordered[n // 2]) / 2)
+            winners = sum(v > 0 for v in returns)
+            recent_rows.append({"days": horizon, "base": n, "winners": winners,
+                                "win_pct": round(winners / n * 100, 1),
+                                "median_return": round(median, 2)})
+
     out = {
         "years": 3,
         "universe": len(universe),
-        "as_of": days[-1],
+        "as_of": as_of,
+        "recent_returns": {"as_of": as_of, "rows": recent_rows},
         "series": {key: [[d, values.get(d, 0)] for d in days]
                    for key, values in counts.items()},
     }
@@ -3054,10 +3087,10 @@ def prefetch(universe_n=300, force=False):
     # ⚠️ 市場階段要用的兩份資料，都在這裡算好存檔 —— 首頁只讀快取、絕不自己算
     PREFETCH_STATE["stage"] = "計算市場寬度"
     try:
-        build_breadth()
+        build_breadth(universe=uni, histories=histories)
         # ⚠️ 順便算今日快照（50／150／200MA 家數 ＋ 創 60 日新高）——
         #    讀的是同一批 hist_ 快取檔，分開跑等於整批讀兩次。
-        build_ma_breadth_snapshot()
+        build_ma_breadth_snapshot(universe=uni, histories=histories)
         build_market_count_history(universe=uni, histories=histories)
     except Exception:
         pass
@@ -5707,6 +5740,33 @@ function maSnapshotHtml(j){
 
 /* 市值前 300 大的三年家數趨勢。三張圖共用日期範圍與 0~300 刻度，
    才能直接比較不同條件的擴散／收縮，而不會被各圖自動縮放誤導。 */
+function recentReturnHtml(m){
+  const q=m&&m.recent_returns, rows=q&&q.rows||[];
+  if(!rows.length)return "";
+  const sign=v=>`${Number(v)>=0?"+":""}${Number(v).toFixed(2)}%`;
+  const ease=p=>p>=65
+    ?(LANG==="en"?"Most stocks rose; stock selection was relatively easy.":"多數個股上漲，這段期間選股相對容易。")
+    :p>=55?(LANG==="en"?"More than half rose; stock selection leaned easier.":"上漲家數過半，這段期間選股偏容易。")
+    :p>=45?(LANG==="en"?"Advancers and decliners were balanced; results were mixed.":"漲跌家數接近，這段期間選股結果分化。")
+    :(LANG==="en"?"Most stocks fell; stock selection was difficult.":"多數個股下跌，這段期間選股較困難。");
+  const strength=v=>v>=5
+    ?(LANG==="en"?"The median gain was strong.":"個股中位漲幅明顯。")
+    :v>0?(LANG==="en"?"The median stock posted a moderate gain.":"個股中位報酬溫和上漲。")
+    :v>-5?(LANG==="en"?"The median stock declined moderately.":"個股中位報酬溫和下跌。")
+    :(LANG==="en"?"The median decline was pronounced.":"個股中位跌幅明顯。");
+  const body=rows.map(r=>`<div style="padding:9px 0;border-top:1px solid rgba(120,90,65,.12)">
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline">
+      <b>${LANG==="en"?`Past ${r.days} sessions`:`過去 ${r.days} 個交易日`}</b>
+      <span style="font-family:var(--font-num);color:var(--mocha)">${r.winners} / ${r.base} ${LANG==="en"?"stocks up":"檔上漲"} · ${r.win_pct}%</span>
+    </div>
+    <div style="font-size:13px;line-height:1.7;margin-top:3px">${ease(Number(r.win_pct))} ${strength(Number(r.median_return))}</div>
+    <div style="font-size:12px;color:#888">${LANG==="en"?"Median stock return":"個股報酬中位數"} <b style="color:${Number(r.median_return)>=0?'#1e8e4e':'#c0392b'}">${sign(r.median_return)}</b></div>
+  </div>`).join("");
+  return `<div style="margin:4px 0 16px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.48)">
+    <b>${LANG==="en"?"Recent stock-selection environment (backward-looking)":"近期選股環境（回顧）"}</b>${body}
+    <div style="font-size:11.5px;color:#999;line-height:1.6">${LANG==="en"?"Based on the current top 300 stocks. This summarizes realised returns and does not predict future performance.":"以目前市值前 300 大為樣本，只總結已實現的過去報酬，不預測未來。"}</div></div>`;
+}
+
 function marketCountHtml(j){
   const m = j.market_counts, series = m && m.series;
   if (!series) return "";
@@ -5739,6 +5799,7 @@ function marketCountHtml(j){
       </svg></div>`;
   };
   return `<div class="card"><h2>${LANG==="en"?"Market stock counts · 3 years":"大盤家數走勢 · 三年"}</h2>`+
+    recentReturnHtml(m)+
     defs.map(d=>chart(d[0],d[1])).join("")+
     `<div style="font-size:12px;color:#999">${LANG==="en"?"Same top-300 universe, date range and vertical scale across all three charts.":"三張圖統一使用市值前 300 大、三年日期範圍與相同縱軸刻度。"}</div></div>`;
 }

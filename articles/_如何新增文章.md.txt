@@ -21,7 +21,7 @@ summary: 摘要
 
    正式網址：https://us.stock-coffee.com/article/<slug>
    📌 舊的檔名網址永遠有效，會 **301 導向** slug 版本，分享出去的連結不會變 404。
-   驗證：跑「測試網站.command」的第 25 組。
+   驗證：跑「指令/測試網站.command」的第 25 組。
 
 單一編輯來源是美股outputs/articles/，不要直接修改部署/articles/。
-部署.command 會同步整個 articles 資料夾。
+指令/部署.command 會同步整個 articles 資料夾。

@@ -1,0 +1,30 @@
+{
+  "contract_version": "2026-08-25.1",
+  "sources": {
+    "us_treasury": {
+      "url": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml",
+      "dataset": "daily_treasury_yield_curve"
+    },
+    "jgb_daily": {
+      "url": "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv"
+    },
+    "jgb_history": {
+      "url": "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
+    }
+  },
+  "allowed_lag_business_days": {
+    "us_yields": 1,
+    "jp_yields": 1
+  },
+  "holiday_calendars": {
+    "us": "US+GoodFriday",
+    "jp": "JP"
+  },
+  "quality_statuses_zh": {
+    "fresh": "資料最新",
+    "pending": "尚待今日公布",
+    "lag1": "落後一個交易日",
+    "failed": "更新失敗，沿用舊資料",
+    "overdue": "資料落後超過允許天數"
+  }
+}

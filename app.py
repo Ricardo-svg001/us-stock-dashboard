@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.25.1"
+APP_VERSION = "2026.08.25.2"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -2155,10 +2155,20 @@ def get_growth():
 
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
 MACRO_CACHE_FILE = "us_rate_inflation_v6.json"   # v6: 日債改用每日檔，並納入每小時新鮮度檢查
+TREASURY_XML = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
 JGB_DAILY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv"
 JGB_HISTORY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
 MACRO_REFRESH_HOURS = 1
+MAX_BOND_LAG_DAYS = 1
+HOLIDAY_CALENDAR_SPEC = {"us": "US+GoodFriday", "jp": "JP"}
+QUALITY_STATUS_ZH = {
+    "fresh": "資料最新", "pending": "尚待今日公布", "lag1": "落後一個交易日",
+    "failed": "更新失敗，沿用舊資料", "overdue": "資料落後超過允許天數",
+}
+UPDATE_HISTORY_FILE = "update_history_v1.json"
+UPDATE_HISTORY_LIMIT = 30
 _MACRO_REFRESH_LOCK = threading.Lock()
+_UPDATE_HISTORY_LOCK = threading.Lock()
 MACRO_STATE = {"enabled": False, "last_run": "—", "last_result": "—",
                "latest_us_date": "—", "latest_jp_date": "—"}
 # ⚠️ 新增欄位一定要換快取檔名。沿用舊檔會讓新那一格永遠讀到沒有它的舊快取，
@@ -2166,6 +2176,35 @@ MACRO_STATE = {"enabled": False, "last_run": "—", "last_result": "—",
 
 
 _MARKET_HOLIDAY_CACHE = {}
+
+
+def _record_update(source, latest_date, outcome, started, detail=""):
+    """將最近 30 次外部資料抓取結果保存到持久化快取，供診斷頁追查。"""
+    labels = {"success": "成功", "source_not_published": "來源未公布",
+              "parse_failed": "解析失敗"}
+    record = {
+        "executed_at": _utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "source": source,
+        "latest_date": latest_date or "—",
+        "outcome": outcome,
+        "result": labels.get(outcome, outcome),
+        "duration_sec": round(max(0.0, time.perf_counter() - started), 2),
+    }
+    if detail:
+        record["detail"] = str(detail)[:160]
+    with _UPDATE_HISTORY_LOCK:
+        history = _load_cache(UPDATE_HISTORY_FILE, None) or []
+        if not isinstance(history, list):
+            history = []
+        history.append(record)
+        _save_cache(UPDATE_HISTORY_FILE, history[-UPDATE_HISTORY_LIMIT:])
+
+
+def _source_outcome(latest_date, market):
+    if not latest_date:
+        return "parse_failed"
+    return ("success" if _business_days_behind(latest_date, market=market) <= MAX_BOND_LAG_DAYS
+            else "source_not_published")
 
 
 def _easter_sunday(year):
@@ -2228,7 +2267,8 @@ def _macro_bonds_are_current(data):
                          ("jp", ("jp2y", "jp10y", "jp30y"))):
         if any(key not in items for key in keys):
             return False
-        if max(_business_days_behind(items[key].get("date"), market=market) for key in keys) > 1:
+        if (max(_business_days_behind(items[key].get("date"), market=market) for key in keys)
+                > MAX_BOND_LAG_DAYS):
             return False
     return True
 
@@ -2247,14 +2287,14 @@ def _macro_refresh_due(data):
     return age.total_seconds() >= hours * 3600
 
 
-def _treasury_yields():
+def _treasury_yields_raw():
     """美國財政部近三年 Daily Treasury Par Yield Curve Rates。"""
     import xml.etree.ElementTree as ET
     rows = []
     year = datetime.utcnow().year
     for target_year in range(year - 3, year + 1):
         r = requests.get(
-            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml",
+            TREASURY_XML,
             params={"data": "daily_treasury_yield_curve", "field_tdr_date_value": target_year},
             headers=HEADERS, timeout=30,
         )
@@ -2273,7 +2313,20 @@ def _treasury_yields():
     return [row for row in rows if row[0] >= cutoff]
 
 
-def _jgb_yields():
+def _treasury_yields():
+    started = time.perf_counter()
+    try:
+        rows = _treasury_yields_raw()
+        latest = rows[-1][0] if rows else ""
+        _record_update("美國財政部 Daily Treasury XML", latest,
+                       _source_outcome(latest, "us"), started)
+        return rows
+    except Exception as exc:
+        _record_update("美國財政部 Daily Treasury XML", "", "parse_failed", started, exc)
+        raise
+
+
+def _jgb_yields_raw():
     """合併日本財務省歷史檔與當月每日檔，避免月底檔造成整月延遲。"""
     cutoff = (datetime.utcnow() - timedelta(days=365 * 3 + 10)).strftime("%Y-%m-%d")
     merged = {}
@@ -2302,6 +2355,19 @@ def _jgb_yields():
     if not merged and errors:
         raise errors[-1]
     return [merged[date] for date in sorted(merged)]
+
+
+def _jgb_yields():
+    started = time.perf_counter()
+    try:
+        rows = _jgb_yields_raw()
+        latest = rows[-1][0] if rows else ""
+        _record_update("日本財務省 JGB 每日檔＋歷史檔", latest,
+                       _source_outcome(latest, "jp"), started)
+        return rows
+    except Exception as exc:
+        _record_update("日本財務省 JGB 每日檔＋歷史檔", "", "parse_failed", started, exc)
+        raise
 
 
 def _yield_analysis(treasury):
@@ -8416,17 +8482,17 @@ def _data_health_snapshot():
 
     def quality(lag, failed=False, market=None):
         if failed and lag > 0:
-            return "failed", "更新失敗，沿用舊資料", "Update failed; using older data", "danger"
+            return "failed", QUALITY_STATUS_ZH["failed"], "Update failed; using older data", "danger"
         if lag <= 0:
-            return "fresh", "資料最新", "Data current", "ok"
+            return "fresh", QUALITY_STATUS_ZH["fresh"], "Data current", "ok"
         if lag == 1:
             market_now = (_utcnow() + timedelta(hours=9)) if market == "jp" else et_now
             publish_hour = 10 if market == "jp" else UPDATE_HOUR_ET
             if market_now.weekday() < 5 and market_now.hour < publish_hour:
-                return "pending", "尚待今日公布", "Awaiting today’s release", "pending"
+                return "pending", QUALITY_STATUS_ZH["pending"], "Awaiting today’s release", "pending"
         if lag == 1:
-            return "lag1", "落後一個交易日", "One session behind", "warn"
-        return "overdue", "資料落後超過允許天數", "Data exceeds allowed delay", "danger"
+            return "lag1", QUALITY_STATUS_ZH["lag1"], "One session behind", "warn"
+        return "overdue", QUALITY_STATUS_ZH["overdue"], "Data exceeds allowed delay", "danger"
 
     for key, actual in actuals.items():
         lag = _business_days_behind(actual)
@@ -9645,6 +9711,15 @@ def api_diag():
             os.path.getsize(os.path.join(CACHE_DIR, f)) for f in files) / 1e6))
     except Exception as e:
         w("  快取讀取失敗    : %s" % e)
+
+    w("\n【最近 30 次資料更新】—— 由新到舊，跨部署保留")
+    _history = _load_cache(UPDATE_HISTORY_FILE, None) or []
+    if not _history:
+        w("  尚無紀錄（新版本部署後第一次實際抓取才會寫入）")
+    for _row in reversed(_history[-UPDATE_HISTORY_LIMIT:]):
+        w("  %(executed_at)s | %(source)s | 最新 %(latest_date)s | %(result)s | %(duration_sec)s 秒" % _row)
+        if _row.get("detail"):
+            w("    ↳ %s" % _row["detail"])
 
     w("\n【預抓狀態】")
     for k, v in PREFETCH_STATE.items():

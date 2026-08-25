@@ -3997,7 +3997,9 @@ __SEO_HEAD__
   .breadth-row{display:grid;grid-template-columns:48px 1fr 94px;gap:9px;align-items:center;margin:11px 0;font-size:12px}.breadth-bar{height:10px;border-radius:6px;overflow:hidden;background:var(--grounds);display:flex}.breadth-above{background:#278153}.breadth-below{background:#c84335}.breadth-num{text-align:right;font-family:var(--font-num);font-size:11px}.breadth-num .up{color:#278153}.breadth-num .down{color:#c84335}.breadth-legend{display:flex;gap:14px;color:var(--mocha);font-size:10px;margin-top:8px}.breadth-legend i{display:inline-block;width:8px;height:8px;margin-right:4px}
   .market-chart-card{padding-bottom:10px}.market-chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center}.market-periods{display:flex}.market-periods button{border:1px solid var(--grounds);border-right:0;background:var(--foam);padding:7px 14px;cursor:pointer;color:var(--mocha)}.market-periods button:first-child{border-radius:8px 0 0 8px}.market-periods button:last-child{border-right:1px solid var(--grounds);border-radius:0 8px 8px 0}.market-periods button.on{background:var(--espresso);color:var(--milk)}
   #homeIndexChart svg{width:100%;height:auto;display:block;touch-action:none;cursor:grab;user-select:none}#homeIndexChart svg.dragging{cursor:grabbing}.home-chart-read{min-height:20px;font:12px var(--font-num);color:var(--mocha);margin:2px 0 0 45px}.market-chart-note{font-size:11px;color:var(--mocha);text-align:right;margin-top:-3px}
-  .home-action-panel{padding:4px 16px 16px}.home-action-panel .qhead{margin-top:14px}
+  /* 「今日觀察」只是區段標題與內容容器，不另外鋪一層卡片底色。 */
+  .home-action-panel{padding:0;background:transparent;border:0;box-shadow:none}.home-action-panel .qhead{margin-top:14px}
+  html[data-theme="c"] .home-action-panel{background:transparent!important;border:0;box-shadow:none}
   @media(max-width:700px){.market-now-grid{grid-template-columns:1fr}.market-now-hero{padding:18px}.market-now-title h1{font-size:28px}.market-return-row{grid-template-columns:105px 1fr}.market-return-med{grid-column:2}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods{width:100%}.market-periods button{flex:1;padding:7px 4px}}
   /* 今日市場：市場階段（可展開看說明） */
   /* 到價提醒的股票選擇器（自台股版移植） */
@@ -4274,15 +4276,6 @@ __SEO_HEAD__
 __HOME_MARKET_DASHBOARD__
 
 __UPDATE_NOTE__
-
-  <details class="mk-box" id="brBox">
-    <summary><span class="mk-main"><b><span class="q-zh">市場階段與大盤詳細數據</span><span class="q-en" style="display:none">Market stage and details</span></b></span></summary>
-    <div class="mk-body">
-      __PHASE_BAR__
-      <div class="status" id="brStatus"></div>
-      <div id="brBody"></div>
-    </div>
-  </details>
 
   <section class="home-action-panel"><div class="qhead"><span class="q-zh">今日觀察 · ACTIONS</span><span class="q-en" style="display:none">WHAT TO EXPLORE</span></div>
 

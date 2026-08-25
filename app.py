@@ -2792,6 +2792,117 @@ def build_market_count_history(universe=None, histories=None):
     return out
 
 
+INDUSTRY_CACHE = "industry_analysis_v1.json"
+INDUSTRY_MIN_SAMPLE = 5
+INDUSTRY_MA = 50
+INDUSTRY_NEW_HIGH_WINDOW = 60
+INDUSTRY_NEW_HIGH_TOL = 0.02
+
+
+def build_industry_analysis(universe=None, histories=None):
+    """以目前市值前 300 大美股建立 Sector 強弱快取；只描述已實現報酬。"""
+    universe = universe or get_universe(300)
+    histories = histories or {
+        u["symbol"]: (_load_cache("hist_%s.json" % u["symbol"], None) or [])
+        for u in universe
+    }
+    coverage = {}
+    for u in universe:
+        seen = set()
+        for row in histories.get(u["symbol"]) or []:
+            if row and len(row) >= 2 and row[0] and row[1] is not None:
+                seen.add(str(row[0]))
+        for date in seen:
+            coverage[date] = coverage.get(date, 0) + 1
+    minimum_coverage = max(1, int(len(universe) * 0.8))
+    complete = [date for date, count in coverage.items() if count >= minimum_coverage]
+    if not complete:
+        return None
+    as_of = max(complete)
+
+    raw = []
+    for rank, u in enumerate(universe, 1):
+        clean = [(str(row[0]), float(row[1])) for row in (histories.get(u["symbol"]) or [])
+                 if row and len(row) >= 2 and row[0] and row[1] is not None
+                 and str(row[0]) <= as_of]
+        if len(clean) < 61 or clean[-1][0] != as_of:
+            continue
+        closes = [value for _date, value in clean]
+        last = closes[-1]
+        if last <= 0 or closes[-21] <= 0 or closes[-61] <= 0:
+            continue
+        sector = str(u.get("sector") or "").strip()
+        if not sector or sector == "—":
+            continue
+        raw.append({
+            "rank": rank, "symbol": u["symbol"], "name": u.get("name") or u["symbol"],
+            "name_zh": zh_company(u["symbol"], u.get("name") or u["symbol"]),
+            "sector": sector, "sector_zh": zh_sector(sector), "close": round(last, 2),
+            "ret20": (last / closes[-21] - 1) * 100,
+            "ret60": (last / closes[-61] - 1) * 100,
+            "above50": last >= sum(closes[-INDUSTRY_MA:]) / INDUSTRY_MA,
+            "newhigh": last >= max(closes[-INDUSTRY_NEW_HIGH_WINDOW:]) *
+                        (1 - INDUSTRY_NEW_HIGH_TOL),
+        })
+    if not raw:
+        return None
+
+    rs_scores = _percentile_scores({r["symbol"]: r["ret60"] for r in raw})
+    for row in raw:
+        row["rs60"] = int(rs_scores.get(row["symbol"], 1))
+
+    grouped = {}
+    for row in raw:
+        grouped.setdefault(row["sector"], []).append(row)
+
+    def median(values):
+        ordered = sorted(float(v) for v in values)
+        n = len(ordered)
+        return ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
+
+    industries = []
+    for name, rows in grouped.items():
+        if len(rows) < INDUSTRY_MIN_SAMPLE:
+            continue
+        med20 = median(r["ret20"] for r in rows)
+        med60 = median(r["ret60"] for r in rows)
+        quadrant = ("strong" if med20 >= 0 and med60 >= 0 else
+                    "recovery" if med20 >= 0 else
+                    "cooling" if med60 >= 0 else "weak")
+        leaders = sorted(rows, key=lambda r: (-r["rs60"], r["rank"]))[:5]
+        industries.append({
+            "name": name, "name_zh": zh_sector(name), "count": len(rows),
+            "median20": round(med20, 2), "median60": round(med60, 2),
+            "winners20": sum(r["ret20"] > 0 for r in rows),
+            "win20_pct": round(sum(r["ret20"] > 0 for r in rows) / len(rows) * 100, 1),
+            "above50": sum(r["above50"] for r in rows),
+            "above50_pct": round(sum(r["above50"] for r in rows) / len(rows) * 100, 1),
+            "newhigh": sum(r["newhigh"] for r in rows),
+            "newhigh_pct": round(sum(r["newhigh"] for r in rows) / len(rows) * 100, 1),
+            "quadrant": quadrant,
+            "leaders": [{
+                "rank": r["rank"], "symbol": r["symbol"], "name": r["name"],
+                "name_zh": r["name_zh"], "close": r["close"],
+                "ret20": round(r["ret20"], 2), "ret60": round(r["ret60"], 2),
+                "rs60": r["rs60"],
+            } for r in leaders],
+        })
+    industries.sort(key=lambda r: (-r["median20"], -r["median60"], r["name"]))
+    data = {
+        "as_of": as_of, "universe": len(universe), "sample": len(raw),
+        "minimum_industry_sample": INDUSTRY_MIN_SAMPLE,
+        "grouping": "Nasdaq sector", "moving_average": INDUSTRY_MA,
+        "industries": industries,
+    }
+    _save_cache(INDUSTRY_CACHE, data)
+    return data
+
+
+def get_industry_analysis():
+    """只讀背景預先建立的美股產業分析快取。"""
+    return _load_cache(INDUSTRY_CACHE, 24) or {}
+
+
 # ---------------------------------------------------------------- 本日推薦
 #
 # 首頁的「本日推薦」＝ 市值前 300 大 ＋ 均線嚴格多頭 ＋ 站上 10 日線。
@@ -2817,9 +2928,21 @@ def build_home_screen():
     """算「本日推薦」並存檔。**只能在預抓流程裡呼叫。**"""
     res = screen_watchlist(**HOME_SCREEN_PARAMS)
     rows = res.get("rows") or []
+    sector_counts = {}
+    for row in rows:
+        sector = str(row.get("sector") or "").strip()
+        if not sector or sector == "—":
+            continue
+        item = sector_counts.setdefault(sector, {
+            "name": sector, "name_zh": row.get("sector_zh") or zh_sector(sector), "n": 0})
+        item["n"] += 1
+    sectors = sorted(sector_counts.values(), key=lambda x: (-x["n"], x["name"]))[:3]
     _save_cache("home_screen.json", {
         "n": len(rows),
         "as_of": res.get("as_of", ""),
+        # 產業速報只描述這批「嚴格多頭＋站上 10 日線」結果的集中度，
+        # 並不是完整產業強弱排名；首頁文案必須把口徑說清楚。
+        "sectors": sectors,
         # ⚠️ 只存顯示要用的欄位。整包 rows 存下來會讓檔案又肥又容易過期，
         #    而且首頁本來就只需要代號與名稱。
         "top": [{"symbol": r["symbol"], "name": r.get("name", ""),
@@ -2844,7 +2967,7 @@ def _maybe_rebuild_home_screen():
         old = _load_cache("home_screen.json", 24 * 365) or {}
         have = str(old.get("as_of") or "")
         target = _home_screen_target_date()
-        if not target or have >= target:
+        if not target or (have >= target and "sectors" in old):
             return False
         now = time.time()
         with _HOME_REBUILD_LOCK:
@@ -2895,8 +3018,8 @@ def _home_screen_html():
         return (
             '<a class="hs-box" href="/screener">'
             '<span class="hs-head">'
-            '<b class="q-zh">今天沒有符合條件的股票</b>'
-            '<b class="q-en" style="display:none">Nothing matches today</b>'
+            '<b class="q-zh">強勢股篩選：今天沒有符合條件</b>'
+            '<b class="q-en" style="display:none">Momentum screen: no matches today</b>'
             '</span>'
             '<span class="hs-list q-zh">'
             '嚴格多頭排列又站上 10 日線的個股掛零，'
@@ -2913,8 +3036,8 @@ def _home_screen_html():
     return (
         '<a class="hs-box" href="/screener">'
         '<span class="hs-head">'
-        '<b class="q-zh">本日推薦</b>'
-        '<b class="q-en" style="display:none">Today\'s picks</b>'
+        '<b class="q-zh">強勢股篩選</b>'
+        '<b class="q-en" style="display:none">Momentum screen</b>'
         '<span class="hs-n">' + str(n) + '</span>'
         '<span class="hs-unit q-zh">檔</span>'
         '<span class="hs-unit q-en" style="display:none">stocks</span>'
@@ -2926,7 +3049,33 @@ def _home_screen_html():
         '<span class="hs-sub q-en" style="display:none">Top 300 by cap · strict bullish '
         'alignment · above the 10-day line'
         + ((' (as of ' + as_of + ')') if as_of else '') + '</span>'
+        '<span class="hs-go q-zh">查看全部 →</span>'
+        '<span class="hs-go q-en" style="display:none">See all →</span>'
         '</a>')
+
+
+def _home_industry_brief_html():
+    """首頁產業速報：顯示完整產業分析的近期 20 日前三名。只讀快取。"""
+    import html as _h
+    d = get_industry_analysis()
+    sectors = sorted(d.get("industries") or [],
+                     key=lambda row: -float(row.get("median20") or 0))[:3]
+    if not sectors:
+        return ('<span class="q-zh">產業資料正在背景建立中。</span>'
+                '<span class="q-en" style="display:none">Sector data is being prepared.</span>')
+    out = []
+    for index, item in enumerate(sectors):
+        value = float(item.get("median20") or 0)
+        sign = "+" if value >= 0 else ""
+        out.append('<span class="q-zh">%s・<b>%s</b>　%s%.2f%%</span>'
+                   % ("近期最強" if index == 0 else "強勢 %d" % (index + 1),
+                      _h.escape(str(item.get("name_zh") or item.get("name") or "—")), sign, value))
+        out.append('<span class="q-en" style="display:none">%s · <b>%s</b>　%s%.2f%%</span>'
+                   % ("Strongest recently" if index == 0 else "Strong %d" % (index + 1),
+                      _h.escape(str(item.get("name") or "—")), sign, value))
+    out.append('<span class="q-zh">資料截至 %s</span>' % _h.escape(str(d.get("as_of") or "—")))
+    out.append('<span class="q-en" style="display:none">As of %s</span>' % _h.escape(str(d.get("as_of") or "—")))
+    return "".join(out)
 
 
 PHASE_UI = {
@@ -3188,6 +3337,8 @@ def prefetch(universe_n=300, force=False):
         #    讀的是同一批 hist_ 快取檔，分開跑等於整批讀兩次。
         build_ma_breadth_snapshot(universe=uni, histories=histories)
         build_market_count_history(universe=uni, histories=histories)
+        PREFETCH_STATE["stage"] = "計算產業分析"
+        build_industry_analysis(universe=uni, histories=histories)
     except Exception:
         pass
     PREFETCH_STATE["stage"] = "本日推薦"
@@ -4065,11 +4216,11 @@ __SEO_HEAD__
   .navitem small, .navgroup summary small { padding-left:30px; }
   .navgroup .navitem.sub small { padding-left:30px; }
   /* 首頁：科斯托蘭尼名言卡 */
-  .updnote { max-width:560px; margin:0 auto 14px; padding:9px 13px;
+  .updnote { max-width:960px; margin:0 auto 14px; padding:14px 18px;
             background:var(--foam); border:1px solid var(--grounds); border-radius:10px;
-            font-size:12.5px; color:var(--mocha); line-height:1.75; }
+            font-size:14.5px; color:var(--mocha); line-height:1.75; }
   .updnote b { color:var(--espresso); font-family:var(--font-num); }
-  .updnote small { display:block; font-size:11.5px; color:var(--mocha);
+  .updnote small { display:block; font-size:13px; color:var(--mocha);
             opacity:.85; margin-top:3px; line-height:1.6; }
   .qhead { display:flex; align-items:center; gap:12px; max-width:560px;
            margin:26px auto 14px; font-family:var(--font-head); font-weight:700;
@@ -4088,6 +4239,18 @@ __SEO_HEAD__
   /* 「今日觀察」只是區段標題與內容容器，不另外鋪一層卡片底色。 */
   .home-action-panel{padding:0;background:transparent;border:0;box-shadow:none}.home-action-panel .qhead{margin-top:14px}
   html[data-theme="c"] .home-action-panel{background:transparent!important;border:0;box-shadow:none}
+  .home-section-note{max-width:560px;margin:-6px auto 12px;color:var(--mocha);font-size:12px;line-height:1.65}
+  .home-actions{max-width:560px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .home-actions .hs-box,.home-actions .home-industry{margin:0;min-width:0;max-width:none}
+  .home-industry{display:block;text-decoration:none;color:inherit;background:linear-gradient(135deg,#fffaf2,#f3e6d3);border:1px solid #e4d2b6}
+  .home-industry:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(91,63,39,.09)}
+  .home-industry-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
+  .home-industry-head h2{margin:0}.home-industry-head>span{color:var(--mocha);font-weight:700;font-size:13px}
+  .home-industry-list{display:flex;gap:8px;flex-wrap:wrap}
+  .home-industry-list>span{width:100%;padding:7px 10px;border-radius:10px;background:rgba(255,255,255,.72);font-size:13px}
+  html[data-theme="c"] .home-industry{background:#21343A;border-color:#466068}
+  html[data-theme="c"] .home-industry-list>span{background:#17252B;color:#F5EAD7}
+  @media(max-width:560px){.home-actions{grid-template-columns:1fr}.updnote{font-size:14px}.updnote small{font-size:12.5px}}
   @media(max-width:700px){.market-now-grid{grid-template-columns:1fr}.market-now-hero{padding:18px}.market-now-title h1{font-size:28px}.market-return-row{grid-template-columns:105px 1fr}.market-return-med{grid-column:2}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods{width:100%}.market-periods button{flex:1;padding:7px 4px}}
   /* 今日市場：市場階段（可展開看說明） */
   /* 到價提醒的股票選擇器（自台股版移植） */
@@ -4143,6 +4306,7 @@ __SEO_HEAD__
   .hs-list { display:block; margin-top:8px; font-size:13px; color:var(--mocha);
            line-height:1.7; }
   .hs-sub { display:block; margin-top:8px; font-size:11.5px; color:#a99; }
+  .hs-go { display:block; margin-top:8px; font-size:13px; color:var(--caramel-2); }
   .mk-body { padding:2px 16px 14px; border-top:1px solid var(--grounds);
            font-size:14px; color:#555; line-height:1.9; }
   .mk-body b { color:var(--espresso); }
@@ -4219,6 +4383,19 @@ __SEO_HEAD__
     .qcard { padding:18px 18px 16px; border-radius:16px; }
     .qcard .qtext { font-size:16.5px; line-height:1.95; }
   }
+  .ind-tabs{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0 14px}
+  .ind-tabs button{border:1px solid var(--grounds);background:var(--milk);color:var(--mocha);border-radius:20px;padding:7px 13px;cursor:pointer;font-weight:700}
+  .ind-tabs button.on{background:var(--espresso);color:var(--milk);border-color:var(--espresso)}
+  .ind-rank{display:grid;gap:8px}.ind-row{border:1px solid var(--grounds);border-radius:12px;padding:11px 12px;background:rgba(255,255,255,.42)}
+  .ind-row summary{display:grid;grid-template-columns:minmax(110px,1fr) repeat(4,minmax(68px,auto));gap:10px;align-items:center;cursor:pointer;list-style:none}
+  .ind-row summary::-webkit-details-marker{display:none}.ind-name{font-weight:800;color:var(--espresso)}.ind-num{text-align:right;font-family:var(--font-num)}
+  .ind-leaders{margin-top:10px;padding-top:9px;border-top:1px dashed var(--grounds)}.ind-leader{display:grid;grid-template-columns:1fr repeat(3,70px);gap:8px;padding:6px 0;font-size:12.5px}
+  .ind-leader a{color:inherit;text-decoration:none}.ind-leader a:hover{color:var(--caramel-2)}
+  .ind-quad{display:grid;grid-template-columns:1fr 1fr;gap:8px}.ind-q{min-height:120px;border-radius:12px;padding:12px;background:rgba(255,255,255,.48);border:1px solid var(--grounds)}
+  .ind-q b{display:block;margin-bottom:7px}.ind-chip{display:inline-block;margin:3px 3px 0 0;padding:4px 8px;border-radius:14px;background:var(--milk);color:var(--mocha);font-size:12px}
+  html[data-theme="c"] .ind-row,html[data-theme="c"] .ind-q{background:#21343A}html[data-theme="c"] .ind-tabs button.on{background:#D2A65F;color:#17252B}
+  @media(max-width:600px){.ind-row summary{grid-template-columns:1fr 1fr}.ind-name{grid-column:1/-1}.ind-leader{grid-template-columns:1fr 64px}.ind-leader span:nth-child(n+3){text-align:right}.ind-quad{grid-template-columns:1fr}}
+
   .page { display:none; } .page.show { display:block; }
 
   /* ---- 晴雨表 ---- */
@@ -4302,8 +4479,9 @@ __SEO_HEAD__
   <a class="navitem active" data-page="home" href="/"><i>☕</i><b data-i18n="nav.home">菜單首頁</b><small data-i18n="nav.home.sub">今天適合出手嗎</small></a>
   <div class="nav-section"><span class="q-zh">研究市場</span><span class="q-en" style="display:none">Research</span></div>
   <details class="navgroup">
-    <summary><i>📋</i><b><span class="q-zh">選股與趨勢</span><span class="q-en" style="display:none">Stocks & trends</span></b><small><span class="q-zh">強勢股・拉回買點・長期成長</span><span class="q-en" style="display:none">Momentum, pullbacks and growth</span></small></summary>
+    <summary><i>📋</i><b><span class="q-zh">選股與產業</span><span class="q-en" style="display:none">Stocks & sectors</span></b><small><span class="q-zh">強勢股・產業輪動・拉回買點</span><span class="q-en" style="display:none">Momentum, rotation and pullbacks</span></small></summary>
     <a class="navitem sub" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
+    <a class="navitem sub" data-page="pind" href="/industries"><i>🧱</i><b data-i18n="nav.industry">產業分析</b><small data-i18n="nav.industry.sub">動能擴散・產業領先股</small></a>
     <a class="navitem sub" data-page="p3" href="/pullback"><i>⭐</i><b data-i18n="p3.title">拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
     <a class="navitem sub" data-page="pgrow" href="/growth"><i>🌱</i><b data-i18n="grow.title">長期成長股列表</b><small data-i18n="nav.grow.sub">十年累計・年化報酬</small></a>
   </details>
@@ -4344,23 +4522,6 @@ __SEO_HEAD__
     </div>
   </div>
 
-  <!-- 「關於這個工具」放最上面、**預設收合**。
-       ⚠️ 它是給第一次來的人看的，回訪者每天都要滑過去很煩 ——
-          所以位置在最前面（第一次看得到），但收起來（回訪不擋路）。
-          用 <details> 而不是永遠展開的 card，就是這個取捨。 -->
-  <details class="mk-box">
-    <summary><span class="mk-main"><b data-i18n="home.about">關於這個工具</b></span></summary>
-    <div class="mk-body">
-      <div style="font-size:14.5px;color:#555;line-height:1.95" data-i18n-html="home.aboutBody">
-        台股咖啡館的美股版。用<b>均線</b>從市值前 300 大的美股裡，
-        篩出站上或跌破指定均線、以及符合特定均線排列的股票。<br><br>
-        均線採美股習慣的 <b>10 / 20 / 50 / 150 日</b>——
-        50 日線相當於台股季線的地位，150 日線用來看中長期趨勢。<br><br>
-        資料為每日收盤價，非即時報價。
-      </div>
-    </div>
-  </details>
-
   <!-- ============ 今日市場（版面照台股版）============
        結論秒開、細節手動：
          · __PHASE_BAR__ 只讀快取、零成本，一進來就看得到答案
@@ -4372,8 +4533,14 @@ __HOME_MARKET_DASHBOARD__
 __UPDATE_NOTE__
 
   <section class="home-action-panel"><div class="qhead"><span class="q-zh">今日觀察 · ACTIONS</span><span class="q-en" style="display:none">WHAT TO EXPLORE</span></div>
-
-__HOME_SCREEN__
+  <div class="home-section-note"><span class="q-zh">先看近期選股結果，再查看強勢股與產業集中方向。以下都是過去資料的整理，不是未來預測。</span><span class="q-en" style="display:none">Start with realised selection results, then explore strong stocks and sector concentration. Nothing here predicts the future.</span></div>
+  <div class="home-actions">
+    __HOME_SCREEN__
+    <a class="card home-industry" href="/industries">
+      <div class="home-industry-head"><h2><span class="q-zh">產業速報</span><span class="q-en" style="display:none">Sector brief</span></h2><span><span class="q-zh">完整分析 →</span><span class="q-en" style="display:none">Full analysis →</span></span></div>
+      <div id="homeIndustryBrief" class="home-industry-list">__HOME_INDUSTRY_BRIEF__</div>
+    </a>
+  </div>
   </section></div>
 
   <!-- ⚠️ 這裡原本是「找強勢股／拉回找買點」兩張 menu-item 卡。
@@ -4579,6 +4746,27 @@ __QUOTES_HTML__
       （<a href="https://home.treasury.gov/resource-center/data-chart-center/interest-rates" target="_blank" rel="noopener" style="color:var(--primary)">U.S. Treasury</a>；
       <a href="https://www.bls.gov/cpi/" target="_blank" rel="noopener" style="color:var(--primary)">BLS CPI</a>）。
     </div>
+  </div>
+</div>
+
+<!-- ============ 產業分析 ============ -->
+<div class="page" id="pind">
+  <h2 class="ptitle" data-i18n="industry.title">產業分析</h2>
+  <details class="pgintro" open>
+    <summary data-i18n="industry.introT">資金集中在哪些產業，漲勢有沒有擴散？</summary>
+    <div class="pgintro-b" data-i18n-html="industry.intro"><p>以目前市值前 300 大美股依 Nasdaq Sector 分組，用<b>20／60 日報酬中位數</b>避免單一飆股扭曲結果，再搭配上漲家數、站上 50 日線與接近 60 日新高比例。只描述過去已發生的強弱，不預測未來。</p><p>產業樣本少於 5 檔不參與排名；股票池是今日前 300 大，因此包含存活者偏誤。這裡的「產業」採較穩定的 Sector 層級，不使用過度細碎的 Industry 子分類。</p></div>
+  </details>
+  <div class="card"><h2 data-i18n="industry.quad">產業四象限</h2><div id="indQuad" class="ind-quad"><div class="status" data-i18n="industry.loading">載入中…</div></div></div>
+  <div class="card"><h2 data-i18n="industry.rank">產業強弱排名</h2>
+    <div class="ind-tabs" id="indTabs">
+      <button class="on" data-sort="median20" data-i18n="industry.m20">20日動能</button>
+      <button data-sort="median60" data-i18n="industry.m60">60日趨勢</button>
+      <button data-sort="win20_pct" data-i18n="industry.win">上漲比例</button>
+      <button data-sort="above50_pct" data-i18n="industry.above">站上50日線</button>
+      <button data-sort="newhigh_pct" data-i18n="industry.high">創新高</button>
+    </div>
+    <div class="status" id="indStatus"></div>
+    <div id="indRank" class="ind-rank"></div>
   </div>
 </div>
 
@@ -4958,6 +5146,7 @@ const I18N = { en: {
   "nav.group": "Stock Screeners",
   "nav.group.sub": "Leaders · Pullbacks · Rates",
   "nav.screen.sub": "Find leading stocks",
+  "nav.industry": "Sector Analysis", "nav.industry.sub": "Breadth · sector leaders",
   "nav.pull.sub": "Close back within ±3% of an MA",
   "nav.lev.sub": "QLD · realised multiple",
   "lev.title": "2x ETF Monthly Performance",
@@ -5085,6 +5274,13 @@ const I18N = { en: {
   "grow.yr": "y",
   "grow.shortT": "Listed less than ten years \u2014 annualised figure is unstable",
   "grow.spinT": "A spin-off occurred in this period \u2014 return is understated",
+  "industry.title": "Sector Analysis",
+  "industry.introT": "Where is capital concentrating, and is the advance broadening?",
+  "industry.intro": "<p>This page groups the current top 300 US stocks by Nasdaq Sector. It uses <b>median 20- and 60-session returns</b> so one runaway stock cannot distort the result, then adds the share of advancers, stocks above the 50-day average and stocks near 60-day highs. It describes realised strength only and does not forecast the future.</p><p>Sectors with fewer than five constituents are excluded from ranking. The universe is today’s top 300 and therefore contains survivorship bias. Sector is used instead of the much more fragmented Industry subcategory.</p>",
+  "industry.quad": "Sector Quadrants", "industry.rank": "Sector Strength Ranking",
+  "industry.loading": "Loading…", "industry.m20": "20D Momentum",
+  "industry.m60": "60D Trend", "industry.win": "Advancer Share",
+  "industry.above": "Above 50MA", "industry.high": "60D Highs",
   "ded.warn": "\u26a0\ufe0f This is arithmetic extrapolation, not a forecast. It assumes the same daily move every session, which real markets do not do. Treat the session count as a rough \"if this pace holds\" estimate, not a guarantee.",
   "risk.introT": "Work out what you can lose before what you can make",
   "risk.intro": "<p>This page lays out four things about the stocks you hold: <b>how much it typically moves in a day (ATR)</b>, <b>how choppy it is overall (volatility)</b>, <b>whether the trend is still intact (MA alignment)</b>, and <b>how tightly it tracks the market (Beta)</b>.</p><p>Enter your entry price and it computes an <b>initial stop</b> and a <b>trailing stop</b> from ATR. The value isn't in the precision of that number — it's in <b>forcing you to write down the exit before you buy</b>. Decide a stop after you're underwater and you usually won't take it.</p><p><b>Why ATR instead of a fixed percentage</b>: 5% is a distant stop for a utility that moves 1% a day, and a same-day stop-out for a name that moves 6%. ATR is \"how much this stock normally moves in a day\", so using it as the unit makes the stop distance adapt to the character of the stock.</p><p><b>Everything stays in this browser</b> — nothing is uploaded and there is no account system. Changing device or clearing site data loses it, which is worth saying plainly rather than pretending there is sync.</p>",
@@ -5258,6 +5454,8 @@ if (langBtn){
         ma_name_zh:lastMeta3.ma_name_zh, ma_name:lastMeta3.ma_name});
     if (lastProHigh) renderProHigh(lastProHigh);
     if (lastProRs) renderProRs(lastProRs);
+    if (typeof IND_DATA !== "undefined" && IND_DATA) renderIndustries();
+    if (typeof loadHomeIndustryBrief === "function") loadHomeIndustryBrief();
   };
 }
 
@@ -7144,6 +7342,63 @@ async function loadMacro(){
   }
 }
 
+/* ---- 產業分析 ---- */
+let IND_DATA=null,IND_SORT="median20";
+const indPct=v=>`<span style="color:${Number(v)>=0?'#278153':'#c84335'}">${Number(v)>=0?'+':''}${Number(v).toFixed(2)}%</span>`;
+function indName(row){return LANG==="zh"?(row.name_zh||row.name):row.name}
+function renderIndustries(){
+  if(!IND_DATA||!$("#indRank"))return;
+  const rows=[...(IND_DATA.industries||[])].sort((a,b)=>Number(b[IND_SORT])-Number(a[IND_SORT]));
+  const labels=LANG==="en"
+    ?{median20:"20D median",median60:"60D median",win20_pct:"20D advancers",above50_pct:"Above 50MA",newhigh_pct:"60D highs"}
+    :{median20:"20日中位",median60:"60日中位",win20_pct:"20日上漲",above50_pct:"站上50日線",newhigh_pct:"創60日新高"};
+  $("#indStatus").textContent=LANG==="en"
+    ?`As of ${IND_DATA.as_of} · ${IND_DATA.sample} calculable stocks in the top ${IND_DATA.universe}`
+    :`資料截至 ${IND_DATA.as_of} · 前 ${IND_DATA.universe} 大中 ${IND_DATA.sample} 檔可計算`;
+  $("#indRank").innerHTML=rows.map((r,i)=>`<details class="ind-row"><summary>
+    <span class="ind-name">${i+1}. ${cmpEsc(indName(r))}<small style="display:block;color:var(--mocha);font-weight:400">${r.count} ${LANG==="en"?"stocks":"檔"}</small></span>
+    <span class="ind-num"><small>${labels[IND_SORT]}</small><br><b>${IND_SORT.startsWith("median")?indPct(r[IND_SORT]):Number(r[IND_SORT]).toFixed(1)+"%"}</b></span>
+    <span class="ind-num"><small>${LANG==="en"?"20D":"20日"}</small><br>${indPct(r.median20)}</span>
+    <span class="ind-num"><small>${LANG==="en"?"60D":"60日"}</small><br>${indPct(r.median60)}</span>
+    <span class="ind-num"><small>50MA</small><br>${r.above50_pct}%</span></summary>
+    <div class="ind-leaders"><b>${LANG==="en"?"Sector leaders (RS60)":"產業領先股（RS60）"}</b>${(r.leaders||[]).map(s=>`<div class="ind-leader"><span><b>${cmpEsc(s.symbol)}</b> ${cmpEsc(LANG==="zh"?(s.name_zh||s.name):s.name)}</span><span>RS ${s.rs60}</span><span>${LANG==="en"?"20D":"20日"} ${indPct(s.ret20)}</span><span>${LANG==="en"?"60D":"60日"} ${indPct(s.ret60)}</span></div>`).join("")}</div></details>`).join("");
+  const qs=LANG==="en"
+    ?{strong:["Persistently Strong","Both 20D and 60D median returns are positive"],recovery:["Early Recovery","60D remains weak; 20D has turned positive"],cooling:["Cooling From Strength","60D remains positive; 20D has turned negative"],weak:["Persistently Weak","Both 20D and 60D median returns are negative"]}
+    :{strong:["持續強勢","20日、60日中位報酬皆為正"],recovery:["低檔轉強","60日仍弱，20日已轉正"],cooling:["高檔降溫","60日仍強，20日轉負"],weak:["持續偏弱","20日、60日中位報酬皆為負"]};
+  $("#indQuad").innerHTML=Object.entries(qs).map(([key,value])=>`<div class="ind-q"><b>${value[0]}</b><small style="color:var(--mocha)">${value[1]}</small><div>${rows.filter(r=>r.quadrant===key).map(r=>`<span class="ind-chip">${cmpEsc(indName(r))} ${r.median20>=0?"+":""}${r.median20}%</span>`).join("")||`<span class="ind-chip">${LANG==="en"?"None":"目前無"}</span>`}</div></div>`).join("");
+}
+async function loadIndustries(){
+  if(IND_DATA||!$("#indRank"))return;
+  $("#indStatus").textContent=LANG==="en"?"Loading sector data…":"讀取產業資料…";
+  try{
+    const data=await readJson(await fetch("/api/industries"));
+    if(!data.ok)throw Error(data.error||(LANG==="en"?"No data":"無資料"));
+    IND_DATA=data;renderIndustries();
+  }catch(e){
+    $("#indStatus").textContent=LANG==="en"
+      ?"Sector analysis is being prepared. Please try again shortly."
+      :"產業分析正在背景建立中，請稍後再試。";
+  }
+}
+async function loadHomeIndustryBrief(){
+  const box=$("#homeIndustryBrief");if(!box)return;
+  try{
+    const data=await readJson(await fetch("/api/industries"));
+    if(!data.ok)throw Error();
+    const top=[...(data.industries||[])].sort((a,b)=>Number(b.median20)-Number(a.median20)).slice(0,3);
+    box.innerHTML=top.map((r,i)=>`<span>${i===0?(LANG==="en"?"Strongest recently":"近期最強"):(LANG==="en"?"Strong "+(i+1):"強勢 "+(i+1))}・<b>${cmpEsc(indName(r))}</b> ${indPct(r.median20)}</span>`).join("")
+      +`<span>${LANG==="en"?"As of":"資料截至"} ${data.as_of}</span>`;
+  }catch(e){
+    box.innerHTML=`<span>${LANG==="en"?"Sector data is updating; check again shortly":"產業資料正在更新，稍後再查看"}</span>`;
+  }
+}
+document.querySelectorAll("#indTabs button").forEach(button=>button.onclick=()=>{
+  IND_SORT=button.dataset.sort;
+  document.querySelectorAll("#indTabs button").forEach(x=>x.classList.toggle("on",x===button));
+  renderIndustries();
+});
+
+
 /* ---- 長期成長股列表 ---- */
 let GROW = null, GROW_SORT = "total";
 function growNum(v, dp){
@@ -7240,6 +7495,8 @@ if (START_PAGE === "p7") buildTwTable();
 if (START_PAGE === "p12") cmpInit();
 if (START_PAGE === "pmac") loadMacro();
 if (START_PAGE === "pgrow") loadGrowth();
+if (START_PAGE === "pind") loadIndustries();
+loadHomeIndustryBrief();
 applyCafeTheme(document.documentElement.dataset.theme||'b');
 const themeBtn=$("#themeBtn"),themePicker=$("#themePicker");if(themeBtn&&themePicker){themeBtn.onclick=e=>{e.stopPropagation();const open=themePicker.classList.toggle('show');themeBtn.setAttribute('aria-expanded',open?'true':'false')};themePicker.onclick=e=>e.stopPropagation();document.querySelectorAll('[data-theme-choice]').forEach(el=>el.onclick=()=>{applyCafeTheme(el.dataset.themeChoice);closeThemePicker()});document.addEventListener('click',closeThemePicker);document.addEventListener('keydown',e=>{if(e.key==='Escape')closeThemePicker()})}
 applyLang();
@@ -7312,6 +7569,15 @@ TW_URL = os.environ.get("TW_URL", "https://stock-coffee.com").strip()
 #    被收錄只會拉低整站的品質評價 —— 但網址仍然存在、可以直接連、可以分享。
 #    功能做完之後把 index 改成 True 即可，不必改別的地方。
 PAGE_ROUTES = {
+    "industries": {
+        "page": "pind", "index": True,
+        "zh": ("美股產業強弱分析｜20／60日動能、50MA寬度與領先股",
+               "以市值前 300 大美股的 Sector 報酬中位數、上漲家數、站上 50 日線與創新高比例，"
+               "觀察產業輪動、漲勢擴散與 RS60 領先股。"),
+        "en": ("US Sector Strength｜20/60-Day Momentum, 50MA Breadth and Leaders",
+               "Compare sectors within the top 300 US stocks using median returns, participation, "
+               "50-day moving-average breadth, 60-day highs and RS60 leaders."),
+    },
     "screener": {
         "page": "p1", "index": True,
         "zh": ("找強勢股｜美股均線篩選與均線排列",
@@ -8087,6 +8353,7 @@ def _render(slug=None):
     html = html.replace("__PHASE_BAR__", _phase_banner_html())
     html = html.replace("__UPDATE_NOTE__", _update_note_html())
     html = html.replace("__HOME_SCREEN__", _home_screen_html())
+    html = html.replace("__HOME_INDUSTRY_BRIEF__", _home_industry_brief_html())
     # ⚠️ 只放**公開**金鑰。VAPID_PRIVATE 絕對不能出現在頁面上。
     html = html.replace("__VAPID_PUBLIC__", VAPID_PUBLIC)
     # ⚠️ 中英兩份都送出，用 q-zh／q-en 包起來讓 applyLang() 能即時切換。
@@ -9302,6 +9569,15 @@ def api_growth():
     if d.get("error"):
         return jsonify(error=d["error"]), 503
     return jsonify(d)
+
+
+@app.route("/api/industries")
+def api_industries():
+    """產業強弱排名、四象限與 Sector 領先股；只讀背景快取。"""
+    data = get_industry_analysis()
+    if not data.get("industries"):
+        return jsonify(ok=False, error="產業分析正在背景建立中"), 503
+    return jsonify(ok=True, **data)
 
 
 @app.route("/api/macro")

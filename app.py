@@ -2064,10 +2064,54 @@ def get_growth():
 
 
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
-MACRO_CACHE_FILE = "us_rate_inflation_v4.json"   # v4: 新增日債 2Y／10Y／30Y 三年曲線
+MACRO_CACHE_FILE = "us_rate_inflation_v5.json"   # v5: 依美債資料日期判斷新鮮度，落後時每小時重試
 JGB_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
+MACRO_REFRESH_HOURS = 1
+_MACRO_REFRESH_LOCK = threading.Lock()
+MACRO_STATE = {"enabled": False, "last_run": "—", "last_result": "—",
+               "latest_us_date": "—"}
 # ⚠️ 新增欄位一定要換快取檔名。沿用舊檔會讓新那一格永遠讀到沒有它的舊快取，
 #    畫面上少一列、卻不會報錯 —— 這是 5.5「看起來正常才最危險」的同一類。
+
+
+def _business_days_behind(date_text, today=None):
+    """資料日期落後幾個平日；週末不會被誤判成延遲三天。"""
+    try:
+        current = datetime.strptime(str(date_text)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return 999
+    if today is None:
+        utc = _utcnow()
+        today = (utc - timedelta(hours=_et_offset_hours(utc))).date()
+    behind = 0
+    while current < today:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            behind += 1
+    return behind
+
+
+def _macro_us_is_current(data):
+    """美國 2Y／10Y／30Y 都不得落後超過一個平日。"""
+    items = {it.get("key"): it for it in (data or {}).get("items", [])}
+    keys = ("us2y", "us10y", "us30y")
+    if any(key not in items for key in keys):
+        return False
+    return max(_business_days_behind(items[key].get("date")) for key in keys) <= 1
+
+
+def _macro_refresh_due(data):
+    """已追上時每天更新；仍落後或抓取失敗時，每小時重試。"""
+    if not data:
+        return True
+    fetched = data.get("fetched_at")
+    try:
+        fetched_dt = datetime.strptime(fetched, "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+        age = _utcnow() - fetched_dt
+    except (TypeError, ValueError):
+        return True
+    hours = 24 if _macro_us_is_current(data) else MACRO_REFRESH_HOURS
+    return age.total_seconds() >= hours * 3600
 
 
 def _treasury_yields():
@@ -2208,11 +2252,11 @@ def _us_cpi_for_years(years):
     return answer
 
 
-def _us_rate_inflation_data():
+def _us_rate_inflation_data(force=False):
     """美日 2Y／10Y／30Y 公債、三年走勢與美國累積 CPI。"""
-    cached = _load_cache(MACRO_CACHE_FILE, 6)
-    if cached is not None:
-        return cached
+    previous_data = _load_cache(MACRO_CACHE_FILE, None)
+    if not force and previous_data is not None and not _macro_refresh_due(previous_data):
+        return previous_data
 
     now = datetime.utcnow()
     with ThreadPoolExecutor(max_workers=3) as ex:
@@ -2284,12 +2328,52 @@ def _us_rate_inflation_data():
     history, conclusions = _yield_analysis(treasury)
     jp_history = [{"date": r[0], "jp2y": r[1], "jp10y": r[2], "jp30y": r[3]}
                   for r in jgb]
+    # 單一來源暫時失敗時保留上一版；新抓回來的日期較舊時也不得讓畫面倒退。
+    if previous_data:
+        merged = {it.get("key"): it for it in previous_data.get("items", []) if it.get("key")}
+        for item in items:
+            old = merged.get(item.get("key"))
+            if not old or str(item.get("date", "")) >= str(old.get("date", "")):
+                merged[item.get("key")] = item
+        items = list(merged.values())
+        old_history = previous_data.get("yield_history", [])
+        if old_history and (not history or history[-1].get("date", "") < old_history[-1].get("date", "")):
+            history = old_history
+            conclusions = previous_data.get("yield_conclusions", [])
+        old_jp = previous_data.get("jp_yield_history", [])
+        if old_jp and (not jp_history or jp_history[-1].get("date", "") < old_jp[-1].get("date", "")):
+            jp_history = old_jp
     data = {"items": items, "yield_history": history, "jp_yield_history": jp_history,
             "yield_conclusions": conclusions,
-            "updated": now.strftime("%Y-%m-%d")}
+            "updated": now.strftime("%Y-%m-%d"),
+            "fetched_at": _utcnow().strftime("%Y-%m-%d %H:%M UTC")}
     if items:
         _save_cache(MACRO_CACHE_FILE, data)
     return data
+
+
+def _macro_updater():
+    """美債背景排程：啟動即檢查，落後時每小時重試直到不超過一個平日。"""
+    MACRO_STATE["enabled"] = True
+    while True:
+        try:
+            cached = _load_cache(MACRO_CACHE_FILE, None)
+            if _macro_refresh_due(cached):
+                with _MACRO_REFRESH_LOCK:
+                    data = _us_rate_inflation_data(force=True)
+                us_items = {it.get("key"): it for it in data.get("items", [])
+                            if it.get("key") in ("us2y", "us10y", "us30y")}
+                dates = [it.get("date") for it in us_items.values() if it.get("date")]
+                latest = min(dates) if len(dates) == 3 else "—"
+                MACRO_STATE["latest_us_date"] = latest
+                MACRO_STATE["last_result"] = (
+                    "更新完成" if _macro_us_is_current(data)
+                    else "來源仍落後，1 小時後重試")
+                MACRO_STATE["last_run"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        except Exception as exc:
+            MACRO_STATE["last_result"] = "更新失敗，1 小時後重試：%s" % str(exc)[:100]
+            MACRO_STATE["last_run"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        time.sleep(MACRO_REFRESH_HOURS * 3600)
 
 
 def _idx_from_fred():
@@ -3627,6 +3711,8 @@ __SEO_HEAD__
   .mstat .msub { font-family:var(--font-num); font-size:11.5px; color:var(--mocha); margin-top:5px; }
   .mstat .mnote { font-family:var(--font-head); font-weight:700; font-size:14px; margin-top:3px; }
   .yield-chart { width:100%; height:auto; display:block; overflow:visible; }
+  html[data-theme="c"] .yield-tip rect { fill:#101B20; stroke:#D2A65F; opacity:.98; }
+  html[data-theme="c"] .yield-tip text { fill:#F5EAD7; }
   .yield-legend { display:flex; gap:16px; flex-wrap:wrap; margin:8px 0 2px; font-size:12px; color:var(--mocha); }
   .yield-legend i { display:inline-block; width:18px; height:3px; margin-right:5px; vertical-align:middle; border-radius:2px; }
   .yield-findings { margin:8px 0 0; padding-left:20px; }
@@ -3948,6 +4034,8 @@ __SEO_HEAD__
   #sidebar { position:fixed; top:0; left:-300px; width:280px; height:100%; background:var(--foam);
              z-index:99; box-shadow:2px 0 20px rgba(51,36,26,.2); transition:left .25s;
              padding-top:78px; border-right:1.5px solid var(--grounds); }
+  #sidebar { overflow-y:auto; padding-bottom:calc(28px + env(safe-area-inset-bottom)); }
+  .nav-section { padding:13px 22px 5px; font-size:10.5px; font-weight:700; letter-spacing:.14em; color:#9a8775; text-transform:uppercase; }
   #sidebar .sbTitle { position:absolute; top:24px; left:22px;
              font-family:var(--font-brand); font-weight:600; font-size:19px; color:var(--espresso); }
   #sidebar.open { left:0; }
@@ -4164,7 +4252,7 @@ __SEO_HEAD__
   #themePicker{position:fixed;z-index:120;top:64px;right:14px;width:238px;padding:12px;background:var(--foam);border:1.5px solid var(--grounds);border-radius:16px;box-shadow:var(--shadow);display:none}#themePicker.show{display:block}
   .theme-picker-title{font-weight:700;font-size:13px;margin:0 0 8px;color:var(--espresso)}.theme-choice{width:100%;display:grid;grid-template-columns:38px 1fr 20px;gap:9px;align-items:center;border:0;border-radius:11px;padding:9px;background:transparent;color:var(--espresso);text-align:left;cursor:pointer}.theme-choice:hover,.theme-choice.on{background:var(--milk)}.theme-choice b{display:block;font-size:13px}.theme-choice small{display:block;color:var(--mocha);font-size:10.5px}.theme-check{font-weight:700;color:var(--caramel-2)}.theme-swatches{display:grid;grid-template-columns:repeat(2,15px);gap:3px}.theme-swatches i{height:15px;border-radius:50%;border:1px solid rgba(0,0,0,.12)}
   html[data-theme="c"] .card,html[data-theme="c"] .market-data-card,html[data-theme="c"] .market-now-hero,html[data-theme="c"] .home-action-panel{color:var(--espresso)}
-  html[data-theme="c"] .market-now-hero,html[data-theme="c"] .market-data-card,html[data-theme="c"] .home-action-panel{background:var(--foam)!important}
+  html[data-theme="c"] .market-now-hero,html[data-theme="c"] .market-data-card{background:var(--foam)!important}
   html[data-theme="c"] .market-periods button.on{background:var(--caramel-2);color:#17252B}
   #mktBtn { height:40px; padding:0 14px; border-radius:20px;
             border:1.5px solid var(--grounds); background:var(--foam);
@@ -4212,22 +4300,28 @@ __SEO_HEAD__
 <nav id="sidebar">
   <div class="sbTitle">☕ <span data-i18n="brand.name">美股咖啡館</span></div>
   <a class="navitem active" data-page="home" href="/"><i>☕</i><b data-i18n="nav.home">菜單首頁</b><small data-i18n="nav.home.sub">今天適合出手嗎</small></a>
+  <div class="nav-section"><span class="q-zh">研究市場</span><span class="q-en" style="display:none">Research</span></div>
   <details class="navgroup">
-    <summary><i>📋</i><b data-i18n="nav.group">選股菜單</b><small data-i18n="nav.group.sub">強勢股・拉回買點・利率</small></summary>
+    <summary><i>📋</i><b><span class="q-zh">選股與趨勢</span><span class="q-en" style="display:none">Stocks & trends</span></b><small><span class="q-zh">強勢股・拉回買點・長期成長</span><span class="q-en" style="display:none">Momentum, pullbacks and growth</span></small></summary>
     <a class="navitem sub" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
     <a class="navitem sub" data-page="p3" href="/pullback"><i>⭐</i><b data-i18n="p3.title">拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
-    <a class="navitem sub" data-page="p11" href="/consolidation"><i>🧭</i><b data-i18n="lev.title">正2 逐月績效</b><small data-i18n="nav.lev.sub">QLD・實際倍數</small></a>
     <a class="navitem sub" data-page="pgrow" href="/growth"><i>🌱</i><b data-i18n="grow.title">長期成長股列表</b><small data-i18n="nav.grow.sub">十年累計・年化報酬</small></a>
-    <a class="navitem sub" data-page="pmac" href="/macro"><i>🏦</i><b data-i18n="pmac.title">利率與購買力</b><small data-i18n="nav.macro.sub">美債 2Y・10Y・CPI</small></a>
   </details>
+  <details class="navgroup">
+    <summary><i>🌤️</i><b><span class="q-zh">市場工具</span><span class="q-en" style="display:none">Market tools</span></b><small><span class="q-zh">總經・正2・均線位置</span><span class="q-en" style="display:none">Macro, leverage and moving averages</span></small></summary>
+    <a class="navitem sub" data-page="pmac" href="/macro"><i>🏦</i><b data-i18n="pmac.title">利率與購買力</b><small data-i18n="nav.macro.sub">美債 2Y・10Y・CPI</small></a>
+    <a class="navitem sub" data-page="p11" href="/consolidation"><i>🧭</i><b data-i18n="lev.title">正2 逐月績效</b><small data-i18n="nav.lev.sub">QLD・實際倍數</small></a>
+    <a class="navitem sub" data-page="p10" href="/deduction"><i>📐</i><b data-i18n="nav.deduct">均線扣抵法</b><small data-i18n="nav.deduct.sub">50／100／150MA 何時追上</small></a>
+  </details>
+  <div class="nav-section"><span class="q-zh">我的工具</span><span class="q-en" style="display:none">My tools</span></div>
   <details class="navgroup">
     <summary><i>⭐</i><b data-i18n="nav.mine">我的自選股</b><small data-i18n="nav.mine.sub">績效・同期比較・風控・提醒</small></summary>
     <a class="navitem sub" data-page="p7" href="/twr"><i>📈</i><b data-i18n="p7.title">我的績效</b><small data-i18n="nav.twr.sub">TWR 報酬率試算</small></a>
     <a class="navitem sub" data-page="p12" href="/comparison"><i>⚖️</i><b data-i18n="p12.title">同期比較</b><small data-i18n="nav.compare.sub">如果當初買了別檔</small></a>
     <a class="navitem sub" data-page="p8" href="/risk"><i>🛡️</i><b data-i18n="p8.title">風控管理</b><small data-i18n="nav.risk.sub">ATR・波動率・趨勢・Beta</small></a>
     <a class="navitem sub" data-page="p4" href="/alerts"><i>🔔</i><b data-i18n="p4.title">推播通知</b><small data-i18n="nav.alert.sub">收盤到價提醒（測試中）</small></a>
-    <a class="navitem sub" data-page="p10" href="/deduction"><i>📐</i><b data-i18n="nav.deduct">均線扣抵法</b><small data-i18n="nav.deduct.sub">50／100／150MA 何時追上</small></a>
   </details>
+  <div class="nav-section"><span class="q-zh">學習與其他</span><span class="q-en" style="display:none">Learn & more</span></div>
   <a class="navitem" data-page="pm" href="/articles"><i>📚</i><b data-i18n="pm.title">文章區</b><small data-i18n="pm.sub">美股大盤與動量交易教學</small></a>
   <details class="navgroup">
     <summary><i>☕</i><b data-i18n="nav.pro">升級專業版</b><small data-i18n="nav.pro.sub">創新高・RS 指數</small></summary>
@@ -6998,7 +7092,7 @@ function yieldChart(rows,market="us"){
   const paths=keys.map(k=>{let d="";rows.forEach((r,i)=>{if(Number.isFinite(Number(r[k])))d+=(d?"L":"M")+x(i).toFixed(1)+" "+y(Number(r[k])).toFixed(1)+" ";});return `<path d="${d}" fill="none" stroke="${colors[k]}" stroke-width="2.2"/>`;}).join("");
   const ticks=[0,Math.floor((rows.length-1)/2),rows.length-1].map(i=>`<text x="${x(i)}" y="${H-10}" text-anchor="middle" fill="var(--mocha)" font-size="11">${rows[i].date.slice(0,7)}</text>`).join("");
   const title=market==="jp"?(LANG==="en"?"Japan government bond yields — 3 years":"日圓利率｜日債 2Y／10Y／30Y 三年走勢"):(LANG==="en"?"US Treasury yields — 3 years":"美債 2Y／10Y／30Y 三年走勢");
-  return `<div class="card"><h2>${title}</h2><div class="yield-legend"><span><i style="background:${colors[keys[0]]}"></i>2Y</span><span><i style="background:${colors[keys[1]]}"></i>10Y</span><span><i style="background:${colors[keys[2]]}"></i>30Y</span></div><svg class="yield-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${market==='jp'?'Japan government bond':'US Treasury'} yield chart" data-market="${market}" data-min="${min}" data-max="${max}">${grid}${paths}${ticks}<g class="yield-hover" visibility="hidden" pointer-events="none"><line class="yield-cross" y1="${T}" y2="${H-B}" stroke="var(--espresso)" stroke-width="1" stroke-dasharray="4 3" opacity=".55"/>${keys.map(k=>`<circle data-key="${k}" r="5" fill="${colors[k]}" stroke="white" stroke-width="2"/>`).join("")}<g class="yield-tip"><rect width="220" height="124" rx="10" fill="var(--espresso)" opacity=".96"/><text x="15" y="27" fill="white" font-size="18" font-weight="700"></text><text data-key="${keys[0]}" x="15" y="56" fill="white" font-size="18"></text><text data-key="${keys[1]}" x="15" y="84" fill="white" font-size="18"></text><text data-key="${keys[2]}" x="15" y="112" fill="white" font-size="18"></text></g></g><rect class="yield-hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent" style="cursor:crosshair;touch-action:none"/></svg><div class="status">${LANG==="en"?"Hover or drag to inspect daily yields.":"將滑鼠移到圖上，或用手指拖曳，可查看每日利率。"}</div></div>`;
+  return `<div class="card"><h2>${title}</h2><div class="yield-legend"><span><i style="background:${colors[keys[0]]}"></i>2Y</span><span><i style="background:${colors[keys[1]]}"></i>10Y</span><span><i style="background:${colors[keys[2]]}"></i>30Y</span></div><svg class="yield-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${market==='jp'?'Japan government bond':'US Treasury'} yield chart" data-market="${market}" data-min="${min}" data-max="${max}">${grid}${paths}${ticks}<g class="yield-hover" visibility="hidden" pointer-events="none"><line class="yield-cross" y1="${T}" y2="${H-B}" stroke="var(--espresso)" stroke-width="1" stroke-dasharray="4 3" opacity=".55"/>${keys.map(k=>`<circle data-key="${k}" r="5" fill="${colors[k]}" stroke="white" stroke-width="2"/>`).join("")}<g class="yield-tip"><rect width="240" height="136" rx="12" fill="var(--espresso)" stroke="var(--grounds)" stroke-width="2" opacity=".96"/><text x="16" y="29" fill="white" font-size="20" font-weight="700"></text><text data-key="${keys[0]}" x="16" y="60" fill="white" font-size="20"></text><text data-key="${keys[1]}" x="16" y="90" fill="white" font-size="20"></text><text data-key="${keys[2]}" x="16" y="120" fill="white" font-size="20"></text></g></g><rect class="yield-hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent" style="cursor:crosshair;touch-action:none"/></svg><div class="status">${LANG==="en"?"Hover or drag to inspect daily yields.":"將滑鼠移到圖上，或用手指拖曳，可查看每日利率。"}</div></div>`;
 }
 function setupYieldHover(svg,rows){
   if(!svg||!rows||rows.length<2)return;
@@ -7012,7 +7106,7 @@ function setupYieldHover(svg,rows){
     hover.setAttribute("visibility","visible");cross.setAttribute("x1",xx);cross.setAttribute("x2",xx);
     keys.forEach(k=>{const c=hover.querySelector(`circle[data-key="${k}"]`);c.setAttribute("cx",xx);c.setAttribute("cy",y(Number(row[k])));hover.querySelector(`text[data-key="${k}"]`).textContent=`${k.slice(2).toUpperCase()}: ${Number(row[k]).toFixed(2)}%`;});
     hover.querySelector("text:not([data-key])").textContent=row.date;
-    tip.setAttribute("transform",`translate(${xx>W-245?xx-230:xx+10} ${T+8})`);
+    tip.setAttribute("transform",`translate(${xx>W-265?xx-250:xx+10} ${T+8})`);
   }
   svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);
   svg.addEventListener("pointerleave",()=>hover.setAttribute("visibility","hidden"));
@@ -9212,7 +9306,7 @@ def api_growth():
 
 @app.route("/api/macro")
 def api_macro():
-    """美國公債殖利率與累積 CPI；公開唯讀資料，快取 6 小時。"""
+    """美國公債殖利率與累積 CPI；落後超過一個平日時每小時重試。"""
     try:
         return jsonify(_us_rate_inflation_data())
     except Exception as exc:
@@ -9282,6 +9376,7 @@ def api_prefetch_status():
     schedule = dict(SCHED_STATE)
     schedule.pop("thread_obj", None)
     st["schedule"] = schedule
+    st["macro_schedule"] = dict(MACRO_STATE)
     try:
         files = os.listdir(CACHE_DIR)
         st["cached_symbols"] = len([f for f in files if f.startswith("hist_")])
@@ -9342,6 +9437,12 @@ def _ensure_background():
                 SCHED_STATE["thread_obj"] = t2
             except Exception as e:
                 SCHED_STATE["loop_error"] = "執行緒建立失敗 %s: %s" % (type(e).__name__, e)
+            try:
+                t3 = threading.Thread(target=_macro_updater, name="macro-updater", daemon=True)
+                t3.start()
+                MACRO_STATE["thread_started"] = True
+            except Exception as e:
+                MACRO_STATE["last_result"] = "排程啟動失敗：%s" % str(e)[:100]
 
 
 @app.before_request

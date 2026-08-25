@@ -3441,6 +3441,7 @@ PAGE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 __SEO_HEAD__
 <meta name="theme-color" content="#33241A">
+<script>try{var savedTheme=localStorage.getItem('us-cafe-theme')||'b';document.documentElement.dataset.theme=['b','c','d'].includes(savedTheme)?savedTheme:'b'}catch(e){document.documentElement.dataset.theme='b'}</script>
 <link rel="icon" href="/icon.png?v=2" type="image/png" sizes="any">
 <link rel="shortcut icon" href="/icon.png?v=2" type="image/png">
 <link rel="apple-touch-icon" href="/icon.png?v=2">
@@ -3467,11 +3468,9 @@ __SEO_HEAD__
 <style>
 
   :root{
-    /* 咖啡館色系（介面外觀） */
-    --milk:#F1EAD9; --foam:#FBF6EC; --grounds:#E4D7C1;
-    --espresso:#33241A; --mocha:#6B5540; --caramel:#C68A3E; --caramel-2:#A56C24;
-    --primary:#C68A3E;         /* 主色別名＝焦糖，讓既有 var(--primary) 全部沿用 */
-    --bg:#F1EAD9;
+    /* B 京都喫茶（預設） */
+    --milk:#F3EFE2;--foam:#FFFDF7;--grounds:#BCC9B8;--espresso:#263A2D;--mocha:#607065;
+    --caramel:#A45E2A;--caramel-2:#42664C;--primary:#A45E2A;--bg:#F3EFE2;--page-edge:#E3DDCB;--page-glow:#FAF7ED;
     /* 行情紅綠（只給數據） */
     --up:#CB4B3A; --down:#4A7C64;
     --font-brand:"Noto Serif TC",serif;
@@ -3480,10 +3479,12 @@ __SEO_HEAD__
     --font-num:"Space Mono",ui-monospace,monospace;
     --shadow:0 14px 34px -20px rgba(51,36,26,.45);
   }
-  html { min-height:100%; background:#EADFC9; overscroll-behavior-y:none; }
+  html[data-theme="c"]{--milk:#17252B;--foam:#21343A;--grounds:#466068;--espresso:#F5EAD7;--mocha:#C5B9A5;--caramel:#B98942;--caramel-2:#D2A65F;--primary:#D2A65F;--bg:#17252B;--page-edge:#101B20;--page-glow:#263B42;--shadow:0 14px 34px -20px rgba(0,0,0,.8)}
+  html[data-theme="d"]{--milk:#F5EAE5;--foam:#FFF9F5;--grounds:#D8BBB3;--espresso:#50302F;--mocha:#7B675F;--caramel:#9B5148;--caramel-2:#7B6752;--primary:#9B5148;--bg:#F5EAE5;--page-edge:#E8D8D2;--page-glow:#FFF6F1}
+  html{min-height:100%;background:var(--page-edge);overscroll-behavior-y:none}
   * { box-sizing:border-box; font-family:var(--font-body); }
   body { margin:0; color:var(--espresso);
-    background:#EADFC9 radial-gradient(120% 80% at 50% -10%, #F7F1E4 0%, var(--milk) 55%, #EADFC9 100%);
+    background:var(--page-edge) radial-gradient(120% 80% at 50% -10%,var(--page-glow) 0%,var(--milk) 55%,var(--page-edge) 100%);
     min-height:100vh;            /* 舊瀏覽器 fallback */
     min-height:100svh;           /* 手機：網址列展開時的穩定可視高度 */
     min-height:100dvh;           /* 手機：跟著網址列伸縮的實際可視高度 */
@@ -3986,6 +3987,18 @@ __SEO_HEAD__
            margin:26px auto 14px; font-family:var(--font-head); font-weight:700;
            font-size:13px; color:var(--mocha); letter-spacing:.16em; }
   .qhead::after { content:""; flex:1; height:1px; background:var(--grounds); }
+  /* 首頁新版市場儀表板：結構與台股同步，均線口徑保留美股 50／150／200MA。 */
+  .home-dashboard{max-width:960px;margin:0 auto}.market-now{display:grid;gap:14px;margin-bottom:18px}
+  .market-now-hero,.market-data-card,.home-action-panel{background:var(--foam);border:1px solid var(--grounds);border-radius:16px;box-shadow:var(--shadow)}
+  .market-now-hero{padding:22px 28px}.market-now-title{display:flex;align-items:center;gap:18px}.market-now-title h1{margin:0;font-size:34px;text-align:left}.market-now-title h1::after{display:none}
+  .market-now-badge{padding:7px 17px;border-radius:999px;background:linear-gradient(135deg,var(--caramel),var(--caramel-2));color:#fff;font-weight:700}.market-now-hero p{margin:9px 0 0;color:var(--mocha);line-height:1.7}
+  .market-now-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}.market-data-card{padding:17px}.market-data-card h2{font-size:17px;margin:0 0 10px;font-family:var(--font-head)}
+  .market-return-row{display:grid;grid-template-columns:130px 1fr 112px;align-items:center;border-top:1px solid var(--grounds);padding:12px 0;gap:8px}.market-return-row:first-of-type{border-top:0}.market-return-main,.market-return-med{text-align:right;font-family:var(--font-num);font-size:12px}.market-return-med b{display:block;font-size:16px}
+  .breadth-row{display:grid;grid-template-columns:48px 1fr 94px;gap:9px;align-items:center;margin:11px 0;font-size:12px}.breadth-bar{height:10px;border-radius:6px;overflow:hidden;background:var(--grounds);display:flex}.breadth-above{background:#278153}.breadth-below{background:#c84335}.breadth-num{text-align:right;font-family:var(--font-num);font-size:11px}.breadth-num .up{color:#278153}.breadth-num .down{color:#c84335}.breadth-legend{display:flex;gap:14px;color:var(--mocha);font-size:10px;margin-top:8px}.breadth-legend i{display:inline-block;width:8px;height:8px;margin-right:4px}
+  .market-chart-card{padding-bottom:10px}.market-chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center}.market-periods{display:flex}.market-periods button{border:1px solid var(--grounds);border-right:0;background:var(--foam);padding:7px 14px;cursor:pointer;color:var(--mocha)}.market-periods button:first-child{border-radius:8px 0 0 8px}.market-periods button:last-child{border-right:1px solid var(--grounds);border-radius:0 8px 8px 0}.market-periods button.on{background:var(--espresso);color:var(--milk)}
+  #homeIndexChart svg{width:100%;height:auto;display:block;touch-action:none;cursor:grab;user-select:none}#homeIndexChart svg.dragging{cursor:grabbing}.home-chart-read{min-height:20px;font:12px var(--font-num);color:var(--mocha);margin:2px 0 0 45px}.market-chart-note{font-size:11px;color:var(--mocha);text-align:right;margin-top:-3px}
+  .home-action-panel{padding:4px 16px 16px}.home-action-panel .qhead{margin-top:14px}
+  @media(max-width:700px){.market-now-grid{grid-template-columns:1fr}.market-now-hero{padding:18px}.market-now-title h1{font-size:28px}.market-return-row{grid-template-columns:105px 1fr}.market-return-med{grid-column:2}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods{width:100%}.market-periods button{flex:1;padding:7px 4px}}
   /* 今日市場：市場階段（可展開看說明） */
   /* 到價提醒的股票選擇器（自台股版移植） */
   .stockpick { position:relative; }
@@ -4145,6 +4158,12 @@ __SEO_HEAD__
   #topBtns { position:fixed; top:14px; right:14px; z-index:100;
              display:flex; gap:8px; align-items:center; }
   #topBtns #langBtn, #topBtns #mktBtn { position:static; top:auto; right:auto; }
+  #themeBtn{height:40px;padding:0 13px;border-radius:20px;border:1.5px solid var(--grounds);background:var(--foam);color:var(--caramel-2);cursor:pointer;font-size:13px;font-weight:700;box-shadow:var(--shadow);white-space:nowrap}
+  #themePicker{position:fixed;z-index:120;top:64px;right:14px;width:238px;padding:12px;background:var(--foam);border:1.5px solid var(--grounds);border-radius:16px;box-shadow:var(--shadow);display:none}#themePicker.show{display:block}
+  .theme-picker-title{font-weight:700;font-size:13px;margin:0 0 8px;color:var(--espresso)}.theme-choice{width:100%;display:grid;grid-template-columns:38px 1fr 20px;gap:9px;align-items:center;border:0;border-radius:11px;padding:9px;background:transparent;color:var(--espresso);text-align:left;cursor:pointer}.theme-choice:hover,.theme-choice.on{background:var(--milk)}.theme-choice b{display:block;font-size:13px}.theme-choice small{display:block;color:var(--mocha);font-size:10.5px}.theme-check{font-weight:700;color:var(--caramel-2)}.theme-swatches{display:grid;grid-template-columns:repeat(2,15px);gap:3px}.theme-swatches i{height:15px;border-radius:50%;border:1px solid rgba(0,0,0,.12)}
+  html[data-theme="c"] .card,html[data-theme="c"] .market-data-card,html[data-theme="c"] .market-now-hero,html[data-theme="c"] .home-action-panel{color:var(--espresso)}
+  html[data-theme="c"] .market-now-hero,html[data-theme="c"] .market-data-card,html[data-theme="c"] .home-action-panel{background:var(--foam)!important}
+  html[data-theme="c"] .market-periods button.on{background:var(--caramel-2);color:#17252B}
   #mktBtn { height:40px; padding:0 14px; border-radius:20px;
             border:1.5px solid var(--grounds); background:var(--foam);
             color:var(--espresso); cursor:pointer; display:inline-flex;
@@ -4166,8 +4185,13 @@ __SEO_HEAD__
 <button id="menuBtn" aria-label="選單" data-i18n-aria="ui.menu"><span></span><span></span><span></span></button>
 <div id="topBtns">
   <a id="mktBtn" href="__TW_URL__" title="切換到台股咖啡館" aria-label="切換到台股咖啡館" data-i18n-aria="ui.mkt.aria">🇹🇼 <span data-i18n="ui.mkt">台股</span></a>
+  <button id="themeBtn" type="button" aria-label="選擇咖啡館外觀" aria-expanded="false">☕ 外觀</button>
   <button id="langBtn" title="切換公司與產業的顯示語言">EN</button>
 </div>
+<div id="themePicker" role="dialog" aria-label="咖啡館外觀"><div class="theme-picker-title"><span class="q-zh">選擇咖啡館外觀</span><span class="q-en" style="display:none">Choose café theme</span></div>
+<button class="theme-choice" data-theme-choice="b"><span class="theme-swatches"><i style="background:#F3EFE2"></i><i style="background:#42664C"></i><i style="background:#A45E2A"></i><i style="background:#FFFDF7"></i></span><span><b>B・京都喫茶</b><small>Kyoto Kissaten</small></span><span class="theme-check"></span></button>
+<button class="theme-choice" data-theme-choice="c"><span class="theme-swatches"><i style="background:#17252B"></i><i style="background:#21343A"></i><i style="background:#D2A65F"></i><i style="background:#F5EAD7"></i></span><span><b>C・午夜爵士</b><small>Midnight Jazz</small></span><span class="theme-check"></span></button>
+<button class="theme-choice" data-theme-choice="d"><span class="theme-swatches"><i style="background:#F5EAE5"></i><i style="background:#98574C"></i><i style="background:#7B6752"></i><i style="background:#FFF9F5"></i></span><span><b>D・玫瑰摩卡</b><small>Rose Mocha</small></span><span class="theme-check"></span></button></div>
 <div id="overlay"></div>
 
 <div id="brewModal">
@@ -4246,21 +4270,24 @@ __SEO_HEAD__
          · __PHASE_BAR__ 只讀快取、零成本，一進來就看得到答案
          · 「大盤詳細數據」要展開才去打 /api/breadth，
            不讓每個訪客都觸發後端工作（台股版踩過，見台股 5.4） -->
-  <div class="qhead" data-i18n="home.mhead">今日市場 · MARKET</div>
-
-__PHASE_BAR__
+  <div class="home-dashboard">
+__HOME_MARKET_DASHBOARD__
 
 __UPDATE_NOTE__
 
   <details class="mk-box" id="brBox">
-    <summary><span class="mk-main"><b data-i18n="br.open">大盤詳細數據</b></span></summary>
+    <summary><span class="mk-main"><b><span class="q-zh">市場階段與大盤詳細數據</span><span class="q-en" style="display:none">Market stage and details</span></b></span></summary>
     <div class="mk-body">
+      __PHASE_BAR__
       <div class="status" id="brStatus"></div>
       <div id="brBody"></div>
     </div>
   </details>
 
+  <section class="home-action-panel"><div class="qhead"><span class="q-zh">今日觀察 · ACTIONS</span><span class="q-en" style="display:none">WHAT TO EXPLORE</span></div>
+
 __HOME_SCREEN__
+  </section></div>
 
   <!-- ⚠️ 這裡原本是「找強勢股／拉回找買點」兩張 menu-item 卡。
        2026-08-07 移除 —— 左側選單已經有同樣的入口，首頁再放一次只是重複，
@@ -4815,6 +4842,9 @@ __QUOTES_HTML__
 const $ = s => document.querySelector(s);
 const APP_TOKEN = "__APP_TOKEN__";
 const START_PAGE = "__START_PAGE__";
+const CAFE_THEMES=['b','c','d'];
+function applyCafeTheme(name){const theme=CAFE_THEMES.includes(name)?name:'b';document.documentElement.dataset.theme=theme;try{localStorage.setItem('us-cafe-theme',theme)}catch(e){}document.querySelectorAll('[data-theme-choice]').forEach(el=>{const on=el.dataset.themeChoice===theme;el.classList.toggle('on',on);const c=el.querySelector('.theme-check');if(c)c.textContent=on?'✓':''});const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=theme==='c'?'#17252B':theme==='d'?'#50302F':'#263A2D'}
+function closeThemePicker(){const p=$("#themePicker"),b=$("#themeBtn");if(p)p.classList.remove('show');if(b)b.setAttribute('aria-expanded','false')}
 
 /* ---- 顯示語言（機制與台股版相同）----
    data-i18n      → 換 textContent（中文原文自動備份在 data-zh，不會遺失）
@@ -5102,6 +5132,8 @@ function applyLang(){
     el.style.display = (LANG === "en") ? "" : "none";
   });
   document.documentElement.lang = (LANG === "zh") ? "zh-Hant-TW" : "en";
+  const themeLabel = $("#themeBtn");
+  if (themeLabel) themeLabel.textContent = (LANG === "zh") ? "☕ 外觀" : "☕ Theme";
   document.title = (LANG === "zh") ? TITLE_ZH : TITLE_EN;
   /* canonical 跟著語言走，與伺服器端注入的規則一致（英文＝?lang=en）。 */
   const can = document.querySelector('link[rel="canonical"]');
@@ -5639,6 +5671,20 @@ function applyAll(tbId, cdId, rows, secId, epsId, alignId, nhId){
   });
 }
 
+function drawHomeIndex(days=756){
+  const box=$("#homeIndexChart");if(!box)return;let all=[];try{all=JSON.parse(box.dataset.series||"[]")}catch(e){}
+  const rows=all.slice(-days);if(rows.length<2){box.innerHTML='<div class="status">No index data</div>';return}
+  const prices=rows.map(r=>Number(r[1])).sort((a,b)=>a-b),n=prices.length,median=n%2?prices[(n-1)/2]:(prices[n/2-1]+prices[n/2])/2;
+  const vals=rows.map(r=>(Number(r[1])/median-1)*100),W=900,H=190,L=45,R=72,T=12,B=25,lo=Math.min(0,...vals),hi=Math.max(0,...vals),span=Math.max(.01,hi-lo);
+  const x=i=>L+i/(rows.length-1)*(W-L-R),y=v=>T+(hi-v)/span*(H-T-B),pct=v=>`${v>0?'+':''}${v.toFixed(0)}%`;
+  const pts=vals.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' '),grid=[hi,0,lo].filter((v,i,a)=>i===0||Math.abs(v-a[i-1])>.5).map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grounds)" stroke-dasharray="4 3"/><text x="${L-6}" y="${y(v)+3}" text-anchor="end" font-size="10" fill="var(--mocha)">${pct(v)}</text>`).join('');
+  box.innerHTML=`<div class="home-chart-read"></div><svg viewBox="0 0 ${W} ${H}" aria-label="Nasdaq versus period median">${grid}<polyline points="${pts}" fill="none" stroke="var(--caramel-2)" stroke-width="2"/><line class="home-chart-guide" y1="${T}" y2="${H-B}" stroke="var(--mocha)" opacity="0"/><circle class="home-chart-dot" r="4" fill="var(--caramel-2)" stroke="var(--foam)" stroke-width="1.5" opacity="0"/><text x="${L}" y="${H-5}" font-size="10" fill="var(--mocha)">${rows[0][0].slice(0,7)}</text><text x="${W-R}" y="${H-5}" text-anchor="end" font-size="10" fill="var(--mocha)">${rows.at(-1)[0].slice(0,7)}</text><text x="${W-4}" y="${y(0)+3}" text-anchor="end" font-size="10" fill="var(--mocha)">${LANG==='en'?'Period median · 0%':'期間中位數 · 0%'}</text></svg>`;
+  const svg=box.querySelector('svg'),read=box.querySelector('.home-chart-read'),guide=box.querySelector('.home-chart-guide'),dot=box.querySelector('.home-chart-dot');
+  const show=clientX=>{const r=svg.getBoundingClientRect();let i=Math.round((((clientX-r.left)/r.width*W)-L)/(W-L-R)*(rows.length-1));i=Math.max(0,Math.min(rows.length-1,i));const gx=x(i),v=vals[i];read.textContent=LANG==='en'?`${rows[i][0]} · Nasdaq ${Number(rows[i][1]).toLocaleString()} · ${v>=0?'+':''}${v.toFixed(2)}% vs median`:`${rows[i][0]}　納斯達克 ${Number(rows[i][1]).toLocaleString()}　相對中位數 ${v>=0?'+':''}${v.toFixed(2)}%`;guide.setAttribute('x1',gx);guide.setAttribute('x2',gx);guide.setAttribute('opacity','.45');dot.setAttribute('cx',gx);dot.setAttribute('cy',y(v));dot.setAttribute('opacity','1')};
+  svg.addEventListener('pointerdown',e=>{e.preventDefault();svg.classList.add('dragging');svg.setPointerCapture(e.pointerId);show(e.clientX)});svg.addEventListener('pointermove',e=>{if(e.pointerType==='mouse'||svg.hasPointerCapture(e.pointerId)){e.preventDefault();show(e.clientX)}});const release=e=>{svg.classList.remove('dragging');if(svg.hasPointerCapture(e.pointerId))svg.releasePointerCapture(e.pointerId)};svg.addEventListener('pointerup',release);svg.addEventListener('pointercancel',release);show(svg.getBoundingClientRect().right-(R/W)*svg.getBoundingClientRect().width);
+}
+document.querySelectorAll('.market-periods button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.market-periods button').forEach(x=>x.classList.toggle('on',x===b));drawHomeIndex(Number(b.dataset.days))});drawHomeIndex();
+
 /* ---- 大盤詳細數據：市場寬度的歷史折線圖 ----
    ⚠️ **展開才抓**，收合再展開不重複請求（照台股版 baro-box 的做法）。
       首頁每個訪客都會載入，不能一進來就打 API。
@@ -5648,6 +5694,9 @@ const brBox = $("#brBox");
 brBox && brBox.addEventListener("toggle", () => {
   if (!brBox.open || brBox.dataset.loaded) return;
   brBox.dataset.loaded = "1";
+  /* 新首頁已顯示市場寬度與指數中位數；收合區只保留市場階段，避免觀點二、三重複。 */
+  $("#brStatus").textContent = "";
+  return;
   $("#brStatus").textContent = t("br.loading", "載入中…");
   fetch("/api/breadth", { headers: { "X-App-Token": APP_TOKEN } })
     .then(r => r.json())
@@ -7104,6 +7153,8 @@ if (START_PAGE === "p7") buildTwTable();
 if (START_PAGE === "p12") cmpInit();
 if (START_PAGE === "pmac") loadMacro();
 if (START_PAGE === "pgrow") loadGrowth();
+applyCafeTheme(document.documentElement.dataset.theme||'b');
+const themeBtn=$("#themeBtn"),themePicker=$("#themePicker");if(themeBtn&&themePicker){themeBtn.onclick=e=>{e.stopPropagation();const open=themePicker.classList.toggle('show');themeBtn.setAttribute('aria-expanded',open?'true':'false')};themePicker.onclick=e=>e.stopPropagation();document.querySelectorAll('[data-theme-choice]').forEach(el=>el.onclick=()=>{applyCafeTheme(el.dataset.themeChoice);closeThemePicker()});document.addEventListener('click',closeThemePicker);document.addEventListener('keydown',e=>{if(e.key==='Escape')closeThemePicker()})}
 applyLang();
 </script>
 </body>
@@ -7728,6 +7779,71 @@ def _phase_banner_html():
         '</div></div></details>')
 
 
+def _home_market_dashboard_html():
+    """首頁首屏：近期選股結果、今日市場寬度與納斯達克相對期間中位數。"""
+    import html as _h
+    counts = _load_cache(MARKET_COUNT_CACHE, None) or {}
+    recent = (counts.get("recent_returns") or {}).get("rows") or []
+    by_day = {int(r.get("days", 0)): r for r in recent}
+    r20, r60 = by_day.get(20, {}), by_day.get(60, {})
+    win20 = float(r20.get("win_pct") or 0)
+    med20 = float(r20.get("median_return") or 0)
+    med60 = float(r60.get("median_return") or 0)
+    snap = get_ma_breadth_snapshot() or {}
+    long_rows = [r for r in snap.get("rows", []) if int(r.get("period") or 0) in (150, 200)]
+    long_breadth = (sum(float(r.get("pct") or 0) for r in long_rows) / len(long_rows)
+                    if long_rows else None)
+    if not r20:
+        zh_badge, en_badge = "資料整理中", "Updating"
+        zh, en = "近期選股資料正在更新。", "Recent stock-selection data is updating."
+    elif med20 >= 7 and win20 >= 65 and med60 >= 5:
+        zh_badge, en_badge = "明顯偏強", "Clearly strong"
+        zh, en = "多數個股參與上漲，20日漲幅明顯，60日趨勢也維持正向。", "Participation is broad, the 20-session gain is meaningful and the 60-session trend remains positive."
+    elif med20 >= 3 and win20 >= 55 and med60 >= 0:
+        zh_badge, en_badge = "溫和偏強", "Moderately strong"
+        zh, en = "上漲家數過半，個股中位漲幅已有強度，近期選股環境偏有利。", "More than half advanced and the median gain has meaningful strength."
+    elif med20 <= -3 and win20 < 45:
+        zh_badge, en_badge = "明顯偏弱", "Clearly weak"
+        zh, en = "多數個股下跌且中位報酬明顯為負，近期選股難度高。", "Most stocks fell and the median return is clearly negative."
+    elif -3 < med20 < 3:
+        zh_badge, en_badge = "盤整偏弱", "Weak consolidation"
+        zh, en = "個股20日中位報酬不足3%，整體漲幅有限，行情以區間整理為主。", "The 20-session median return is below 3%, so gains are limited and the market is range-bound."
+    else:
+        zh_badge, en_badge = "盤勢整理", "Consolidating"
+        zh, en = "報酬強弱與上漲家數沒有同步，類股表現分化。", "Return strength and participation disagree, indicating a divided market."
+    if r20 and long_breadth is not None:
+        if long_breadth >= 60:
+            zh += " 150／200日線寬度偏高，市場位階較高。"; en += " 150/200-day breadth indicates a higher market position."
+        elif long_breadth <= 40:
+            zh += " 150／200日線寬度偏低，市場仍處低位階。"; en += " 150/200-day breadth remains at a lower market position."
+
+    def ret_row(days):
+        r = by_day.get(days)
+        if not r: return ""
+        med = float(r.get("median_return") or 0); sign = "+" if med >= 0 else ""
+        color = "#278153" if med >= 0 else "#c84335"
+        return ('<div class="market-return-row"><span><span class="q-zh">過去 %d 個交易日</span><span class="q-en" style="display:none">Past %d sessions</span></span>' % (days, days)
+                + '<span class="market-return-main"><b>%s</b> / %s <span class="q-zh">檔上漲</span><span class="q-en" style="display:none">advanced</span> · <b>%.1f%%</b></span>' % (r.get("winners",0),r.get("base",0),float(r.get("win_pct") or 0))
+                + '<span class="market-return-med"><span class="q-zh">中位報酬</span><span class="q-en" style="display:none">Median return</span><b style="color:%s">%s%.2f%%</b></span></div>' % (color,sign,med))
+    breadth_rows = ""
+    labels = {50:("季線","50MA"),150:("中長期","150MA"),200:("年線","200MA")}
+    for r in snap.get("rows", []):
+        p=int(r.get("period") or 0)
+        if p not in labels or r.get("pct") is None: continue
+        above=float(r["pct"]); below=max(0,100-above); zh_l,en_l=labels[p]
+        breadth_rows += ('<div class="breadth-row"><b><span class="q-zh">%s</span><span class="q-en" style="display:none">%s</span></b>' % (zh_l,en_l)
+                         + '<div class="breadth-bar"><span class="breadth-above" style="width:%.1f%%"></span><span class="breadth-below" style="width:%.1f%%"></span></div><span class="breadth-num"><span class="up">%.1f%%</span> ｜ <span class="down">%.1f%%</span></span></div>' % (above,below,above,below))
+    idx = _load_cache("nasdaq_index.json", None) or {}
+    series = [[str(k),round(float(v),2)] for k,v in sorted(idx.items()) if v is not None][-MARKET_INDEX_KEEP:]
+    encoded = _h.escape(json.dumps(series,separators=(",",":")),quote=True)
+    as_of = (counts.get("recent_returns") or {}).get("as_of") or snap.get("date") or "—"
+    return ('<section class="market-now"><div class="market-now-hero"><div class="market-now-title"><h1><span class="q-zh">今日市場</span><span class="q-en" style="display:none">Today’s Market</span></h1>'
+            '<span class="market-now-badge"><span class="q-zh">'+zh_badge+'</span><span class="q-en" style="display:none">'+en_badge+'</span></span></div><p><span class="q-zh">'+zh+'</span><span class="q-en" style="display:none">'+en+'</span>　'+_h.escape(str(as_of))+'</p></div>'
+            '<div class="market-now-grid"><div class="market-data-card"><h2><span class="q-zh">近期選股環境（回顧）</span><span class="q-en" style="display:none">Recent selection environment</span></h2>'+ret_row(20)+ret_row(60)+'</div>'
+            '<div class="market-data-card"><h2><span class="q-zh">市場寬度</span><span class="q-en" style="display:none">Market breadth</span></h2>'+breadth_rows+'<div class="breadth-legend"><span><i style="background:#278153"></i><span class="q-zh">站上均線</span><span class="q-en" style="display:none">Above MA</span></span><span><i style="background:#c84335"></i><span class="q-zh">跌破均線</span><span class="q-en" style="display:none">Below MA</span></span></div></div></div>'
+            '<div class="market-data-card market-chart-card"><div class="market-chart-head"><h2><span class="q-zh">納斯達克・相對期間中位數</span><span class="q-en" style="display:none">Nasdaq vs period median</span></h2><div class="market-periods"><button class="on" data-days="756">3Y</button><button data-days="252">1Y</button><button data-days="126">6M</button><button data-days="63">3M</button></div></div><div id="homeIndexChart" data-series="'+encoded+'"></div><div class="market-chart-note"><span class="q-zh">縱軸0%＝所選期間收盤中位數；只描述相對位置，不預測未來。</span><span class="q-en" style="display:none">0% is the selected period’s median close; this describes position, not the future.</span></div></div></section>')
+
+
 def _lifecycle_html(phase):
     """首頁六階段市場地圖；中英文同時渲染，交由既有語言切換顯示。"""
     import html as _h
@@ -7880,6 +7996,7 @@ def _render(slug=None):
     html = PAGE.replace("__APP_TOKEN__", make_app_token())
     html = html.replace("__START_PAGE__", start_page, 1)
     html = html.replace("__TW_URL__", TW_URL)
+    html = html.replace("__HOME_MARKET_DASHBOARD__", _home_market_dashboard_html())
     html = html.replace("__PHASE_BAR__", _phase_banner_html())
     html = html.replace("__UPDATE_NOTE__", _update_note_html())
     html = html.replace("__HOME_SCREEN__", _home_screen_html())

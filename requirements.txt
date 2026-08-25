@@ -3,3 +3,4 @@ requests
 gunicorn
 pywebpush
 psycopg2-binary
+holidays==0.102

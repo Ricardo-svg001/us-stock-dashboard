@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import requests
+import holidays
 from flask import Flask, jsonify, request, render_template_string
 
 # ---------------------------------------------------------------- 基本設定
@@ -2149,19 +2150,58 @@ MACRO_STATE = {"enabled": False, "last_run": "—", "last_result": "—",
 #    畫面上少一列、卻不會報錯 —— 這是 5.5「看起來正常才最危險」的同一類。
 
 
-def _business_days_behind(date_text, today=None):
-    """資料日期落後幾個平日；週末不會被誤判成延遲三天。"""
+_MARKET_HOLIDAY_CACHE = {}
+
+
+def _easter_sunday(year):
+    """Meeus/Jones/Butcher 演算法；用來補美國債市休市的 Good Friday。"""
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = b // 4, b % 4
+    f, g = (b + 8) // 25, (b - (b + 8) // 25 + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = (h + l - 7 * m + 114) % 31 + 1
+    return datetime(year, month, day).date()
+
+
+def _market_holidays(market, years):
+    """各市場官方假日；美債另補 Good Friday 休市。"""
+    key = (market or "weekday", tuple(sorted(set(years))))
+    if key in _MARKET_HOLIDAY_CACHE:
+        return _MARKET_HOLIDAY_CACHE[key]
+    if market not in ("tw", "us", "jp"):
+        result = set()
+    else:
+        country = {"tw": "TW", "us": "US", "jp": "JP"}[market]
+        result = set(holidays.country_holidays(country, years=key[1]).keys())
+        if market == "us":
+            result.update(_easter_sunday(year) - timedelta(days=2) for year in key[1])
+    _MARKET_HOLIDAY_CACHE[key] = result
+    return result
+
+
+def _business_days_behind(date_text, today=None, market=None):
+    """資料日期落後幾個該市場交易日；排除週末與當地休市日。"""
     try:
         current = datetime.strptime(str(date_text)[:10], "%Y-%m-%d").date()
     except (TypeError, ValueError):
         return 999
     if today is None:
         utc = _utcnow()
-        today = (utc - timedelta(hours=_et_offset_hours(utc))).date()
+        if market == "jp":
+            today = (utc + timedelta(hours=9)).date()
+        elif market == "tw":
+            today = (utc + timedelta(hours=8)).date()
+        else:
+            today = (utc - timedelta(hours=_et_offset_hours(utc))).date()
+    closed = _market_holidays(market, range(current.year, today.year + 1))
     behind = 0
     while current < today:
         current += timedelta(days=1)
-        if current.weekday() < 5:
+        if current.weekday() < 5 and current not in closed:
             behind += 1
     return behind
 
@@ -2169,10 +2209,11 @@ def _business_days_behind(date_text, today=None):
 def _macro_bonds_are_current(data):
     """美國與日本 2Y／10Y／30Y 都不得落後超過一個平日。"""
     items = {it.get("key"): it for it in (data or {}).get("items", [])}
-    for keys in (("us2y", "us10y", "us30y"), ("jp2y", "jp10y", "jp30y")):
+    for market, keys in (("us", ("us2y", "us10y", "us30y")),
+                         ("jp", ("jp2y", "jp10y", "jp30y"))):
         if any(key not in items for key in keys):
             return False
-        if max(_business_days_behind(items[key].get("date")) for key in keys) > 1:
+        if max(_business_days_behind(items[key].get("date"), market=market) for key in keys) > 1:
             return False
     return True
 
@@ -8368,7 +8409,8 @@ def _data_health_snapshot():
         return "overdue", "資料落後超過允許天數", "Data exceeds allowed delay", "danger"
 
     for key, actual in actuals.items():
-        lag = _business_days_behind(actual)
+        market = "us" if health_key == "us_yields" else "jp"
+        lag = _business_days_behind(actual, market=market)
         status, zh_text, en_text, severity = quality(
             lag, "失敗" in failed_hint or "failed" in failed_hint.lower())
         items[key] = {"actual": actual, "business_days_behind": lag, "status": status,

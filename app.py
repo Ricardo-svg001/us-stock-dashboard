@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.25.5"
+APP_VERSION = "2026.08.25.6"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -3332,8 +3332,8 @@ PHASE_UI = {
                        "zh_do": "均線仍嚴格空頭，但大盤已連續三日站上季線",
                        "en_do": "MAs remain strictly bearish, but the index has closed above its 60-day MA for three sessions"},
     "recovery_confirmed": {"dot": "🔵", "zh": "復甦確認", "en": "Recovery Confirmed",
-                           "zh_do": "均線非多頭排列，但大盤連續三日站上半年線4%以上",
-                           "en_do": "MAs are not bullish, but the index stayed more than 4% above its 120-day MA for three sessions"},
+                           "zh_do": "廣義空頭啟動觀察後，大盤連續三日站上半年線4%以上",
+                           "en_do": "After a broad bearish alignment triggered observation, the index stayed more than 4% above its 120-day MA for three sessions"},
 }
 
 # 首頁五階段依均線排列與乖離判斷；順序依使用者指定的判斷表呈現。
@@ -3342,7 +3342,7 @@ MARKET_LIFECYCLE = [
     ("transition", "多頭回檔", "非多頭排列；至少兩條短均線與季線乖離<5%連3日；季線>半年線", "Bull-market Pullback", "Not bullish; two short MAs within 5% of 60MA for 3 sessions; 60MA above 120MA"),
     ("riskoff", "逆風市場", "連三日低於半年線3%以上", "Headwind", "More than 3% below the 120-day MA for three sessions"),
     ("recovery_early", "初步復甦", "空頭排列中連三日站上季線", "Early Recovery", "Above the 60-day MA for three sessions while MAs remain bearish"),
-    ("recovery_confirmed", "復甦確認", "非多頭排列且連三日站上半年線4%以上", "Recovery Confirmed", "Not bullish and more than 4% above 120MA for three sessions"),
+    ("recovery_confirmed", "復甦確認", "120MA>20MA或60MA後啟動觀察；連三日站上120MA逾4%", "Recovery Confirmed", "Watch after 120MA rises above 20MA or 60MA; then 3 closes over 4% above 120MA"),
 ]
 LIFECYCLE_STAGE = {phase: i for i, (phase, *_rest) in enumerate(MARKET_LIFECYCLE, 1)}
 
@@ -3455,12 +3455,18 @@ def _five_stage_from_index(index_data):
         return close, mas, near_season
 
     phase, trigger_date = None, ""
+    recovery_watch = False
     latest_detail = {}
     start = max(MARKET_PHASE_MAS) - 1 + PHASE_CONFIRM_DAYS - 1
     for pos in range(start, len(points)):
         close, mas, near_season = snapshot(pos)
         recent = [snapshot(i) for i in range(pos - PHASE_CONFIRM_DAYS + 1, pos + 1)]
         bullish = (mas[5] > mas[20] and mas[10] > mas[20] > mas[60] > mas[120])
+        broad_bear = mas[120] > mas[20] or mas[120] > mas[60]
+        if bullish:
+            recovery_watch = False
+        elif broad_bear:
+            recovery_watch = True
         strict_bear = all(mas[a] < mas[b] for a, b in zip(MARKET_PHASE_MAS, MARKET_PHASE_MAS[1:]))
         compressed_3d = all(row[2] for row in recent)
         above_60_3d = all(row[0] > row[1][60] for row in recent)
@@ -3471,12 +3477,12 @@ def _five_stage_from_index(index_data):
         signal = None
         if bullish:
             signal = "tailwind"
+        elif recovery_watch and above_120_4pct_3d:
+            signal = "recovery_confirmed"
         elif compressed_3d and mas[60] > mas[120]:
             signal = "transition"
         elif strict_bear and above_60_3d:
             signal = "recovery_early"
-        elif above_120_4pct_3d:
-            signal = "recovery_confirmed"
         elif below_120_3pct_3d:
             signal = "riskoff"
         if signal:
@@ -3485,6 +3491,8 @@ def _five_stage_from_index(index_data):
             latest_detail = {"close": round(close, 2),
                              "mas": {str(k): round(v, 2) for k, v in mas.items()},
                              "trigger_date": trigger_date,
+                             "recovery_watch": recovery_watch,
+                             "broad_bear": broad_bear,
                              "carried": signal is None and phase is not None}
     return phase or "unknown", points[-1][0], latest_detail
 
@@ -8592,14 +8600,14 @@ def _phase_banner_html():
         "transition": "均線非多頭排列，至少兩條短期均線與60日線乖離小於5%並持續三日，且60日線高於120日線",
         "riskoff": "收盤價連續三日低於120日線3%以上",
         "recovery_early": "均線嚴格空頭排列，但收盤價連續三日站上60日線",
-        "recovery_confirmed": "均線非多頭排列，且收盤價連續三日站上120日線4%以上",
+        "recovery_confirmed": "120日線高於20日線或60日線後啟動觀察，接著收盤價連續三日站上120日線4%以上",
     }.get(phase, "")
     en_rule = {
         "tailwind": "the 5-day and 10-day MAs may swap order, but both stay above 20MA, with 20MA above 60MA and 60MA above 120MA",
         "transition": "MAs are not bullish, at least two short MAs stay within 5% of the 60-day MA for three sessions, and the 60-day MA remains above the 120-day MA",
         "riskoff": "the close stays more than 3% below the 120-day MA for three sessions",
         "recovery_early": "MAs remain strictly bearish while the close stays above the 60-day MA for three sessions",
-        "recovery_confirmed": "MAs are not bullish and the close stays more than 4% above the 120-day MA for three sessions",
+        "recovery_confirmed": "observation starts after 120MA rises above 20MA or 60MA, followed by three closes more than 4% above 120MA",
     }.get(phase, "")
     return (
         '<details class="mk-box">'

@@ -36,7 +36,8 @@
     "confirmation_days": 3,
     "tailwind_allows_5ma_below_10ma": true,
     "transition_requires_non_bullish": true,
-    "recovery_confirmed_requires_non_bullish": true,
+    "recovery_watch_trigger_any": ["120ma_gt_20ma", "120ma_gt_60ma"],
+    "recovery_watch_reset_on_tailwind": true,
     "carry_forward_when_unmatched": true,
     "stage_keys": ["tailwind", "transition", "riskoff", "recovery_early", "recovery_confirmed"]
   }

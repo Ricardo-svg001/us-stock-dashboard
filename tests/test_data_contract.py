@@ -62,6 +62,9 @@ class SharedDataContractTest(unittest.TestCase):
         self.assertEqual(app.PHASE_RECOVERY_PCT, 4.0)
         self.assertEqual(app.PHASE_CONFIRM_DAYS, 3)
         self.assertTrue(spec["carry_forward_when_unmatched"])
+        self.assertEqual(spec["recovery_watch_trigger_any"],
+                         ["120ma_gt_20ma", "120ma_gt_60ma"])
+        self.assertTrue(spec["recovery_watch_reset_on_tailwind"])
 
         def series(values):
             start = date(2025, 1, 1)
@@ -77,8 +80,11 @@ class SharedDataContractTest(unittest.TestCase):
             series([200 * (.995 ** i) for i in range(150)]))[0], "riskoff")
         early = [200 * (.995 ** i) for i in range(140)] + [100] * 5 + [50] * 2 + [115] * 3
         self.assertEqual(app._five_stage_from_index(series(early))[0], "recovery_early")
-        confirmed = [100] * 135 + [130] * 12 + [110] * 3
-        self.assertEqual(app._five_stage_from_index(series(confirmed))[0], "recovery_confirmed")
+        confirmed = [200 * (.995 ** i) for i in range(147)] + [140] * 3
+        confirmed_result = app._five_stage_from_index(series(confirmed))
+        self.assertEqual(confirmed_result[0], "recovery_confirmed")
+        self.assertTrue(confirmed_result[2]["recovery_watch"])
+        self.assertTrue(confirmed_result[2]["broad_bear"])
         unmatched = consolidation + [126.8973, 127.2110, 113.1703, 138.3940, 111.2081,
                                      111.4505, 118.1711, 115.9632, 124.4106, 110.7484]
         carried = app._five_stage_from_index(series(unmatched))

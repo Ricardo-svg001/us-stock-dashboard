@@ -4227,14 +4227,18 @@ __SEO_HEAD__
            font-size:13px; color:var(--mocha); letter-spacing:.16em; }
   .qhead::after { content:""; flex:1; height:1px; background:var(--grounds); }
   /* 首頁新版市場儀表板：結構與台股同步，均線口徑保留美股 50／150／200MA。 */
-  .home-dashboard{max-width:960px;margin:0 auto}.market-now{display:grid;gap:14px;margin-bottom:18px}
-  .market-now-hero,.market-data-card,.home-action-panel{background:var(--foam);border:1px solid var(--grounds);border-radius:16px;box-shadow:var(--shadow)}
-  .market-now-hero{padding:22px 28px}.market-now-title{display:flex;align-items:center;gap:18px}.market-now-title h1{margin:0;font-size:34px;text-align:left}.market-now-title h1::after{display:none}
-  .market-now-badge{padding:7px 17px;border-radius:999px;background:linear-gradient(135deg,var(--caramel),var(--caramel-2));color:#fff;font-weight:700}.market-now-hero p{margin:9px 0 0;color:var(--mocha);line-height:1.7}
-  .market-now-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}.market-data-card{padding:17px}.market-data-card h2{font-size:17px;margin:0 0 10px;font-family:var(--font-head)}
-  .market-return-row{display:grid;grid-template-columns:130px 1fr 112px;align-items:center;border-top:1px solid var(--grounds);padding:12px 0;gap:8px}.market-return-row:first-of-type{border-top:0}.market-return-main,.market-return-med{text-align:right;font-family:var(--font-num);font-size:12px}.market-return-med b{display:block;font-size:16px}
-  .breadth-row{display:grid;grid-template-columns:48px 1fr 94px;gap:9px;align-items:center;margin:11px 0;font-size:12px}.breadth-bar{height:10px;border-radius:6px;overflow:hidden;background:var(--grounds);display:flex}.breadth-above{background:#278153}.breadth-below{background:#c84335}.breadth-num{text-align:right;font-family:var(--font-num);font-size:11px}.breadth-num .up{color:#278153}.breadth-num .down{color:#c84335}.breadth-legend{display:flex;gap:14px;color:var(--mocha);font-size:10px;margin-top:8px}.breadth-legend i{display:inline-block;width:8px;height:8px;margin-right:4px}
-  .market-chart-card{padding-bottom:10px}.market-chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center}.market-periods{display:flex}.market-periods button{border:1px solid var(--grounds);border-right:0;background:var(--foam);padding:7px 14px;cursor:pointer;color:var(--mocha)}.market-periods button:first-child{border-radius:8px 0 0 8px}.market-periods button:last-child{border-right:1px solid var(--grounds);border-radius:0 8px 8px 0}.market-periods button.on{background:var(--espresso);color:var(--milk)}
+  #home{max-width:920px;margin:0 auto}
+  .home-dashboard{display:grid;gap:16px}.market-now{display:grid;gap:14px;margin-bottom:18px}
+  .market-now-hero,.market-data-card{background:var(--foam);border:1px solid var(--grounds);border-radius:16px;box-shadow:var(--shadow)}
+  .market-now-hero{padding:22px 28px;background:linear-gradient(135deg,#fffdf9,#f8f0e4);border-radius:18px}
+  .market-now-title{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.market-now-title h1{margin:0;font:900 32px var(--font-head);text-align:left}.market-now-title h1::after{display:none}
+  .market-now-badge{display:inline-flex;padding:8px 20px;border-radius:999px;background:linear-gradient(135deg,var(--caramel),var(--caramel-2));color:#fff;font-weight:700}.market-now-hero p{margin:12px 0 0;color:var(--mocha);font-size:15px;line-height:1.7}
+  .market-now-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}.market-data-card{padding:16px;min-width:0}.market-data-card h2{margin:0 0 12px;font:700 18px var(--font-head)}
+  .market-return-row{display:grid;grid-template-columns:150px 1fr 112px;align-items:center;border:1px solid var(--grounds);border-bottom:0}.market-return-row:last-child{border-bottom:1px solid var(--grounds)}.market-return-row>span{padding:13px}.market-return-row>span+span{border-left:1px solid var(--grounds)}
+  .market-return-main{font-family:var(--font-num);text-align:right}.market-return-main b{font-size:20px;color:var(--up)}.market-return-med{text-align:right;color:var(--mocha)}.market-return-med b{display:block;font:700 20px var(--font-num)}
+  .breadth-row{display:grid;grid-template-columns:58px 1fr 104px;align-items:center;gap:10px;margin:13px 0}.breadth-row b{font-family:var(--font-head)}.breadth-bar{display:flex;height:12px;overflow:hidden;border-radius:4px;background:var(--grounds)}.breadth-above{background:var(--up)}.breadth-below{background:var(--down)}
+  .breadth-num{text-align:right;font:700 13px var(--font-num)}.breadth-num .up{color:var(--up)}.breadth-num .down{color:var(--down)}.breadth-legend{display:flex;gap:16px;margin-top:14px;color:var(--mocha);font-size:12px}.breadth-legend i{display:inline-block;width:9px;height:9px;margin-right:5px}
+  .market-chart-card{padding-bottom:10px}.market-chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:6px}.market-chart-head h2{margin:0}.market-periods{display:flex}.market-periods button{border:1px solid var(--grounds);border-right:0;background:var(--foam);padding:7px 14px;cursor:pointer;color:var(--mocha)}.market-periods button:first-child{border-radius:8px 0 0 8px}.market-periods button:last-child{border-right:1px solid var(--grounds);border-radius:0 8px 8px 0}.market-periods button.on{background:var(--espresso);color:#fff}
   #homeIndexChart svg{width:100%;height:auto;display:block;touch-action:none;cursor:grab;user-select:none}#homeIndexChart svg.dragging{cursor:grabbing}.home-chart-read{min-height:20px;font:12px var(--font-num);color:var(--mocha);margin:2px 0 0 45px}.market-chart-note{font-size:11px;color:var(--mocha);text-align:right;margin-top:-3px}
   /* 「今日觀察」只是區段標題與內容容器，不另外鋪一層卡片底色。 */
   .home-action-panel{padding:0;background:transparent;border:0;box-shadow:none}
@@ -4249,13 +4253,13 @@ __SEO_HEAD__
   .home-industry{display:block;text-decoration:none;color:inherit;background:linear-gradient(135deg,#fffaf2,#f3e6d3);border:1px solid #e4d2b6}
   .home-industry:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(91,63,39,.09)}
   .home-industry-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
-  .home-industry-head h2{margin:0}.home-industry-head>span{color:var(--mocha);font-weight:700;font-size:13px}
+  .home-industry-head h2{margin:0}.home-industry-head>span{color:var(--mocha);font-weight:700;font-size:14px}
   .home-industry-list{display:flex;gap:8px;flex-wrap:wrap}
-  .home-industry-list>span{width:100%;padding:7px 10px;border-radius:10px;background:rgba(255,255,255,.72);font-size:13px}
+  .home-industry-list>span{width:100%;padding:7px 10px;border-radius:10px;background:rgba(255,255,255,.72);font-size:14px}
   html[data-theme="c"] .home-industry{background:#21343A;border-color:#466068}
   html[data-theme="c"] .home-industry-list>span{background:#17252B;color:#F5EAD7}
   @media(max-width:560px){.home-actions,.home-action-panel .home-actions{grid-template-columns:1fr}.updnote{font-size:14px}.updnote small{font-size:12.5px}}
-  @media(max-width:700px){.market-now-grid{grid-template-columns:1fr}.market-now-hero{padding:18px}.market-now-title h1{font-size:28px}.market-return-row{grid-template-columns:105px 1fr}.market-return-med{grid-column:2}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods{width:100%}.market-periods button{flex:1;padding:7px 4px}}
+  @media(max-width:560px){.market-now-grid{grid-template-columns:1fr}.market-now-hero{padding:17px 18px}.market-now-title h1{font-size:27px}.market-now-badge{padding:6px 13px}.market-return-row{grid-template-columns:105px 1fr 88px}.market-return-row>span{padding:10px 8px}.market-return-main b,.market-return-med b{font-size:16px}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods{width:100%}.market-periods button{flex:1;padding:7px 5px}}
   /* 今日市場：市場階段（可展開看說明） */
   /* 到價提醒的股票選擇器（自台股版移植） */
   .stockpick { position:relative; }
@@ -4298,7 +4302,7 @@ __SEO_HEAD__
   /* 本日推薦：沿用市場階段卡片的寬度與圓角，讓兩者看起來是同一組東西 */
   .hs-box { max-width:560px; margin:0 auto 16px; display:block;
            background:var(--foam); border:1.5px solid var(--grounds);
-           border-radius:14px; padding:14px 18px; box-shadow:var(--shadow);
+           border-radius:18px; padding:14px 18px; box-shadow:var(--shadow);
            text-decoration:none; color:var(--espresso);
            transition:border-color .15s, transform .15s; }
   .hs-box:hover { border-color:var(--caramel); transform:translateY(-1px); }
@@ -4308,8 +4312,9 @@ __SEO_HEAD__
            font-weight:700; margin-left:auto; }
   .hs-unit { font-size:13px; color:var(--mocha); }
   .hs-list { display:block; margin-top:8px; font-size:13px; color:var(--mocha);
-           line-height:1.7; }
-  .hs-sub { display:block; margin-top:8px; font-size:11.5px; color:#a99; }
+           line-height:1.7; overflow:hidden; text-overflow:ellipsis;
+           display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  .hs-sub { display:block; margin-top:8px; font-size:12px; color:var(--mocha); }
   .hs-go { display:block; margin-top:8px; font-size:13px; color:var(--caramel-2); }
   .mk-body { padding:2px 16px 14px; border-top:1px solid var(--grounds);
            font-size:14px; color:#555; line-height:1.9; }

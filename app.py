@@ -3174,34 +3174,34 @@ def _home_industry_brief_html():
 
 PHASE_UI = {
     "tailwind": {"dot": "🟢", "zh": "順風趨勢", "en": "Tailwind",
-                 "zh_do": "趨勢完整，順勢尋找主流股",
-                 "en_do": "Trend intact — focus on market leaders"},
+                 "zh_do": "20日與60日報酬同步偏強，近期選股較容易",
+                 "en_do": "20- and 60-session returns are strong; recent stock selection was easier"},
     "pullback": {"dot": "🟡", "zh": "多頭回檔", "en": "Bull-market Pullback",
-                 "zh_do": "中期趨勢未破壞，降低追價",
-                 "en_do": "The medium-term trend is intact — avoid chasing"},
+                 "zh_do": "60日成果仍為正，20日漲幅收斂",
+                 "en_do": "60-session results remain positive while 20-session gains have narrowed"},
     "transition": {"dot": "🟠", "zh": "高風險整理", "en": "High-risk Consolidation",
-                   "zh_do": "50MA 與 100MA 結構衝突，降低曝險",
-                   "en_do": "50MA and 100MA conflict — reduce exposure"},
+                   "zh_do": "報酬與上漲家數不同步，近期選股結果分化",
+                   "en_do": "Returns and participation disagree; recent results are mixed"},
     "riskoff": {"dot": "🔴", "zh": "逆風市場", "en": "Headwind",
-                "zh_do": "中期風險升高，控制部位",
-                "en_do": "Medium-term risk is elevated — control exposure"},
+                "zh_do": "20日中位報酬明顯為負，多數股票下跌",
+                "en_do": "The 20-session median is clearly negative and most stocks fell"},
     "recovery_early": {"dot": "🔵", "zh": "初步復甦", "en": "Early Recovery",
-                       "zh_do": "市場洗過並收復 50MA，開始觀察",
-                       "en_do": "Washed out and above 50MA — start watching"},
+                       "zh_do": "60日成果仍弱，但20日中位報酬已轉正",
+                       "en_do": "60-session results remain weak, but the 20-session median has turned positive"},
     "recovery_confirmed": {"dot": "🔵", "zh": "復甦確認", "en": "Recovery Confirmed",
-                           "zh_do": "市場洗過並收復 100MA，中期改善",
-                           "en_do": "Washed out and above 100MA — trend improving"},
+                           "zh_do": "20日漲幅與上漲比例已有強度，60日成果為正",
+                           "en_do": "20-session returns and participation have strengthened while 60-session results are positive"},
 }
 
-# 首頁生命週期只排列既有六狀態，不改變 _phase_raw 的判定。
+# 首頁生命週期排列六種選股環境，判定與首頁共用 _selection_phase。
 # 排序是市場輪廓而非預測路徑：市場可能跳階，也可能退回前一階段。
 MARKET_LIFECYCLE = [
-    ("recovery_early", "初步復甦", "洗盤後收復 50MA", "Early Recovery", "Reclaims 50MA after a washout"),
-    ("recovery_confirmed", "復甦確認", "收復 100MA", "Recovery Confirmed", "Reclaims 100MA"),
-    ("tailwind", "順風趨勢", "50MA 在 100MA 之上", "Tailwind", "50MA above 100MA"),
-    ("pullback", "多頭回檔", "回撤 50MA、守住 100MA", "Bull-market Pullback", "Tests 50MA, holds 100MA"),
-    ("transition", "高風險整理", "50MA 與 100MA 結構衝突", "High-risk Consolidation", "50MA and 100MA conflict"),
-    ("riskoff", "逆風市場", "跌破 100MA", "Headwind", "Breaks below 100MA"),
+    ("recovery_early", "初步復甦", "60日仍弱、20日轉正", "Early Recovery", "60-session results weak; 20-session median turns positive"),
+    ("recovery_confirmed", "復甦確認", "20日與參與度轉強、60日為正", "Recovery Confirmed", "20-session return and participation strengthen; 60-session result positive"),
+    ("tailwind", "順風趨勢", "20日與60日同步明顯偏強", "Tailwind", "20- and 60-session results are clearly strong"),
+    ("pullback", "多頭回檔", "60日為正、20日漲幅收斂", "Bull-market Pullback", "60-session result positive; 20-session gain narrows"),
+    ("transition", "高風險整理", "報酬與上漲家數不同步", "High-risk Consolidation", "Returns and participation disagree"),
+    ("riskoff", "逆風市場", "20日明顯為負且多數下跌", "Headwind", "20-session median clearly negative and most stocks fell"),
 ]
 LIFECYCLE_STAGE = {phase: i for i, (phase, *_rest) in enumerate(MARKET_LIFECYCLE, 1)}
 
@@ -3326,68 +3326,52 @@ def _maybe_topup_index():
         pass
 
 
+def _selection_phase(r20, r60, long_breadth=None):
+    """把首頁的20／60日選股結果轉成既有六階段；只描述已實現報酬。"""
+    if not r20 or not r60:
+        return "unknown"
+    win20 = float(r20.get("win_pct") or 0)
+    med20 = float(r20.get("median_return") or 0)
+    med60 = float(r60.get("median_return") or 0)
+    if med20 >= 7 and win20 >= 65 and med60 >= 5:
+        return "tailwind"
+    if med20 <= -3 and win20 < 45:
+        return "riskoff"
+    if med20 > 0 and win20 >= 50 and med60 < 0:
+        return "recovery_early"
+    if med20 >= 3 and win20 >= 55 and med60 >= 0:
+        return "recovery_confirmed"
+    if (-3 < med20 < 3 and med60 >= 0 and
+            (long_breadth is None or long_breadth >= 50)):
+        return "pullback"
+    return "transition"
+
+
 def _phase_compute():
-    st = []
+    """與首頁共用選股統計，回傳 (phase, 說明, 資料日期, 長期寬度)。"""
     try:
-        br = _load_cache("breadth.json", 24 * 365) or {}
-        idx = _load_cache("nasdaq_index.json", 24 * 365) or {}
-        st.append("breadth %d 天%s｜指數 %d 天%s"
-                  % (len(br), ("（~%s）" % max(br)) if br else "",
-                     len(idx), ("（~%s）" % max(idx)) if idx else ""))
-        if not br or not idx:
-            _PHASE_WHY.update(why="缺 breadth.json 或 nasdaq_index.json", steps=st)
+        counts = _load_cache(MARKET_COUNT_CACHE, None) or {}
+        recent = (counts.get("recent_returns") or {}).get("rows") or []
+        by_day = {int(r.get("days", 0)): r for r in recent}
+        snap = get_ma_breadth_snapshot() or {}
+        long_rows = [r for r in snap.get("rows", [])
+                     if int(r.get("period") or 0) in (150, 200)]
+        long_breadth = (sum(float(r.get("pct") or 0) for r in long_rows) / len(long_rows)
+                        if long_rows else None)
+        phase = _selection_phase(by_day.get(20), by_day.get(60), long_breadth)
+        if phase == "unknown":
+            _PHASE_WHY.update(why="缺20日或60日選股統計", steps=[])
             return "unknown", "", "", None
-        bd = sorted(br)
-        ids = sorted(idx)
-        px = [idx[d] for d in ids]
-        mas = {}
-        for n in (PHASE_FAST_MA, PHASE_SLOW_MA):
-            out, run = {}, 0.0
-            for i, d in enumerate(ids):
-                run += px[i]
-                if i >= n:
-                    run -= px[i - n]
-                if i >= n - 1:
-                    out[d] = run / n
-            mas[n] = out
-        ma50, ma100 = mas[PHASE_FAST_MA], mas[PHASE_SLOW_MA]
-        st.append("指數 %dMA／%dMA 可算 %d／%d 天"
-                  % (PHASE_FAST_MA, PHASE_SLOW_MA, len(ma50), len(ma100)))
-        recent = bd[-30:]
-        hit = [d for d in recent if d in ma50 and d in ma100]
-        st.append("breadth 最近 30 天有 %d 天對得上指數日期" % len(hit))
-        if not hit:
-            # ⚠️ 兩邊日期完全沒交集：通常是指數來源的交易日曆或格式不同
-            _PHASE_WHY.update(
-                # ⚠️ 均線天數都要帶常數，避免畫面與實際計算口徑不同。
-                why="日期對不上：breadth 最新 %s，指數均線最新 %s"
-                    % (max(bd), max(ma100) if ma100 else "—"), steps=st)
-            return "unknown", "", "", None
-        seq = []
-        bpos = {d: i for i, d in enumerate(bd)}
-        for d in recent:
-            if d not in ma50 or d not in ma100:
-                continue
-            i = bpos[d]
-            window = [br[x] for x in bd[max(0, i - WASH_LOOKBACK + 1):i + 1]]
-            p = _phase_raw(idx.get(d), ma50.get(d), ma100.get(d), br[d],
-                           min(window) if window else None)
-            if p:
-                seq.append(p)
-        st.append("判定出 %d 天的狀態，最後 5 天：%s"
-                  % (len(seq), " ".join(seq[-5:]) or "—"))
-        phase = _phase_sticky(seq)
-        if not phase:
-            _PHASE_WHY.update(
-                why="黏著條件不成立：需要連續 %d 天同一狀態，實際只有 %d 天可判"
-                    % (PHASE_STICKY, len(seq)), steps=st)
-            return "unknown", "", "", None
-        last = bd[-1]
-        _PHASE_WHY.update(why="正常", steps=st)
+        date = ((counts.get("recent_returns") or {}).get("as_of")
+                or counts.get("as_of") or snap.get("date") or "")
+        _PHASE_WHY.update(why="與首頁選股統計一致", steps=[
+            "20日、60日中位報酬與20日上漲家數",
+            "150／200日線寬度只作長期覆蓋輔助",
+        ])
         return (phase, (PHASE_UI.get(phase) or {}).get("zh_do", ""),
-                last, br[last])
+                str(date), long_breadth)
     except Exception as e:
-        _PHASE_WHY.update(why="%s: %s" % (type(e).__name__, str(e)[:100]), steps=st)
+        _PHASE_WHY.update(why="%s: %s" % (type(e).__name__, str(e)[:100]), steps=[])
         return "unknown", "", "", None
 
 
@@ -4241,6 +4225,20 @@ __SEO_HEAD__
            border:1.5px solid var(--grounds); border-radius:10px; background:var(--foam);
            color:var(--espresso); min-width:170px; }
   .resfilter select:focus { outline:none; border-color:var(--caramel); }
+  .screen-tools { max-width:560px; margin:10px auto; padding:10px; border:1px solid var(--grounds); border-radius:12px; background:var(--foam); display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
+  .screen-tools input,.screen-tools select { min-width:0; height:38px; padding:7px 10px; border:1px solid var(--grounds); border-radius:9px; background:var(--milk); color:var(--espresso); font:inherit; }
+  .screen-tools input { flex:1 1 145px; }.screen-tools select { flex:1 1 150px; }
+  .screen-tools button { min-height:38px; padding:7px 11px; border:1px solid var(--grounds); border-radius:9px; background:var(--milk); color:var(--espresso); font-weight:700; cursor:pointer; }
+  .screen-tools button:hover { border-color:var(--caramel); color:var(--caramel-2); }
+  .screen-tools .export { background:var(--caramel); color:#fff; border-color:var(--caramel); }
+  .screen-tools-status { flex-basis:100%; min-height:16px; color:var(--mocha); font-size:12px; }
+  .sort-th { cursor:pointer; user-select:none; text-decoration:underline dotted; text-underline-offset:3px; }
+  .momentum-badge { display:inline-flex; align-items:center; padding:3px 8px; border:1px solid currentColor;
+           border-radius:999px; font-size:11px; font-weight:800; line-height:1.25; white-space:nowrap; }
+  .momentum-badge.strong { color:var(--up); }
+  .momentum-badge.consolidate { color:var(--caramel-2); }
+  .momentum-badge.recovery { color:var(--primary); }
+  .momentum-badge.weak { color:var(--down); }
   th,td { padding:9px 7px; text-align:right; border-bottom:1px solid var(--grounds); white-space:nowrap; }
   th { background:var(--espresso); color:var(--milk); font-family:var(--font-head); font-weight:700; }
   td { font-family:var(--font-num); color:var(--espresso); }
@@ -4746,6 +4744,7 @@ __QUOTES_HTML__
     <div style="font-size:12px;color:var(--mocha);margin-top:4px;line-height:1.7" data-i18n="screen.valuationNote">本益比與殖利率預設不顯示；勾選後才載入並增加兩欄。</div>
   </div>
 
+  <div class="screen-tools" id="screenTools1"></div>
   <button class="gobtn" id="go1" data-i18n="btn.screen">開始篩選</button>
   <div class="status" id="status1"></div>
   <div id="result1"></div>
@@ -4806,6 +4805,7 @@ __QUOTES_HTML__
     <div style="font-size:12px;color:var(--mocha);margin-top:4px;line-height:1.7" data-i18n="screen.valuationNote">本益比與殖利率預設不顯示；勾選後才載入並增加兩欄。</div>
   </div>
 
+  <div class="screen-tools" id="screenTools3"></div>
   <button class="gobtn" id="go3" data-i18n="btn.screen">開始篩選</button>
   <div class="status" id="status3"></div>
   <div id="result3"></div>
@@ -5490,6 +5490,7 @@ const I18N = { en: {
   "th.price": "Price", "th.ma": "MA", "th.gap": "MA Gap%",
   "th.close": "Close", "th.last": "Last", "th.lastgap": "vs Close%",
   "th.ret20": "20D Cumulative Return", "th.ret60": "60D Cumulative Return",
+  "th.strength": "Recent Strength",
   "th.per": "P/E", "th.yield": "Dividend Yield",
   "q.last": "Last", "q.regular": "market hours",
   "q.extended": "pre/after-hours", "q.close": "at close",
@@ -5501,9 +5502,23 @@ const I18N = { en: {
   "screen.epsNote": "H1 and H2 each combine two reported quarters. Results expand below the company name without adding four crowded columns.",
   "screen.valuation": "Show P/E and dividend yield",
   "screen.valuationNote": "P/E and dividend yield stay hidden by default; select this option to load and add both columns.",
+  "screen.saveName": "Preset name", "screen.save": "Save", "screen.saved": "Saved presets",
+  "screen.apply": "Apply", "screen.delete": "Delete", "screen.export": "Export CSV",
+  "screen.savedOk": "Preset saved on this device", "screen.appliedOk": "Preset applied",
+  "screen.deletedOk": "Preset deleted", "screen.noPreset": "Choose a saved preset first",
+  "screen.noResult": "Run the screen before exporting", "screen.exported": "CSV exported",
   "flt.sector": "Sector", "flt.allSector": "All sectors",
   "flt.eps": "Q EPS YoY", "flt.align": "MA alignment", "flt.nh": "New high",
   "flt.any": "Any", "flt.hasNH": "Made a new high",
+  "flt.momentum": "Recent return", "flt.sort": "Sort",
+  "flt.bothPos": "20D & 60D both positive", "flt.ret20Pos": "20D above 0%",
+  "flt.ret20Five": "20D above 5%", "flt.ret60Ten": "60D above 10%",
+  "flt.recovery": "20D positive / 60D non-positive", "flt.consolidate": "60D positive / 20D non-positive",
+  "flt.weak": "20D & 60D both non-positive", "flt.defaultSort": "Default order",
+  "flt.ret20Desc": "20D: high to low", "flt.ret20Asc": "20D: low to high",
+  "flt.ret60Desc": "60D: high to low", "flt.ret60Asc": "60D: low to high",
+  "strength.strong": "Short & medium term strong", "strength.consolidate": "Medium-term strong · short-term consolidation",
+  "strength.recovery": "Early recovery", "strength.weak": "Short & medium term weak",
   "yoy.neg": "Negative", "yoy.lo": "0–20%", "yoy.mid": "20–50%", "yoy.hi": "Over 50%",
   "nh.5y": "5-year high", "nh.3y": "3-year high", "nh.2y": "2-year high",
   "nh.1y": "1-year high", "nh.6m": "6-month high", "nh.3m": "3-month high",
@@ -5572,6 +5587,7 @@ if (langBtn){
       history.replaceState(null, "", u.pathname + u.search + u.hash);
     } catch(_){}
     applyLang();
+    if (typeof setupScreenTool === "function"){ setupScreenTool("1"); setupScreenTool("3"); }
     document.querySelectorAll(".tw-month").forEach(el => {
       el.textContent = twMonth(parseInt(el.dataset.month, 10));
     });
@@ -5653,6 +5669,86 @@ function val(name){
 document.querySelectorAll("input[name=days]").forEach(r =>
   r.onchange = () => { const m = $("#modeCard"); if (m) m.style.display = val("days") === "3" ? "" : "none"; });
 
+/* ---- 篩選條件儲存與目前結果 CSV ----
+   只存在這台裝置；CSV 直接讀表格 DOM，因此會保留目前下拉篩選與排序。 */
+const SCREEN_PRESET_KEY = 'us-screen-presets-v1';
+const SCREEN_FIELDS = {
+  '1': {names:['universe','days','mode','ma','direction','align'], checks:['epsHalves1','valuation1']},
+  '3': {names:['universe3','ma3','align3'], checks:['epsHalves3','valuation3']}
+};
+function screenPresetsRead(){try{return JSON.parse(localStorage.getItem(SCREEN_PRESET_KEY)||'[]')||[]}catch(e){return []}}
+function screenPresetsWrite(rows){try{localStorage.setItem(SCREEN_PRESET_KEY,JSON.stringify(rows.slice(-20)))}catch(e){}}
+function screenEsc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function screenToolStatus(slot,msg){const el=$('#screenToolStatus'+slot);if(el){el.textContent=msg;setTimeout(()=>{if(el.textContent===msg)el.textContent=''},2600)}}
+function screenToolOptions(slot,selected){
+  const rows=screenPresetsRead().filter(x=>String(x.slot)===String(slot));
+  return '<option value="">'+t('screen.saved','已儲存條件')+'</option>'+rows.map(x=>'<option value="'+screenEsc(x.id)+'"'+(String(x.id)===String(selected)?' selected':'')+'>'+screenEsc(x.name)+'</option>').join('');
+}
+function refreshScreenTool(slot,selected){const sel=$('#screenSaved'+slot);if(sel)sel.innerHTML=screenToolOptions(slot,selected)}
+function readScreenPreset(slot){
+  const cfg=SCREEN_FIELDS[slot],values={},checks={};
+  cfg.names.forEach(n=>values[n]=val(n));
+  cfg.checks.forEach(id=>checks[id]=!!($('#'+id)&&$('#'+id).checked));
+  return {values,checks};
+}
+function setScreenPreset(slot,preset){
+  const cfg=SCREEN_FIELDS[slot];
+  cfg.names.forEach(n=>{
+    const wanted=String((preset.values||{})[n]||'');
+    document.querySelectorAll('input[name="'+n+'"]').forEach(el=>{el.checked=el.value===wanted});
+  });
+  cfg.checks.forEach(id=>{if($('#'+id))$('#'+id).checked=!!(preset.checks||{})[id]});
+  const changed=document.querySelector('#p'+slot+' input');
+  if(changed)changed.dispatchEvent(new Event('change',{bubbles:true}));
+  const mode=$('#modeCard');if(slot==='1'&&mode)mode.style.display=val('days')==='3'?'':'none';
+  if(typeof screenSummary==='function'&&slot==='1')screenSummary();
+}
+function saveScreenPreset(slot){
+  const input=$('#screenSaveName'+slot);
+  let rows=screenPresetsRead(),name=(input.value||'').trim();
+  if(!name)name=(LANG==='en'?'Preset ':'條件 ')+(rows.filter(x=>String(x.slot)===String(slot)).length+1);
+  name=name.slice(0,40);
+  const old=rows.find(x=>String(x.slot)===String(slot)&&x.name===name);
+  const item=Object.assign({id:old?old.id:(Date.now().toString(36)+Math.random().toString(36).slice(2,6)),slot,name},readScreenPreset(slot));
+  rows=rows.filter(x=>x.id!==item.id);rows.push(item);screenPresetsWrite(rows);
+  input.value=name;refreshScreenTool(slot,item.id);screenToolStatus(slot,t('screen.savedOk','✓ 已儲存在本裝置'));
+}
+function applyScreenPreset(slot){
+  const id=$('#screenSaved'+slot).value,p=screenPresetsRead().find(x=>String(x.id)===String(id));
+  if(!p){screenToolStatus(slot,t('screen.noPreset','請先選擇已儲存條件'));return}
+  setScreenPreset(slot,p);$('#screenSaveName'+slot).value=p.name;screenToolStatus(slot,t('screen.appliedOk','✓ 已套用條件'));
+}
+function deleteScreenPreset(slot){
+  const id=$('#screenSaved'+slot).value;if(!id){screenToolStatus(slot,t('screen.noPreset','請先選擇已儲存條件'));return}
+  screenPresetsWrite(screenPresetsRead().filter(x=>String(x.id)!==String(id)));refreshScreenTool(slot,'');screenToolStatus(slot,t('screen.deletedOk','已刪除條件'));
+}
+function csvCell(v){return '"'+String(v==null?'':v).replace(/"/g,'""')+'"'}
+function exportScreenCsv(slot){
+  const table=document.querySelector('#result'+slot+' .res-wide table');
+  const rows=table&&table.tBodies[0]?Array.from(table.tBodies[0].rows).filter(r=>r.style.display!=='none'):[];
+  if(!table||!rows.length){screenToolStatus(slot,t('screen.noResult','請先執行篩選，再匯出結果'));return}
+  const clean=s=>String(s||'').replace(/↕/g,'').replace(/\s+/g,' ').trim();
+  const lines=[Array.from(table.tHead.rows[0].cells).map(c=>csvCell(clean(c.innerText))).join(',')];
+  rows.forEach(r=>lines.push(Array.from(r.cells).map(c=>csvCell(clean(c.innerText))).join(',')));
+  const blob=new Blob(['\ufeff'+lines.join('\r\n')],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob),a=document.createElement('a');
+  a.href=url;a.download=(LANG==='en'?'us-stocks_':'美股_')+(slot==='1'?(LANG==='en'?'strong_':'強勢股_'):(LANG==='en'?'pullback_':'標股拉回_'))+new Date().toISOString().slice(0,10)+'.csv';
+  document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  screenToolStatus(slot,t('screen.exported','✓ 已匯出 CSV')+'（'+rows.length+'）');
+}
+function setupScreenTool(slot){
+  const box=$('#screenTools'+slot);if(!box)return;
+  box.innerHTML='<input id="screenSaveName'+slot+'" maxlength="40" placeholder="'+screenEsc(t('screen.saveName','條件名稱'))+'">'
+    +'<button type="button" id="screenSave'+slot+'">'+t('screen.save','儲存')+'</button>'
+    +'<select id="screenSaved'+slot+'">'+screenToolOptions(slot,'')+'</select>'
+    +'<button type="button" id="screenApply'+slot+'">'+t('screen.apply','套用')+'</button>'
+    +'<button type="button" id="screenDelete'+slot+'">'+t('screen.delete','刪除')+'</button>'
+    +'<button type="button" class="export" id="screenExport'+slot+'">'+t('screen.export','匯出 CSV')+'</button>'
+    +'<span class="screen-tools-status" id="screenToolStatus'+slot+'"></span>';
+  $('#screenSave'+slot).onclick=()=>saveScreenPreset(slot);$('#screenApply'+slot).onclick=()=>applyScreenPreset(slot);
+  $('#screenDelete'+slot).onclick=()=>deleteScreenPreset(slot);$('#screenExport'+slot).onclick=()=>exportScreenCsv(slot);
+}
+setupScreenTool('1');setupScreenTool('3');
 /* ---- 篩選 ---- */
 const ALIGN_ZH = {
   strict_bull:"嚴格多頭", loose_bull:"寬鬆多頭", squeeze:"均線糾結",
@@ -5724,7 +5820,7 @@ function render(res){
   if (!lastRows.length){ $("#result1").innerHTML = "<div class='status'>" + t("st.none","沒有符合條件的股票。") + "</div>"; return; }
 
   let h = "";
-  if (lastRows.length > 15){
+  {
     const c = {}, label = {};
     lastRows.forEach(s => {
       const k = sectorKey(s);
@@ -5739,6 +5835,7 @@ function render(res){
        + bucketSelect("epsFilter", t("flt.eps","季EPS年增"), lastRows, r => yoyBucket(r.eps_yoy), YOY_LABEL, "applyFilter()")
        + (showAlign ? alignSelect("alignFilter", lastRows, "applyFilter()") : "")
        + nhSelect("nhFilter", lastRows, "applyFilter()")
+       + momentumControls("momentumFilter","sortFilter","applyFilter","tb1","cd1")
        + "</div>";
   }
   h += "<div class='tblwrap res-wide'><table><thead><tr>"
@@ -5748,7 +5845,7 @@ function render(res){
      + (showQ ? "<th>" + t("th.last","現價") + "</th><th>"
               + t("th.lastgap","與收盤差%") + "</th>" : "")
      + "<th>" + t("th.gap","均線乖離%") + "</th>"
-     + "<th>" + t("th.ret20","20日累積漲幅") + "</th><th>" + t("th.ret60","60日累積漲幅") + "</th>"
+     + "<th class='sort-th' onclick=\"toggleUsSort('tb1','cd1','ret20','sortFilter')\">" + t("th.ret20","20日累積漲幅") + " ↕</th><th class='sort-th' onclick=\"toggleUsSort('tb1','cd1','ret60','sortFilter')\">" + t("th.ret60","60日累積漲幅") + " ↕</th><th>" + t("th.strength","近期強弱") + "</th>"
      + (showValuation ? "<th>" + t("th.per","本益比") + "</th><th>" + t("th.yield","殖利率") + "</th>" : "")
      + "<th>" + t("th.eps","季EPS年增") + "</th><th>" + t("th.rev","季營收年增")
      + "</th><th>" + t("th.nh","創新高") + "</th>"
@@ -5853,6 +5950,41 @@ function hasQuote(q){ return !!(q && q.ts); }
 /* 基本面欄位的顯示：抓不到就顯示「—」，不要留空白讓人以為壞掉 */
 function fmtYoY(v){ return (v == null) ? "—" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%"; }
 function yoyCls(v){ return (v == null) ? "" : (v >= 0 ? "pos" : "neg"); }
+function momentumKey(ret20,ret60){
+  if(ret20==null||ret60==null)return "";
+  if(ret20>0&&ret60>0)return "strong";
+  if(ret20<=0&&ret60>0)return "consolidate";
+  if(ret20>0&&ret60<=0)return "recovery";
+  return "weak";
+}
+function momentumName(key){
+  const zh={strong:"短中期同步強勢",consolidate:"中期強勢・短線整理",recovery:"低檔開始復甦",weak:"短中期同步偏弱"};
+  return t("strength."+key,zh[key]||"—");
+}
+function momentumBadge(ret20,ret60){const key=momentumKey(ret20,ret60);return key?`<span class="momentum-badge ${key}">${momentumName(key)}</span>`:"—";}
+function momentumPass(mode,ret20,ret60){
+  if(!mode)return true;if(ret20==null||ret60==null)return false;
+  if(mode==="both_pos")return ret20>0&&ret60>0;
+  if(mode==="ret20_pos")return ret20>0;
+  if(mode==="ret20_5")return ret20>5;
+  if(mode==="ret60_10")return ret60>10;
+  return momentumKey(ret20,ret60)===mode;
+}
+function momentumControls(momentId,sortId,filterFn,tbId,cdId){
+  return `<span class="rflabel">${t("flt.momentum","近期漲幅")}</span><select id="${momentId}" onchange="${filterFn}()"><option value="">${t("flt.any","不限")}</option><option value="both_pos">${t("flt.bothPos","20日、60日同步上漲")}</option><option value="ret20_pos">${t("flt.ret20Pos","20日漲幅大於 0%")}</option><option value="ret20_5">${t("flt.ret20Five","20日漲幅大於 5%")}</option><option value="ret60_10">${t("flt.ret60Ten","60日漲幅大於 10%")}</option><option value="recovery">${t("flt.recovery","20日轉強、60日仍偏弱")}</option><option value="consolidate">${t("flt.consolidate","60日偏強、20日整理")}</option><option value="weak">${t("flt.weak","20日、60日同步偏弱")}</option></select><span class="rflabel">${t("flt.sort","排序")}</span><select id="${sortId}" onchange="sortUsResult('${tbId}','${cdId}',this.value);${filterFn}()"><option value="default">${t("flt.defaultSort","預設排序")}</option><option value="ret20_desc">${t("flt.ret20Desc","20日：高至低")}</option><option value="ret20_asc">${t("flt.ret20Asc","20日：低至高")}</option><option value="ret60_desc">${t("flt.ret60Desc","60日：高至低")}</option><option value="ret60_asc">${t("flt.ret60Asc","60日：低至高")}</option></select>`;
+}
+function sortUsResult(tbId,cdId,value){
+  const rows=tbId==="tb1"?lastRows:lastRows3,parts=(value||"default").split("_"),key=parts[0],dir=parts[1]||"asc";
+  [["#"+tbId,"tr"],["#"+cdId+" .res-cards",".scard"]].forEach(pair=>{
+    const parent=document.querySelector(pair[0]);if(!parent)return;
+    const nodes=Array.from(parent.querySelectorAll(":scope > "+pair[1]));
+    nodes.sort((a,b)=>{const ai=Number(a.dataset.i),bi=Number(b.dataset.i);if(key==="default")return ai-bi;const av=rows[ai]?.[key],bv=rows[bi]?.[key];return (dir==="desc"?bv-av:av-bv)||(ai-bi);});
+    nodes.forEach(el=>parent.appendChild(el));
+  });
+}
+function toggleUsSort(tbId,cdId,key,selectId){
+  const sel=$("#"+selectId);if(!sel)return;sel.value=sel.value===key+"_desc"?key+"_asc":key+"_desc";sortUsResult(tbId,cdId,sel.value);(tbId==="tb1"?applyFilter:applyFilter3)();
+}
 function epsHalfPanel(s,show){
   if(!show || !s.eps_halves || !s.eps_halves.length) return "";
   const cells=s.eps_halves.slice(0,4).map(x=>`<span>${x.label}<b>${x.value==null?"—":Number(x.value).toFixed(2)}</b></span>`).join("");
@@ -5867,8 +5999,8 @@ function fmtHit(s){
 }
 
 function rowsHtml(rows, showAlign, showQ, showHalves, showValuation){
-  return rows.map(s =>
-    "<tr data-sector=\"" + sectorKey(s) + "\">"
+  return rows.map((s,i) =>
+    "<tr data-i='"+i+"' data-sector=\"" + sectorKey(s) + "\">"
     + "<td>" + s.rank + "</td><td><b>" + s.symbol + "</b></td>"
     + "<td class='coname' title=\"" + s.name + "\">" + coName(s) + epsHalfPanel(s,showHalves) + "</td>"
     + "<td class='sector' title=\"" + s.sector + "\">" + coSector(s) + "</td>"
@@ -5877,6 +6009,7 @@ function rowsHtml(rows, showAlign, showQ, showHalves, showValuation){
     + "<td class='" + (s.gap >= 0 ? "pos" : "neg") + "'>" + (s.gap >= 0 ? "+" : "") + s.gap.toFixed(2) + "%</td>"
     + "<td class='" + yoyCls(s.ret20) + "'>" + fmtYoY(s.ret20) + "</td>"
     + "<td class='" + yoyCls(s.ret60) + "'>" + fmtYoY(s.ret60) + "</td>"
+    + "<td>" + momentumBadge(s.ret20,s.ret60) + "</td>"
     + (showValuation ? "<td>" + (s.per == null ? "—" : s.per.toFixed(2)) + "</td><td>" + (s.yield == null ? "—" : s.yield.toFixed(2) + "%") + "</td>" : "")
     + "<td class='" + yoyCls(s.eps_yoy) + "'>" + fmtYoY(s.eps_yoy) + "</td>"
     + "<td class='" + yoyCls(s.rev_yoy) + "'>" + fmtYoY(s.rev_yoy) + "</td>"
@@ -5906,6 +6039,7 @@ function cardsHtml(rows, showAlign, lastLabel, showQ, showHalves, showValuation)
       + (s.gap >= 0 ? "pos" : "neg") + "'>" + (s.gap >= 0 ? "+" : "") + s.gap.toFixed(2) + "%</b></div>"
     + "<div class='kv'><span>" + t("th.ret20","20日累積漲幅") + "</span><b class='" + yoyCls(s.ret20) + "'>" + fmtYoY(s.ret20) + "</b></div>"
     + "<div class='kv'><span>" + t("th.ret60","60日累積漲幅") + "</span><b class='" + yoyCls(s.ret60) + "'>" + fmtYoY(s.ret60) + "</b></div>"
+    + "<div class='kv'><span>" + t("th.strength","近期強弱") + "</span><b>" + momentumBadge(s.ret20,s.ret60) + "</b></div>"
     + (showValuation ? "<div class='kv'><span>" + t("th.per","本益比") + "</span><b>" + (s.per == null ? "—" : s.per.toFixed(2)) + "</b></div><div class='kv'><span>" + t("th.yield","殖利率") + "</span><b>" + (s.yield == null ? "—" : s.yield.toFixed(2) + "%") + "</b></div>" : "")
     + "<div class='kv'><span>" + t("th.eps","季EPS年增") + "</span><b class='"
       + yoyCls(s.eps_yoy) + "'>" + fmtYoY(s.eps_yoy) + "</b></div>"
@@ -5919,7 +6053,7 @@ function cardsHtml(rows, showAlign, lastLabel, showQ, showHalves, showValuation)
     + "</div></details>").join("") + "</div>";
 }
 
-function applyFilter(){ applyAll("tb1", "cd1", lastRows, "secFilter", "epsFilter", "alignFilter", "nhFilter"); }
+function applyFilter(){ applyAll("tb1", "cd1", lastRows, "secFilter", "epsFilter", "alignFilter", "nhFilter", "momentumFilter"); }
 
 /* ---- 飆股拉回找買點 ---- */
 let lastRows3 = [], lastMeta3 = {};
@@ -5979,7 +6113,7 @@ function render3(res){
     $("#result3").innerHTML = "<div class='status'>" + t("st.none","沒有符合條件的股票。") + "</div>"; return; }
 
   let h = "";
-  if (lastRows3.length > 15){
+  {
     const c = {}, label = {};
     lastRows3.forEach(s => {
       const k = sectorKey(s);
@@ -5994,6 +6128,7 @@ function render3(res){
        + bucketSelect("epsFilter3", t("flt.eps","季EPS年增"), lastRows3, r => yoyBucket(r.eps_yoy), YOY_LABEL, "applyFilter3()")
        + (showAlign ? alignSelect("alignFilter3", lastRows3, "applyFilter3()") : "")
        + nhSelect("nhFilter3", lastRows3, "applyFilter3()")
+       + momentumControls("momentumFilter3","sortFilter3","applyFilter3","tb3","cd3")
        + "</div>";
   }
   h += "<div class='tblwrap res-wide'><table><thead><tr>"
@@ -6003,7 +6138,7 @@ function render3(res){
      + (showQ ? "<th>" + t("th.last","現價") + "</th><th>"
               + t("th.lastgap","與收盤差%") + "</th>" : "")
      + "<th>" + t("th.gap","均線乖離%") + "</th>"
-     + "<th>" + t("th.ret20","20日累積漲幅") + "</th><th>" + t("th.ret60","60日累積漲幅") + "</th>"
+     + "<th class='sort-th' onclick=\"toggleUsSort('tb3','cd3','ret20','sortFilter3')\">" + t("th.ret20","20日累積漲幅") + " ↕</th><th class='sort-th' onclick=\"toggleUsSort('tb3','cd3','ret60','sortFilter3')\">" + t("th.ret60","60日累積漲幅") + " ↕</th><th>" + t("th.strength","近期強弱") + "</th>"
      + (showValuation3 ? "<th>" + t("th.per","本益比") + "</th><th>" + t("th.yield","殖利率") + "</th>" : "")
      + "<th>" + t("th.eps","季EPS年增") + "</th><th>" + t("th.rev","季營收年增")
      + "</th><th>" + t("th.nh","創新高") + "</th>"
@@ -6014,7 +6149,7 @@ function render3(res){
   $("#result3").innerHTML = h;
 }
 
-function applyFilter3(){ applyAll("tb3", "cd3", lastRows3, "secFilter3", "epsFilter3", "alignFilter3", "nhFilter3"); }
+function applyFilter3(){ applyAll("tb3", "cd3", lastRows3, "secFilter3", "epsFilter3", "alignFilter3", "nhFilter3", "momentumFilter3"); }
 
 /* ---- 強勢股整理觀察 ---- */
 if ($("#goLev")) $("#goLev").onclick = async () => {
@@ -6074,11 +6209,12 @@ if ($("#goLev")) $("#goLev").onclick = async () => {
 
    ⚠️ **表格與卡片要一起篩**。只篩表格的話，手機上按下拉選單完全沒反應
    —— 因為手機看到的是卡片，表格早就被 CSS 隱藏了。 */
-function applyAll(tbId, cdId, rows, secId, epsId, alignId, nhId){
+function applyAll(tbId, cdId, rows, secId, epsId, alignId, nhId, momentumId){
   const sec = $("#" + secId) ? $("#" + secId).value : "";
   const eps = $("#" + epsId) ? $("#" + epsId).value : "";
   const alg = (alignId && $("#" + alignId)) ? $("#" + alignId).value : "";
   const nh  = (nhId && $("#" + nhId)) ? $("#" + nhId).value : "";
+  const momentum = (momentumId && $("#" + momentumId)) ? $("#" + momentumId).value : "";
 
   function pass(r){
     if (!r) return true;
@@ -6087,14 +6223,15 @@ function applyAll(tbId, cdId, rows, secId, epsId, alignId, nhId){
     if (alg && r.align !== alg) return false;
     if (nh === "any" && !r.new_high) return false;
     if (nh && nh !== "any" && r.new_high !== nh) return false;
+    if (!momentumPass(momentum,r.ret20,r.ret60)) return false;
     return true;
   }
 
-  document.querySelectorAll("#" + tbId + " tr").forEach((tr, i) => {
-    tr.style.display = pass(rows[i]) ? "" : "none";
+  document.querySelectorAll("#" + tbId + " tr").forEach((tr) => {
+    tr.style.display = pass(rows[Number(tr.dataset.i)]) ? "" : "none";
   });
-  document.querySelectorAll("#" + cdId + " .scard").forEach((cd, i) => {
-    cd.style.display = pass(rows[i]) ? "" : "none";
+  document.querySelectorAll("#" + cdId + " .scard").forEach((cd) => {
+    cd.style.display = pass(rows[Number(cd.dataset.i)]) ? "" : "none";
   });
 }
 
@@ -8304,20 +8441,20 @@ def _phase_banner_html():
             '<span class="mk-stage q-zh">第 ' + str(stage) + ' / 6 階段</span>'
             '<span class="mk-stage q-en" style="display:none">Stage ' + str(stage) + ' of 6</span>')
     zh_rule = {
-        "tailwind": "指數站上 50MA，且 50MA 在 100MA 之上",
-        "pullback": "指數跌回 50MA 下方，但仍守在 100MA 之上",
-        "transition": "指數仍在 100MA 之上，但 50MA／100MA 方向互相衝突",
-        "riskoff": "指數跌破 100MA",
-        "recovery_early": "近 90 日市場曾洗盤，指數已收復 50MA、尚未收復 100MA",
-        "recovery_confirmed": "近 90 日市場曾洗盤，指數已收復 100MA",
+        "tailwind": "20日中位報酬至少7%、上漲家數至少65%，且60日中位報酬至少5%",
+        "pullback": "60日中位報酬為正、20日中位報酬不足3%，且長期寬度未低於50%",
+        "transition": "報酬強弱與上漲家數未形成同一方向",
+        "riskoff": "20日中位報酬不高於-3%，且上漲家數低於45%",
+        "recovery_early": "60日中位報酬仍負，但20日中位報酬已轉正、上漲家數至少50%",
+        "recovery_confirmed": "20日中位報酬至少3%、上漲家數至少55%，且60日中位報酬為正",
     }.get(phase, "")
     en_rule = {
-        "tailwind": "the index is above 50MA and 50MA is above 100MA",
-        "pullback": "the index is below 50MA but still above 100MA",
-        "transition": "the index is above 100MA while the 50MA/100MA signals conflict",
-        "riskoff": "the index is below 100MA",
-        "recovery_early": "the market washed out within 90 days and the index reclaimed 50MA",
-        "recovery_confirmed": "the market washed out within 90 days and the index reclaimed 100MA",
+        "tailwind": "20-session median return is at least 7%, advancers at least 65%, and 60-session median at least 5%",
+        "pullback": "the 60-session median is positive, the 20-session median is below 3%, and long-term breadth is at least 50%",
+        "transition": "return strength and participation do not point in the same direction",
+        "riskoff": "the 20-session median is at or below -3% and advancers are below 45%",
+        "recovery_early": "the 60-session median remains negative while the 20-session median turns positive and advancers reach 50%",
+        "recovery_confirmed": "the 20-session median is at least 3%, advancers at least 55%, and the 60-session median is positive",
     }.get(phase, "")
     return (
         '<details class="mk-box">'
@@ -8339,23 +8476,20 @@ def _phase_banner_html():
         '<span class="q-zh"><b>怎麼閱讀：</b>大盤生命週期把市場整理成六個位置，'
         '讓你快速辨認目前較接近復甦、順風、回檔、整理或逆風。它不是下一站預測；'
         '階段可能跳過或退回，多頭回檔守穩後也可能直接返回順風趨勢。<br><br>'
-        '依連續三日確認，目前維持<b>' + _h.escape(ui["zh"])
-        + '</b>；這個狀態的判定條件是：' + _h.escape(zh_rule) + '。目前另有 <b>' + b
-        + '</b> 的成分股站在自己的 ' + str(BREADTH_MA) + ' 日均線之上。<br><br>'
-        '<b>50MA</b> 看順風與正常回檔，<b>100MA</b> 看是否進入逆風，'
-        '<b>150MA 市場寬度</b>主要判斷市場是否曾被充分洗盤。'
-        '這不預測行情，只描述環境。</span>'
+        '依首頁最新統計，目前屬於<b>' + _h.escape(ui["zh"])
+        + '</b>；判定條件是：' + _h.escape(zh_rule) + '。150／200日線長期寬度平均為 <b>' + b
+        + '</b>。<br><br><b>20日報酬</b>描述近期選股成果，<b>60日報酬</b>描述較長一段的獲利情況，'
+        '<b>長期寬度</b>只輔助判斷上升趨勢覆蓋是否廣泛。這不預測行情，只描述已發生的環境。</span>'
         '<span class="q-en" style="display:none"><b>How to read it:</b> The market lifecycle '
         'organizes the environment into six positions, so you can quickly identify recovery, '
         'tailwind, pullback, consolidation or headwind. It is not a forecast of the next stop; '
         'stages can be skipped or reversed, and a pullback that stabilizes can return directly '
-        'to Tailwind.<br><br>After three-day confirmation, the market '
-        'remains <b>' + _h.escape(ui["en"]) + '</b>; this state is defined when '
-        + _h.escape(en_rule) + '. <b>' + b + '</b> of constituents are above their own '
-        + str(BREADTH_MA) + '-day average.<br><br>'
-        '<b>50MA</b> identifies tailwinds and normal pullbacks, <b>100MA</b> marks '
-        'headwinds, and <b>150MA breadth</b> mainly identifies washouts. '
-        'This describes the environment — it does not predict it.</span>'
+        'to Tailwind.<br><br>Using the latest home-page statistics, the market is in '
+        '<b>' + _h.escape(ui["en"]) + '</b>; this state is defined when '
+        + _h.escape(en_rule) + '. Average 150/200-day breadth is <b>' + b + '</b>.<br><br>'
+        '<b>20-session returns</b> describe recent stock-selection results, <b>60-session returns</b> '
+        'describe a longer realised outcome, and <b>long-term breadth</b> only shows how broadly '
+        'uptrends are distributed. This describes realised conditions, not the future.</span>'
         '</div></div></details>')
 
 

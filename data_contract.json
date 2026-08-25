@@ -37,6 +37,7 @@
     "tailwind_allows_5ma_below_10ma": true,
     "transition_requires_non_bullish": true,
     "recovery_confirmed_requires_non_bullish": true,
+    "carry_forward_when_unmatched": true,
     "stage_keys": ["tailwind", "transition", "riskoff", "recovery_early", "recovery_confirmed"]
   }
 }

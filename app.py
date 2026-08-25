@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.25.3"
+APP_VERSION = "2026.08.25.4"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -3484,7 +3484,8 @@ def _five_stage_from_index(index_data):
         if pos == len(points) - 1:
             latest_detail = {"close": round(close, 2),
                              "mas": {str(k): round(v, 2) for k, v in mas.items()},
-                             "trigger_date": trigger_date}
+                             "trigger_date": trigger_date,
+                             "carried": signal is None and phase is not None}
     return phase or "unknown", points[-1][0], latest_detail
 
 
@@ -3505,7 +3506,10 @@ def _phase_compute():
             "5／10／20／60／120日均線",
             "3日確認；最近觸發 %s" % (detail.get("trigger_date") or "—"),
         ])
-        return (phase, (PHASE_UI.get(phase) or {}).get("zh_do", ""),
+        conclusion = (PHASE_UI.get(phase) or {}).get("zh_do", "")
+        if detail.get("carried"):
+            conclusion += "（不合條件，沿用舊狀態）"
+        return (phase, conclusion,
                 str(date), long_breadth)
     except Exception as e:
         _PHASE_WHY.update(why="%s: %s" % (type(e).__name__, str(e)[:100]), steps=[])
@@ -4800,6 +4804,7 @@ __UPDATE_NOTE__
        2026-08-07 移除 —— 左側選單已經有同樣的入口，首頁再放一次只是重複，
        換成名言卡（與台股版共用同一份 quotes/）。 -->
   <div class="qhead" data-i18n="home.qhead">今日供應 · QUOTES</div>
+  __PHASE_BAR__
   <div id="qbox">
 __QUOTES_HTML__
   </div>
@@ -8605,7 +8610,8 @@ def _phase_banner_html():
         '<b class="q-en" style="display:none">' + _h.escape(ui["en"]) + '</b>'
         '<span class="mk-do q-zh">' + _h.escape(do) + '</span>'
         '<span class="mk-do q-en" style="display:none">'
-        + _h.escape(ui["en_do"]) + '</span>'
+        + _h.escape(ui["en_do"] +
+        (" (No condition matched; keeping the prior state.)" if "不合條件" in do else "")) + '</span>'
         '</span>'
         + stage_html +
         '<span class="mk-num">' + _h.escape(date) + '</span>'

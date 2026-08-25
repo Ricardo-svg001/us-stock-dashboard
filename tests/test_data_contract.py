@@ -61,6 +61,7 @@ class SharedDataContractTest(unittest.TestCase):
         self.assertEqual(app.PHASE_RISKOFF_PCT, 3.0)
         self.assertEqual(app.PHASE_RECOVERY_PCT, 4.0)
         self.assertEqual(app.PHASE_CONFIRM_DAYS, 3)
+        self.assertTrue(spec["carry_forward_when_unmatched"])
 
         def series(values):
             start = date(2025, 1, 1)
@@ -78,6 +79,11 @@ class SharedDataContractTest(unittest.TestCase):
         self.assertEqual(app._five_stage_from_index(series(early))[0], "recovery_early")
         confirmed = [100] * 135 + [130] * 12 + [110] * 3
         self.assertEqual(app._five_stage_from_index(series(confirmed))[0], "recovery_confirmed")
+        unmatched = consolidation + [126.8973, 127.2110, 113.1703, 138.3940, 111.2081,
+                                     111.4505, 118.1711, 115.9632, 124.4106, 110.7484]
+        carried = app._five_stage_from_index(series(unmatched))
+        self.assertEqual(carried[0], "transition")
+        self.assertTrue(carried[2]["carried"])
 
 
 if __name__ == "__main__":

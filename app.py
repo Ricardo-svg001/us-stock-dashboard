@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.25.4"
+APP_VERSION = "2026.08.25.5"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -3322,7 +3322,7 @@ PHASE_UI = {
     "tailwind": {"dot": "🟢", "zh": "順風趨勢", "en": "Tailwind",
                  "zh_do": "大盤均線呈多頭排列，允許5日線低於10日線",
                  "en_do": "The index has a bullish MA alignment, allowing the 5-day MA below the 10-day MA"},
-    "transition": {"dot": "🟠", "zh": "高風險整理", "en": "High-risk Consolidation",
+    "transition": {"dot": "🟠", "zh": "多頭回檔", "en": "Bull-market Pullback",
                    "zh_do": "均線非多頭排列，短期均線連續三日靠近季線，且季線高於半年線",
                    "en_do": "MAs are not bullish; short MAs stayed near the 60-day MA for three sessions while 60MA remains above 120MA"},
     "riskoff": {"dot": "🔴", "zh": "逆風市場", "en": "Headwind",
@@ -3339,7 +3339,7 @@ PHASE_UI = {
 # 首頁五階段依均線排列與乖離判斷；順序依使用者指定的判斷表呈現。
 MARKET_LIFECYCLE = [
     ("tailwind", "順風趨勢", "5MA與10MA可互換，但都高於20MA；20MA>60MA>120MA", "Tailwind", "5MA/10MA may swap; both above 20MA, with 20MA > 60MA > 120MA"),
-    ("transition", "高風險整理（多頭回檔）", "非多頭排列；至少兩條短均線與季線乖離<5%連3日；季線>半年線", "High-risk Consolidation", "Not bullish; two short MAs within 5% of 60MA for 3 sessions; 60MA above 120MA"),
+    ("transition", "多頭回檔", "非多頭排列；至少兩條短均線與季線乖離<5%連3日；季線>半年線", "Bull-market Pullback", "Not bullish; two short MAs within 5% of 60MA for 3 sessions; 60MA above 120MA"),
     ("riskoff", "逆風市場", "連三日低於半年線3%以上", "Headwind", "More than 3% below the 120-day MA for three sessions"),
     ("recovery_early", "初步復甦", "空頭排列中連三日站上季線", "Early Recovery", "Above the 60-day MA for three sessions while MAs remain bearish"),
     ("recovery_confirmed", "復甦確認", "非多頭排列且連三日站上半年線4%以上", "Recovery Confirmed", "Not bullish and more than 4% above 120MA for three sessions"),

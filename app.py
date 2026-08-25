@@ -8397,20 +8397,22 @@ def _data_health_snapshot():
     et_now = _utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))
     failed_hint = "%s %s" % (SCHED_STATE.get("last_result") or "", SCHED_STATE.get("loop_error") or "")
 
-    def quality(lag, failed=False):
+    def quality(lag, failed=False, market=None):
         if failed and lag > 0:
             return "failed", "更新失敗，沿用舊資料", "Update failed; using older data", "danger"
         if lag <= 0:
             return "fresh", "資料最新", "Data current", "ok"
-        if lag == 1 and et_now.weekday() < 5 and et_now.hour < UPDATE_HOUR_ET:
-            return "pending", "尚待今日公布", "Awaiting today’s release", "pending"
+        if lag == 1:
+            market_now = (_utcnow() + timedelta(hours=9)) if market == "jp" else et_now
+            publish_hour = 10 if market == "jp" else UPDATE_HOUR_ET
+            if market_now.weekday() < 5 and market_now.hour < publish_hour:
+                return "pending", "尚待今日公布", "Awaiting today’s release", "pending"
         if lag == 1:
             return "lag1", "落後一個交易日", "One session behind", "warn"
         return "overdue", "資料落後超過允許天數", "Data exceeds allowed delay", "danger"
 
     for key, actual in actuals.items():
-        market = "us" if health_key == "us_yields" else "jp"
-        lag = _business_days_behind(actual, market=market)
+        lag = _business_days_behind(actual)
         status, zh_text, en_text, severity = quality(
             lag, "失敗" in failed_hint or "failed" in failed_hint.lower())
         items[key] = {"actual": actual, "business_days_behind": lag, "status": status,
@@ -8427,9 +8429,10 @@ def _data_health_snapshot():
             ("jp_yields", ("jp2y", "jp10y", "jp30y"), "日本公債利率", "Japan government-bond yields")):
         dates = [str((macro_items.get(key) or {}).get("date") or "") for key in keys]
         actual = min(dates) if all(dates) else ""
-        lag = _business_days_behind(actual)
+        market = "us" if health_key == "us_yields" else "jp"
+        lag = _business_days_behind(actual, market=market)
         y_status, y_zh, y_en, y_severity = quality(
-            lag, "失敗" in failed_hint or "failed" in failed_hint.lower())
+            lag, "失敗" in failed_hint or "failed" in failed_hint.lower(), market)
         items[health_key] = {"actual": actual, "business_days_behind": lag,
                              "status": y_status, "status_zh": y_zh, "status_en": y_en,
                              "severity": y_severity, "label_zh": zh_label, "label_en": en_label}

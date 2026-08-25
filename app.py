@@ -4237,7 +4237,11 @@ __SEO_HEAD__
   .market-chart-card{padding-bottom:10px}.market-chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center}.market-periods{display:flex}.market-periods button{border:1px solid var(--grounds);border-right:0;background:var(--foam);padding:7px 14px;cursor:pointer;color:var(--mocha)}.market-periods button:first-child{border-radius:8px 0 0 8px}.market-periods button:last-child{border-right:1px solid var(--grounds);border-radius:0 8px 8px 0}.market-periods button.on{background:var(--espresso);color:var(--milk)}
   #homeIndexChart svg{width:100%;height:auto;display:block;touch-action:none;cursor:grab;user-select:none}#homeIndexChart svg.dragging{cursor:grabbing}.home-chart-read{min-height:20px;font:12px var(--font-num);color:var(--mocha);margin:2px 0 0 45px}.market-chart-note{font-size:11px;color:var(--mocha);text-align:right;margin-top:-3px}
   /* 「今日觀察」只是區段標題與內容容器，不另外鋪一層卡片底色。 */
-  .home-action-panel{padding:0;background:transparent;border:0;box-shadow:none}.home-action-panel .qhead{margin-top:14px}
+  .home-action-panel{padding:0;background:transparent;border:0;box-shadow:none}
+  /* 與「今日市場」共用同一個 960px 首頁欄寬；不要再受舊版 560px 卡片寬度限制。 */
+  .home-action-panel .qhead{max-width:none;margin:14px 0 8px}
+  .home-action-panel .home-section-note{max-width:none;margin:0 0 12px}
+  .home-action-panel .home-actions{max-width:none;grid-template-columns:1fr 1fr}
   html[data-theme="c"] .home-action-panel{background:transparent!important;border:0;box-shadow:none}
   .home-section-note{max-width:560px;margin:-6px auto 12px;color:var(--mocha);font-size:12px;line-height:1.65}
   .home-actions{max-width:560px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -4250,7 +4254,7 @@ __SEO_HEAD__
   .home-industry-list>span{width:100%;padding:7px 10px;border-radius:10px;background:rgba(255,255,255,.72);font-size:13px}
   html[data-theme="c"] .home-industry{background:#21343A;border-color:#466068}
   html[data-theme="c"] .home-industry-list>span{background:#17252B;color:#F5EAD7}
-  @media(max-width:560px){.home-actions{grid-template-columns:1fr}.updnote{font-size:14px}.updnote small{font-size:12.5px}}
+  @media(max-width:560px){.home-actions,.home-action-panel .home-actions{grid-template-columns:1fr}.updnote{font-size:14px}.updnote small{font-size:12.5px}}
   @media(max-width:700px){.market-now-grid{grid-template-columns:1fr}.market-now-hero{padding:18px}.market-now-title h1{font-size:28px}.market-return-row{grid-template-columns:105px 1fr}.market-return-med{grid-column:2}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods{width:100%}.market-periods button{flex:1;padding:7px 4px}}
   /* 今日市場：市場階段（可展開看說明） */
   /* 到價提醒的股票選擇器（自台股版移植） */

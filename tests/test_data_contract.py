@@ -4,7 +4,7 @@ import os
 import pathlib
 import time
 import unittest
-from datetime import date
+from datetime import date, timedelta
 
 os.environ.setdefault("CACHE_DIR", "/tmp/stock-coffee-contract-test")
 os.environ.setdefault("ENABLE_PREFETCH", "0")
@@ -52,7 +52,33 @@ class SharedDataContractTest(unittest.TestCase):
         self.assertTrue({"executed_at", "source", "latest_date", "result",
                          "duration_sec"} <= set(history[-1]))
 
+    def test_five_stage_market_contract(self):
+        spec = self.contract["market_phase"]
+        self.assertEqual(tuple(spec["moving_averages"]), app.MARKET_PHASE_MAS)
+        self.assertEqual(spec["stage_count"], len(app.MARKET_LIFECYCLE))
+        self.assertEqual(spec["stage_keys"], [row[0] for row in app.MARKET_LIFECYCLE])
+        self.assertEqual(app.PHASE_GAP_PCT, 5.0)
+        self.assertEqual(app.PHASE_RISKOFF_PCT, 3.0)
+        self.assertEqual(app.PHASE_RECOVERY_PCT, 4.0)
+        self.assertEqual(app.PHASE_CONFIRM_DAYS, 3)
+
+        def series(values):
+            start = date(2025, 1, 1)
+            return {str(start + timedelta(days=i)): value for i, value in enumerate(values)}
+
+        rising = [100 * (1.01 ** i) for i in range(145)]
+        tailwind = rising + [rising[-1] * .98] * 5  # 最後形成 5MA < 10MA，仍屬多頭
+        self.assertEqual(app._five_stage_from_index(series(tailwind))[0], "tailwind")
+        base = [100 * (1.002 ** i) for i in range(140)]
+        consolidation = base + [base[-1] * .98] * 10
+        self.assertEqual(app._five_stage_from_index(series(consolidation))[0], "transition")
+        self.assertEqual(app._five_stage_from_index(
+            series([200 * (.995 ** i) for i in range(150)]))[0], "riskoff")
+        early = [200 * (.995 ** i) for i in range(140)] + [100] * 5 + [50] * 2 + [115] * 3
+        self.assertEqual(app._five_stage_from_index(series(early))[0], "recovery_early")
+        confirmed = [100] * 135 + [130] * 12 + [110] * 3
+        self.assertEqual(app._five_stage_from_index(series(confirmed))[0], "recovery_confirmed")
+
 
 if __name__ == "__main__":
     unittest.main()
-

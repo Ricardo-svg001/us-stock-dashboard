@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.25.2"
+APP_VERSION = "2026.08.25.3"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1194,13 +1194,12 @@ QUOTES, QUOTE_SOURCES = _load_quotes("zh")
 QUOTES_EN, QUOTE_SOURCES_EN = _load_quotes("en")
 
 # 市場階段 → 適合的名言主題。**key 與 PHASE_UI／MARKET_LIFECYCLE 完全相同**，
-# 所以台股那份可以直接沿用（兩站的六個階段名一致）。
+# 所以台股那份可以直接沿用（兩站的五個階段名一致）。
 REGIME_TAGS = {
     "tailwind": ["上漲怎麼看", "持有贏家", "領導股", "CAN SLIM",
                  "只買突破", "研究歷史"],
-    "pullback": ["耐心與等待", "操作頻率", "紀律與節制"],
-    "transition": ["等待的重要", "等市場確認", "選擇戰場",
-                   "樂觀的代價", "賣出的重要"],
+    "transition": ["耐心與等待", "操作頻率", "紀律與節制", "等待的重要",
+                   "等市場確認", "選擇戰場", "樂觀的代價", "賣出的重要"],
     "riskoff": ["下跌與虧損", "永遠不要攤平", "停損", "情緒管理", "快速停損"],
     "recovery_early": ["底部的勇氣"],
     "recovery_confirmed": ["趨勢才是真相", "順勢而為", "先勝後戰"],
@@ -2108,6 +2107,11 @@ WASH_LOOKBACK = 90          # 「最近」是幾個交易日（≈ 半年的交�
 PHASE_FAST_MA = 50          # 指數短中期趨勢：相當於台股季線
 PHASE_SLOW_MA = 100         # 指數中期風險線：跌破才視為真正逆風
 PHASE_STICKY = 3            # 連續幾天成立才切換狀態
+MARKET_PHASE_MAS = (5, 10, 20, 60, 120)
+PHASE_GAP_PCT = 5.0
+PHASE_RISKOFF_PCT = 3.0
+PHASE_RECOVERY_PCT = 4.0
+PHASE_CONFIRM_DAYS = 3
 
 # 首頁折線圖保留 5 年（約 1,260 個交易日），與 `HIST_DAYS` 現在同長。
 # ⚠️ 種子檔仍然要留著：新上市股票與剛加入股票池的個股不會有完整 5 年，
@@ -3316,70 +3320,31 @@ def _home_industry_brief_html():
 
 PHASE_UI = {
     "tailwind": {"dot": "🟢", "zh": "順風趨勢", "en": "Tailwind",
-                 "zh_do": "20日與60日報酬同步偏強，近期選股較容易",
-                 "en_do": "20- and 60-session returns are strong; recent stock selection was easier"},
-    "pullback": {"dot": "🟡", "zh": "多頭回檔", "en": "Bull-market Pullback",
-                 "zh_do": "60日成果仍為正，20日漲幅收斂",
-                 "en_do": "60-session results remain positive while 20-session gains have narrowed"},
+                 "zh_do": "大盤均線呈多頭排列，允許5日線低於10日線",
+                 "en_do": "The index has a bullish MA alignment, allowing the 5-day MA below the 10-day MA"},
     "transition": {"dot": "🟠", "zh": "高風險整理", "en": "High-risk Consolidation",
-                   "zh_do": "報酬與上漲家數不同步，近期選股結果分化",
-                   "en_do": "Returns and participation disagree; recent results are mixed"},
+                   "zh_do": "均線非多頭排列，短期均線連續三日靠近季線，且季線高於半年線",
+                   "en_do": "MAs are not bullish; short MAs stayed near the 60-day MA for three sessions while 60MA remains above 120MA"},
     "riskoff": {"dot": "🔴", "zh": "逆風市場", "en": "Headwind",
-                "zh_do": "20日中位報酬明顯為負，多數股票下跌",
-                "en_do": "The 20-session median is clearly negative and most stocks fell"},
+                "zh_do": "大盤連續三日低於半年線3%以上",
+                "en_do": "The index has stayed more than 3% below its 120-day MA for three sessions"},
     "recovery_early": {"dot": "🔵", "zh": "初步復甦", "en": "Early Recovery",
-                       "zh_do": "60日成果仍弱，但20日中位報酬已轉正",
-                       "en_do": "60-session results remain weak, but the 20-session median has turned positive"},
+                       "zh_do": "均線仍嚴格空頭，但大盤已連續三日站上季線",
+                       "en_do": "MAs remain strictly bearish, but the index has closed above its 60-day MA for three sessions"},
     "recovery_confirmed": {"dot": "🔵", "zh": "復甦確認", "en": "Recovery Confirmed",
-                           "zh_do": "20日漲幅與上漲比例已有強度，60日成果為正",
-                           "en_do": "20-session returns and participation have strengthened while 60-session results are positive"},
+                           "zh_do": "均線非多頭排列，但大盤連續三日站上半年線4%以上",
+                           "en_do": "MAs are not bullish, but the index stayed more than 4% above its 120-day MA for three sessions"},
 }
 
-# 首頁生命週期排列六種選股環境，判定與首頁共用 _selection_phase。
-# 排序是市場輪廓而非預測路徑：市場可能跳階，也可能退回前一階段。
+# 首頁五階段依均線排列與乖離判斷；順序依使用者指定的判斷表呈現。
 MARKET_LIFECYCLE = [
-    ("recovery_early", "初步復甦", "60日仍弱、20日轉正", "Early Recovery", "60-session results weak; 20-session median turns positive"),
-    ("recovery_confirmed", "復甦確認", "20日與參與度轉強、60日為正", "Recovery Confirmed", "20-session return and participation strengthen; 60-session result positive"),
-    ("tailwind", "順風趨勢", "20日與60日同步明顯偏強", "Tailwind", "20- and 60-session results are clearly strong"),
-    ("pullback", "多頭回檔", "60日為正、20日漲幅收斂", "Bull-market Pullback", "60-session result positive; 20-session gain narrows"),
-    ("transition", "高風險整理", "報酬與上漲家數不同步", "High-risk Consolidation", "Returns and participation disagree"),
-    ("riskoff", "逆風市場", "20日明顯為負且多數下跌", "Headwind", "20-session median clearly negative and most stocks fell"),
+    ("tailwind", "順風趨勢", "5MA與10MA可互換，但都高於20MA；20MA>60MA>120MA", "Tailwind", "5MA/10MA may swap; both above 20MA, with 20MA > 60MA > 120MA"),
+    ("transition", "高風險整理（多頭回檔）", "非多頭排列；至少兩條短均線與季線乖離<5%連3日；季線>半年線", "High-risk Consolidation", "Not bullish; two short MAs within 5% of 60MA for 3 sessions; 60MA above 120MA"),
+    ("riskoff", "逆風市場", "連三日低於半年線3%以上", "Headwind", "More than 3% below the 120-day MA for three sessions"),
+    ("recovery_early", "初步復甦", "空頭排列中連三日站上季線", "Early Recovery", "Above the 60-day MA for three sessions while MAs remain bearish"),
+    ("recovery_confirmed", "復甦確認", "非多頭排列且連三日站上半年線4%以上", "Recovery Confirmed", "Not bullish and more than 4% above 120MA for three sessions"),
 ]
 LIFECYCLE_STAGE = {phase: i for i, (phase, *_rest) in enumerate(MARKET_LIFECYCLE, 1)}
-
-
-def _phase_raw(close, ma50, ma100, breadth, wash_min):
-    """單日市場狀態：50MA 看順風、100MA 看逆風、150MA 寬度看洗盤。"""
-    if close is None or ma50 is None or ma100 is None or breadth is None:
-        return None
-    washed = wash_min is not None and wash_min <= BREADTH_WASH
-    if washed and close > ma100:
-        return "recovery_confirmed"
-    if washed and close > ma50:
-        return "recovery_early"
-    if close > ma50 and ma50 > ma100:
-        return "tailwind"
-    if ma50 > ma100 and ma100 < close <= ma50:
-        return "pullback"
-    if close < ma100:
-        return "riskoff"
-    return "transition"
-
-
-def _phase_sticky(seq, n=PHASE_STICKY):
-    """連續 n 天成立才換狀態，消掉一兩天的雜訊。"""
-    if not seq:
-        return None
-    cur, pend, cnt = seq[0], None, 0
-    for x in seq:
-        if x == cur:
-            pend, cnt = None, 0
-            continue
-        cnt = cnt + 1 if x == pend else 1
-        pend = x
-        if cnt >= n:
-            cur, pend, cnt = x, None, 0
-    return cur
 
 
 _PHASE_MEMO = {"at": 0.0, "val": None}
@@ -3468,47 +3433,77 @@ def _maybe_topup_index():
         pass
 
 
-def _selection_phase(r20, r60, long_breadth=None):
-    """把首頁的20／60日選股結果轉成既有六階段；只描述已實現報酬。"""
-    if not r20 or not r60:
-        return "unknown"
-    win20 = float(r20.get("win_pct") or 0)
-    med20 = float(r20.get("median_return") or 0)
-    med60 = float(r60.get("median_return") or 0)
-    if med20 >= 7 and win20 >= 65 and med60 >= 5:
-        return "tailwind"
-    if med20 <= -3 and win20 < 45:
-        return "riskoff"
-    if med20 > 0 and win20 >= 50 and med60 < 0:
-        return "recovery_early"
-    if med20 >= 3 and win20 >= 55 and med60 >= 0:
-        return "recovery_confirmed"
-    if (-3 < med20 < 3 and med60 >= 0 and
-            (long_breadth is None or long_breadth >= 50)):
-        return "pullback"
-    return "transition"
+def _five_stage_from_index(index_data):
+    """以大盤 5/10/20/60/120MA 排列、乖離與連續三日條件判斷五階段。"""
+    try:
+        points = sorted((str(date), float(value)) for date, value in (index_data or {}).items())
+    except (TypeError, ValueError):
+        return "unknown", "", {}
+    if len(points) < max(MARKET_PHASE_MAS) + PHASE_CONFIRM_DAYS - 1:
+        return "unknown", "", {}
+    values = [value for _date, value in points]
+    prefix = [0.0]
+    for value in values:
+        prefix.append(prefix[-1] + value)
+
+    def snapshot(pos):
+        mas = {days: (prefix[pos + 1] - prefix[pos + 1 - days]) / days
+               for days in MARKET_PHASE_MAS}
+        close = values[pos]
+        near_season = sum(abs(mas[days] / mas[60] - 1) * 100 < PHASE_GAP_PCT
+                          for days in (5, 10, 20)) >= 2
+        return close, mas, near_season
+
+    phase, trigger_date = None, ""
+    latest_detail = {}
+    start = max(MARKET_PHASE_MAS) - 1 + PHASE_CONFIRM_DAYS - 1
+    for pos in range(start, len(points)):
+        close, mas, near_season = snapshot(pos)
+        recent = [snapshot(i) for i in range(pos - PHASE_CONFIRM_DAYS + 1, pos + 1)]
+        bullish = (mas[5] > mas[20] and mas[10] > mas[20] > mas[60] > mas[120])
+        strict_bear = all(mas[a] < mas[b] for a, b in zip(MARKET_PHASE_MAS, MARKET_PHASE_MAS[1:]))
+        compressed_3d = all(row[2] for row in recent)
+        above_60_3d = all(row[0] > row[1][60] for row in recent)
+        above_120_4pct_3d = all(row[0] > row[1][120] * (1 + PHASE_RECOVERY_PCT / 100)
+                               for row in recent)
+        below_120_3pct_3d = all(row[0] < row[1][120] * (1 - PHASE_RISKOFF_PCT / 100)
+                               for row in recent)
+        signal = None
+        if bullish:
+            signal = "tailwind"
+        elif compressed_3d and mas[60] > mas[120]:
+            signal = "transition"
+        elif strict_bear and above_60_3d:
+            signal = "recovery_early"
+        elif above_120_4pct_3d:
+            signal = "recovery_confirmed"
+        elif below_120_3pct_3d:
+            signal = "riskoff"
+        if signal:
+            phase, trigger_date = signal, points[pos][0]
+        if pos == len(points) - 1:
+            latest_detail = {"close": round(close, 2),
+                             "mas": {str(k): round(v, 2) for k, v in mas.items()},
+                             "trigger_date": trigger_date}
+    return phase or "unknown", points[-1][0], latest_detail
 
 
 def _phase_compute():
-    """與首頁共用選股統計，回傳 (phase, 說明, 資料日期, 長期寬度)。"""
+    """以納斯達克指數均線排列與乖離判斷五階段。"""
     try:
-        counts = _load_cache(MARKET_COUNT_CACHE, None) or {}
-        recent = (counts.get("recent_returns") or {}).get("rows") or []
-        by_day = {int(r.get("days", 0)): r for r in recent}
         snap = get_ma_breadth_snapshot() or {}
         long_rows = [r for r in snap.get("rows", [])
                      if int(r.get("period") or 0) in (150, 200)]
         long_breadth = (sum(float(r.get("pct") or 0) for r in long_rows) / len(long_rows)
                         if long_rows else None)
-        phase = _selection_phase(by_day.get(20), by_day.get(60), long_breadth)
+        phase, date, detail = _five_stage_from_index(
+            _load_cache("nasdaq_index.json", None) or {})
         if phase == "unknown":
-            _PHASE_WHY.update(why="缺20日或60日選股統計", steps=[])
+            _PHASE_WHY.update(why="指數資料不足，無法計算120日線", steps=[])
             return "unknown", "", "", None
-        date = ((counts.get("recent_returns") or {}).get("as_of")
-                or counts.get("as_of") or snap.get("date") or "")
-        _PHASE_WHY.update(why="與首頁選股統計一致", steps=[
-            "20日、60日中位報酬與20日上漲家數",
-            "150／200日線寬度只作長期覆蓋輔助",
+        _PHASE_WHY.update(why="依大盤均線排列與乖離判斷", steps=[
+            "5／10／20／60／120日均線",
+            "3日確認；最近觸發 %s" % (detail.get("trigger_date") or "—"),
         ])
         return (phase, (PHASE_UI.get(phase) or {}).get("zh_do", ""),
                 str(date), long_breadth)
@@ -6689,18 +6684,16 @@ function breadthHtmlLegacy(j){
   const note = (LANG === "en")
     ? `<p style="font-size:12px;color:var(--mocha);line-height:1.8;margin:10px 0 0">
        The red line is the <b>top threshold (${j.top}%)</b>; the green line is the
-       <b>washout threshold (${j.wash}%)</b>. The index versus 50MA identifies a
-       healthy trend or normal pullback; a break below 100MA marks a headwind.
-       Breadth uses 150MA mainly to identify whether the market was washed out.<br>
+       <b>washout threshold (${j.wash}%)</b>. This breadth chart is independent of the
+       five-stage label; the label uses the index's 5/10/20/60/120-day MA alignment and distance.<br>
        Percentiles above cover the ${j.span_years} years shown here; the
        ${j.top}%/${j.wash}% thresholds were set from a 10-year backtest.<br>
        Historical breadth is recalculated using today's constituents, so earlier
        values may be biased upward (survivorship bias).</p>`
     : `<p style="font-size:12px;color:var(--mocha);line-height:1.8;margin:10px 0 0">
        紅線是<b>頂部門檻 ${j.top}%</b>，綠線是<b>洗盤門檻 ${j.wash}%</b>。
-       指數與 50MA 判斷順風或正常回檔，跌破 100MA 才進入逆風；
-       150MA 寬度主要判斷市場是否曾被充分洗盤。近 ${j.wash_look} 日洗過後，
-       收復 50MA 是初步復甦，收復 100MA 是復甦確認。<br>
+       這張寬度圖與五階段標籤分開判讀；五階段改用大盤 5／10／20／60／120 日均線排列與乖離。
+       150MA 寬度只描述有多少成分股仍站在中長期趨勢上。<br>
        ⚠️ 上面的分位數只涵蓋圖上這 ${j.span_years} 年；
        ${j.top}%／${j.wash}% 的門檻是用 10 年回測訂的，兩者母體不同。<br>
        歷史寬度以今日成分股回算，較早數值可能因存活者偏誤而偏高。</p>`;
@@ -8587,23 +8580,21 @@ def _phase_banner_html():
     stage_html = ""
     if stage:
         stage_html = (
-            '<span class="mk-stage q-zh">第 ' + str(stage) + ' / 6 階段</span>'
-            '<span class="mk-stage q-en" style="display:none">Stage ' + str(stage) + ' of 6</span>')
+            '<span class="mk-stage q-zh">第 ' + str(stage) + ' / 5 階段</span>'
+            '<span class="mk-stage q-en" style="display:none">Stage ' + str(stage) + ' of 5</span>')
     zh_rule = {
-        "tailwind": "20日中位報酬至少7%、上漲家數至少65%，且60日中位報酬至少5%",
-        "pullback": "60日中位報酬為正、20日中位報酬不足3%，且長期寬度未低於50%",
-        "transition": "報酬強弱與上漲家數未形成同一方向",
-        "riskoff": "20日中位報酬不高於-3%，且上漲家數低於45%",
-        "recovery_early": "60日中位報酬仍負，但20日中位報酬已轉正、上漲家數至少50%",
-        "recovery_confirmed": "20日中位報酬至少3%、上漲家數至少55%，且60日中位報酬為正",
+        "tailwind": "5日線與10日線可互換，但兩者都高於20日線，且20日線高於60日線、60日線高於120日線",
+        "transition": "均線非多頭排列，至少兩條短期均線與60日線乖離小於5%並持續三日，且60日線高於120日線",
+        "riskoff": "收盤價連續三日低於120日線3%以上",
+        "recovery_early": "均線嚴格空頭排列，但收盤價連續三日站上60日線",
+        "recovery_confirmed": "均線非多頭排列，且收盤價連續三日站上120日線4%以上",
     }.get(phase, "")
     en_rule = {
-        "tailwind": "20-session median return is at least 7%, advancers at least 65%, and 60-session median at least 5%",
-        "pullback": "the 60-session median is positive, the 20-session median is below 3%, and long-term breadth is at least 50%",
-        "transition": "return strength and participation do not point in the same direction",
-        "riskoff": "the 20-session median is at or below -3% and advancers are below 45%",
-        "recovery_early": "the 60-session median remains negative while the 20-session median turns positive and advancers reach 50%",
-        "recovery_confirmed": "the 20-session median is at least 3%, advancers at least 55%, and the 60-session median is positive",
+        "tailwind": "the 5-day and 10-day MAs may swap order, but both stay above 20MA, with 20MA above 60MA and 60MA above 120MA",
+        "transition": "MAs are not bullish, at least two short MAs stay within 5% of the 60-day MA for three sessions, and the 60-day MA remains above the 120-day MA",
+        "riskoff": "the close stays more than 3% below the 120-day MA for three sessions",
+        "recovery_early": "MAs remain strictly bearish while the close stays above the 60-day MA for three sessions",
+        "recovery_confirmed": "MAs are not bullish and the close stays more than 4% above the 120-day MA for three sessions",
     }.get(phase, "")
     return (
         '<details class="mk-box">'
@@ -8622,23 +8613,16 @@ def _phase_banner_html():
         '<div class="mk-body">'
         + _lifecycle_html(phase) +
         '<div class="life-intro">'
-        '<span class="q-zh"><b>怎麼閱讀：</b>大盤生命週期把市場整理成六個位置，'
-        '讓你快速辨認目前較接近復甦、順風、回檔、整理或逆風。它不是下一站預測；'
-        '階段可能跳過或退回，多頭回檔守穩後也可能直接返回順風趨勢。<br><br>'
-        '依首頁最新統計，目前屬於<b>' + _h.escape(ui["zh"])
-        + '</b>；判定條件是：' + _h.escape(zh_rule) + '。150／200日線長期寬度平均為 <b>' + b
-        + '</b>。<br><br><b>20日報酬</b>描述近期選股成果，<b>60日報酬</b>描述較長一段的獲利情況，'
-        '<b>長期寬度</b>只輔助判斷上升趨勢覆蓋是否廣泛。這不預測行情，只描述已發生的環境。</span>'
+        '<span class="q-zh"><b>怎麼閱讀：</b>大盤階段依收盤價、5／10／20／60／120日均線排列與乖離整理成五個位置。'
+        '它不是下一站預測；階段可能跳過、退回，沒有新條件成立時會延續最近已確認階段。<br><br>'
+        '目前屬於<b>' + _h.escape(ui["zh"])
+        + '</b>；判定條件是：' + _h.escape(zh_rule) + '。<br><br>'
+        '均線排列描述已發生的趨勢，乖離只表示收盤價離均線多遠，不能據此預測下一日漲跌。</span>'
         '<span class="q-en" style="display:none"><b>How to read it:</b> The market lifecycle '
-        'organizes the environment into six positions, so you can quickly identify recovery, '
-        'tailwind, pullback, consolidation or headwind. It is not a forecast of the next stop; '
-        'stages can be skipped or reversed, and a pullback that stabilizes can return directly '
-        'to Tailwind.<br><br>Using the latest home-page statistics, the market is in '
+        'uses the close and the 5/10/20/60/120-day MA alignment and distance to organize the market into five positions. '
+        'It is not a forecast; stages can be skipped or reversed, and the latest confirmed stage remains until another condition is met.<br><br>The market is in '
         '<b>' + _h.escape(ui["en"]) + '</b>; this state is defined when '
-        + _h.escape(en_rule) + '. Average 150/200-day breadth is <b>' + b + '</b>.<br><br>'
-        '<b>20-session returns</b> describe recent stock-selection results, <b>60-session returns</b> '
-        'describe a longer realised outcome, and <b>long-term breadth</b> only shows how broadly '
-        'uptrends are distributed. This describes realised conditions, not the future.</span>'
+        + _h.escape(en_rule) + '.<br><br>MA alignment describes an observed trend, while distance only shows how far the close sits from an MA; neither predicts the next session.</span>'
         '</div></div></details>')
 
 
@@ -8711,7 +8695,7 @@ def _home_market_dashboard_html():
 
 
 def _lifecycle_html(phase):
-    """首頁六階段市場地圖；中英文同時渲染，交由既有語言切換顯示。"""
+    """首頁五階段市場地圖；中英文同時渲染，交由既有語言切換顯示。"""
     import html as _h
 
     def one(lang):
@@ -9763,8 +9747,8 @@ def api_diag():
         w("  判定過程        : %s" % _PHASE_WHY["why"])
         for _st in _PHASE_WHY["steps"]:
             w("     · %s" % _st)
-        w("  規則            : 50MA 看順風　100MA 看逆風　寬度≤%.0f%%（近 %d 日）看洗盤　黏著 %d 天"
-          % (BREADTH_WASH, WASH_LOOKBACK, PHASE_STICKY))
+        w("  規則            : 5／10／20／60／120MA 排列；乖離條件連續 %d 日確認"
+          % PHASE_CONFIRM_DAYS)
     except Exception as e:
         w("  ❌ %s: %s" % (type(e).__name__, str(e)[:80]))
 

@@ -26,5 +26,17 @@
     "lag1": "落後一個交易日",
     "failed": "更新失敗，沿用舊資料",
     "overdue": "資料落後超過允許天數"
+  },
+  "market_phase": {
+    "stage_count": 5,
+    "moving_averages": [5, 10, 20, 60, 120],
+    "gap_pct": 5.0,
+    "riskoff_below_120ma_pct": 3.0,
+    "recovery_above_120ma_pct": 4.0,
+    "confirmation_days": 3,
+    "tailwind_allows_5ma_below_10ma": true,
+    "transition_requires_non_bullish": true,
+    "recovery_confirmed_requires_non_bullish": true,
+    "stage_keys": ["tailwind", "transition", "riskoff", "recovery_early", "recovery_confirmed"]
   }
 }

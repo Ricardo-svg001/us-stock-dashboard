@@ -2138,12 +2138,13 @@ def get_growth():
 
 
 NASDAQ_FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
-MACRO_CACHE_FILE = "us_rate_inflation_v5.json"   # v5: 依美債資料日期判斷新鮮度，落後時每小時重試
-JGB_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
+MACRO_CACHE_FILE = "us_rate_inflation_v6.json"   # v6: 日債改用每日檔，並納入每小時新鮮度檢查
+JGB_DAILY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv"
+JGB_HISTORY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
 MACRO_REFRESH_HOURS = 1
 _MACRO_REFRESH_LOCK = threading.Lock()
 MACRO_STATE = {"enabled": False, "last_run": "—", "last_result": "—",
-               "latest_us_date": "—"}
+               "latest_us_date": "—", "latest_jp_date": "—"}
 # ⚠️ 新增欄位一定要換快取檔名。沿用舊檔會讓新那一格永遠讀到沒有它的舊快取，
 #    畫面上少一列、卻不會報錯 —— 這是 5.5「看起來正常才最危險」的同一類。
 
@@ -2165,13 +2166,15 @@ def _business_days_behind(date_text, today=None):
     return behind
 
 
-def _macro_us_is_current(data):
-    """美國 2Y／10Y／30Y 都不得落後超過一個平日。"""
+def _macro_bonds_are_current(data):
+    """美國與日本 2Y／10Y／30Y 都不得落後超過一個平日。"""
     items = {it.get("key"): it for it in (data or {}).get("items", [])}
-    keys = ("us2y", "us10y", "us30y")
-    if any(key not in items for key in keys):
-        return False
-    return max(_business_days_behind(items[key].get("date")) for key in keys) <= 1
+    for keys in (("us2y", "us10y", "us30y"), ("jp2y", "jp10y", "jp30y")):
+        if any(key not in items for key in keys):
+            return False
+        if max(_business_days_behind(items[key].get("date")) for key in keys) > 1:
+            return False
+    return True
 
 
 def _macro_refresh_due(data):
@@ -2184,7 +2187,7 @@ def _macro_refresh_due(data):
         age = _utcnow() - fetched_dt
     except (TypeError, ValueError):
         return True
-    hours = 24 if _macro_us_is_current(data) else MACRO_REFRESH_HOURS
+    hours = 24 if _macro_bonds_are_current(data) else MACRO_REFRESH_HOURS
     return age.total_seconds() >= hours * 3600
 
 
@@ -2215,21 +2218,34 @@ def _treasury_yields():
 
 
 def _jgb_yields():
-    """日本財務省近三年 constant-maturity JGB 2Y／10Y／30Y 日資料。"""
-    r = requests.get(JGB_CSV, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    reader = csv.DictReader(r.content.decode("utf-8-sig").splitlines()[1:])
+    """合併日本財務省歷史檔與當月每日檔，避免月底檔造成整月延遲。"""
     cutoff = (datetime.utcnow() - timedelta(days=365 * 3 + 10)).strftime("%Y-%m-%d")
-    rows = []
-    for item in reader:
+    merged = {}
+    errors = []
+    for url, bust_cache in ((JGB_HISTORY_CSV, False), (JGB_DAILY_CSV, True)):
         try:
-            date = datetime.strptime(item["Date"], "%Y/%m/%d").strftime("%Y-%m-%d")
-            row = (date, float(item["2Y"]), float(item["10Y"]), float(item["30Y"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if date >= cutoff:
-            rows.append(row)
-    return rows
+            params = {"_": int(time.time() // 3600)} if bust_cache else None
+            r = requests.get(url, params=params,
+                             headers={**HEADERS, "Cache-Control": "no-cache"}, timeout=30)
+            r.raise_for_status()
+            try:
+                text = r.content.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = r.content.decode("cp932", errors="replace")
+            reader = csv.DictReader(text.splitlines()[1:])
+            for item in reader:
+                try:
+                    date = datetime.strptime((item.get("Date") or "").strip(), "%Y/%m/%d").strftime("%Y-%m-%d")
+                    row = (date, float(item["2Y"]), float(item["10Y"]), float(item["30Y"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if date >= cutoff:
+                    merged[date] = row
+        except Exception as exc:
+            errors.append(exc)
+    if not merged and errors:
+        raise errors[-1]
+    return [merged[date] for date in sorted(merged)]
 
 
 def _yield_analysis(treasury):
@@ -2427,7 +2443,7 @@ def _us_rate_inflation_data(force=False):
 
 
 def _macro_updater():
-    """美債背景排程：啟動即檢查，落後時每小時重試直到不超過一個平日。"""
+    """美日公債背景排程：任一市場落後時每小時重試。"""
     MACRO_STATE["enabled"] = True
     while True:
         try:
@@ -2440,8 +2456,12 @@ def _macro_updater():
                 dates = [it.get("date") for it in us_items.values() if it.get("date")]
                 latest = min(dates) if len(dates) == 3 else "—"
                 MACRO_STATE["latest_us_date"] = latest
+                jp_items = {it.get("key"): it for it in data.get("items", [])
+                            if it.get("key") in ("jp2y", "jp10y", "jp30y")}
+                jp_dates = [it.get("date") for it in jp_items.values() if it.get("date")]
+                MACRO_STATE["latest_jp_date"] = min(jp_dates) if len(jp_dates) == 3 else "—"
                 MACRO_STATE["last_result"] = (
-                    "更新完成" if _macro_us_is_current(data)
+                    "更新完成" if _macro_bonds_are_current(data)
                     else "來源仍落後，1 小時後重試")
                 MACRO_STATE["last_run"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
         except Exception as exc:
@@ -7624,7 +7644,7 @@ async function loadMacro(){
 
 /* ---- 全站資料品質提示：外觀切換不改變這個固定資訊層級。 ---- */
 let DATA_HEALTH=null;
-const PAGE_DATA_SOURCES={home:['market_returns','market_breadth','nasdaq_index','us_yields'],pind:['market_breadth'],pmac:['us_yields'],p1:['market_returns'],p3:['market_returns'],pgrow:['market_returns'],p11:['nasdaq_index'],p7:['nasdaq_index'],p8:['market_returns'],p12:['market_returns'],p10:['nasdaq_index'],p4:['market_returns'],p5:['market_returns'],p9:['market_returns']};
+const PAGE_DATA_SOURCES={home:['market_returns','market_breadth','nasdaq_index','us_yields','jp_yields'],pind:['market_breadth'],pmac:['us_yields','jp_yields'],p1:['market_returns'],p3:['market_returns'],pgrow:['market_returns'],p11:['nasdaq_index'],p7:['nasdaq_index'],p8:['market_returns'],p12:['market_returns'],p10:['nasdaq_index'],p4:['market_returns'],p5:['market_returns'],p9:['market_returns']};
 function qualityChip(item){const cls={ok:'dq-ok',pending:'dq-pending',warn:'dq-warn',danger:'dq-danger'}[item.severity]||'dq-danger';const zh=`${item.label_zh||'資料'}：${item.status_zh||'更新失敗，沿用舊資料'}`;const en=`${item.label_en||'Data'}: ${item.status_en||'Update failed; using older data'}`;return `<span class="data-quality-chip ${cls}" title="${item.actual||''}"><span class="q-zh"${LANG==='zh'?'':' style="display:none"'}>${zh}</span><span class="q-en"${LANG==='en'?'':' style="display:none"'}>${en}</span></span>`}
 function renderDataQuality(){if(!DATA_HEALTH)return;Object.entries(PAGE_DATA_SOURCES).forEach(([pid,keys])=>{const page=document.getElementById(pid);if(!page)return;let strip=page.querySelector(':scope > .data-quality-strip');if(!strip){strip=document.createElement('div');strip.className='data-quality-strip';const title=page.querySelector(':scope > .ptitle');title?title.insertAdjacentElement('afterend',strip):page.prepend(strip)}strip.innerHTML=keys.map(k=>qualityChip(DATA_HEALTH.items[k]||{})).join('')})}
 async function loadDataQuality(){try{DATA_HEALTH=await readJson(await fetch('/api/data-health'));renderDataQuality()}catch(e){DATA_HEALTH={items:{market_returns:{severity:'danger',status_zh:'更新失敗，沿用舊資料',status_en:'Update failed; using older data',label_zh:'資料',label_en:'Data'}}};Object.keys(PAGE_DATA_SOURCES).forEach(k=>PAGE_DATA_SOURCES[k]=['market_returns']);renderDataQuality()}}
@@ -8359,21 +8379,21 @@ def _data_health_snapshot():
             warnings_zh.append("%s：%s（目前 %s）" % (zh, zh_text, actual or "無資料"))
             warnings_en.append("%s: %s (current %s)" % (en, en_text, actual or "missing"))
     macro = _load_cache(MACRO_CACHE_FILE, None) or {}
-    macro_ok = _macro_us_is_current(macro)
-    yield_dates = [str(x.get("date") or "") for x in (macro.get("items") or [])
-                   if x.get("key") in ("us2y", "us10y", "us30y")]
-    yield_actual = max(yield_dates) if yield_dates else ""
-    yield_lag = _business_days_behind(yield_actual)
-    y_status, y_zh, y_en, y_severity = quality(
-        yield_lag, "失敗" in failed_hint or "failed" in failed_hint.lower())
-    if macro_ok and y_status not in ("pending",):
-        y_status, y_zh, y_en, y_severity = "fresh", "資料最新", "Data current", "ok"
-    items["us_yields"] = {"actual": yield_actual, "business_days_behind": yield_lag,
-                           "status": y_status, "status_zh": y_zh, "status_en": y_en,
-                           "severity": y_severity, "label_zh": "美國公債利率", "label_en": "US Treasury yields"}
-    if not macro_ok:
-        warnings_zh.append("美國公債利率：" + y_zh)
-        warnings_en.append("US Treasury yields: " + y_en)
+    macro_items = {x.get("key"): x for x in (macro.get("items") or [])}
+    for health_key, keys, zh_label, en_label in (
+            ("us_yields", ("us2y", "us10y", "us30y"), "美國公債利率", "US Treasury yields"),
+            ("jp_yields", ("jp2y", "jp10y", "jp30y"), "日本公債利率", "Japan government-bond yields")):
+        dates = [str((macro_items.get(key) or {}).get("date") or "") for key in keys]
+        actual = min(dates) if all(dates) else ""
+        lag = _business_days_behind(actual)
+        y_status, y_zh, y_en, y_severity = quality(
+            lag, "失敗" in failed_hint or "failed" in failed_hint.lower())
+        items[health_key] = {"actual": actual, "business_days_behind": lag,
+                             "status": y_status, "status_zh": y_zh, "status_en": y_en,
+                             "severity": y_severity, "label_zh": zh_label, "label_en": en_label}
+        if y_status in ("failed", "overdue"):
+            warnings_zh.append(zh_label + "：" + y_zh)
+            warnings_en.append(en_label + ": " + y_en)
     heartbeat = SCHED_STATE.get("heartbeat_ts") or 0
     schedule_status = "running" if heartbeat and time.time() - heartbeat <= 360 else ("starting" if SCHED_STATE.get("thread_started") else "stopped")
     if schedule_status == "stopped":

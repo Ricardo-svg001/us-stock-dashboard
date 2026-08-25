@@ -4164,6 +4164,7 @@ __SEO_HEAD__
   .gobtn:hover { transform:translateY(-1px); }
   .gobtn:disabled { background:#cbb18a; box-shadow:none; transform:none; }
   .status { text-align:center; margin:14px 0; color:var(--mocha); font-size:14px; min-height:20px; }
+  #p1 > .status,#p3 > .status { max-width:560px; margin:14px auto; }
   table { width:100%; border-collapse:collapse; font-size:13px; background:var(--foam);
           border-radius:14px; overflow:hidden; box-shadow:var(--shadow); }
   /* 長期成長股列表的排序切換鈕 */
@@ -5502,7 +5503,7 @@ const I18N = { en: {
   "screen.epsNote": "H1 and H2 each combine two reported quarters. Results expand below the company name without adding four crowded columns.",
   "screen.valuation": "Show P/E and dividend yield",
   "screen.valuationNote": "P/E and dividend yield stay hidden by default; select this option to load and add both columns.",
-  "screen.saveName": "Preset name", "screen.save": "Save", "screen.saved": "Saved presets",
+  "screen.saveName": "Custom strategy name", "screen.save": "Save", "screen.saved": "Saved presets",
   "screen.apply": "Apply", "screen.delete": "Delete", "screen.export": "Export CSV",
   "screen.savedOk": "Preset saved on this device", "screen.appliedOk": "Preset applied",
   "screen.deletedOk": "Preset deleted", "screen.noPreset": "Choose a saved preset first",
@@ -5738,7 +5739,7 @@ function exportScreenCsv(slot){
 }
 function setupScreenTool(slot){
   const box=$('#screenTools'+slot);if(!box)return;
-  box.innerHTML='<input id="screenSaveName'+slot+'" maxlength="40" placeholder="'+screenEsc(t('screen.saveName','條件名稱'))+'">'
+  box.innerHTML='<input id="screenSaveName'+slot+'" maxlength="40" placeholder="'+screenEsc(t('screen.saveName','自訂策略名'))+'">'
     +'<button type="button" id="screenSave'+slot+'">'+t('screen.save','儲存')+'</button>'
     +'<select id="screenSaved'+slot+'">'+screenToolOptions(slot,'')+'</select>'
     +'<button type="button" id="screenApply'+slot+'">'+t('screen.apply','套用')+'</button>'

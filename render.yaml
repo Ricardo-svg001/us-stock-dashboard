@@ -3,7 +3,9 @@ services:
     name: us-stock-screener
     runtime: python
     plan: starter
+    autoDeployTrigger: checksPass
     buildCommand: pip install -r requirements.txt
+    healthCheckPath: /healthz
     # workers 1 是刻意的：背景預抓與快取都在單一 process 內，
     # 多 worker 會各自預抓一份，浪費頻寬也吃記憶體。用 threads 撐併發即可。
     startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 600

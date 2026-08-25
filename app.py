@@ -41,6 +41,21 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+APP_VERSION = "2026.08.25.1"
+BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
+BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
+BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _build_info():
+    return {"version": APP_VERSION, "commit": BUILD_COMMIT,
+            "branch": BUILD_BRANCH, "started_at": BUILD_STARTED_AT}
+
+
+def _build_badge_html():
+    return ("<div class='site-version'>Version %s · commit %s · 本次服務啟動 %s</div>"
+            % (APP_VERSION, BUILD_COMMIT, BUILD_STARTED_AT))
+
 # 清掉先前異常中斷留下的暫存檔（舊版共用檔名時會留下垃圾）
 for _f in os.listdir(CACHE_DIR):
     if _f.endswith(".tmp"):
@@ -4621,6 +4636,7 @@ __SEO_HEAD__
                  color:var(--mocha); font-size:12px; line-height:1.8; }
   .site-footer a { color:var(--caramel-2); text-decoration:none; font-weight:700; }
   .site-footer a:hover { text-decoration:underline; }
+  .site-version { margin-top:6px; font-size:11px; opacity:.68; letter-spacing:.02em; }
 </style>
 </head>
 <body>
@@ -5293,6 +5309,7 @@ __QUOTES_HTML__
   <div>本網站資料僅供投資研究與教育用途，不構成投資建議。</div>
   <div><a href="/privacy">隱私權政策 / Privacy Policy</a> ·
     <a href="mailto:seer51000@gmail.com?subject=US%20Stock%20Coffee%20Feedback">聯絡我們 / Contact</a></div>
+  __BUILD_INFO__
 </footer>
 
 <script>
@@ -8784,6 +8801,7 @@ def _render(slug=None):
     html = html.replace("__UPDATE_NOTE__", _update_note_html())
     html = html.replace("__HOME_SCREEN__", _home_screen_html())
     html = html.replace("__HOME_INDUSTRY_BRIEF__", _home_industry_brief_html())
+    html = html.replace("__BUILD_INFO__", _build_badge_html())
     # ⚠️ 只放**公開**金鑰。VAPID_PRIVATE 絕對不能出現在頁面上。
     html = html.replace("__VAPID_PUBLIC__", VAPID_PUBLIC)
     # ⚠️ 中英兩份都送出，用 q-zh／q-en 包起來讓 applyLang() 能即時切換。
@@ -9612,6 +9630,9 @@ def api_diag():
     w("=" * 60)
 
     w("\n【環境】")
+    w("  程式版本       : %s" % APP_VERSION)
+    w("  commit / branch: %s / %s" % (BUILD_COMMIT, BUILD_BRANCH))
+    w("  本次服務啟動    : %s" % BUILD_STARTED_AT)
     w("  CACHE_DIR      : %s" % CACHE_DIR)
     w("  磁碟已掛載      : %s" % ("是" if "/opt/render" in CACHE_DIR else
                                   "否 ← 快取每次部署會消失"))
@@ -10077,9 +10098,21 @@ def api_data_health():
     return jsonify(_data_health_snapshot())
 
 
+@app.route("/healthz")
+def healthz():
+    """Render 與 CI 使用的輕量存活檢查；不連外、不啟動資料抓取。"""
+    return jsonify(status="ok", build=_build_info())
+
+
+@app.route("/api/version")
+def api_version():
+    return jsonify(_build_info())
+
+
 @app.route("/api/prefetch-status")
 def api_prefetch_status():
     st = dict(PREFETCH_STATE)
+    st["build"] = _build_info()
     st["health"] = _data_health_snapshot()
     # 執行緒物件只供同一 process 的診斷，不能交給 jsonify；背景預抓啟動後若
     # 直接序列化會讓正式站這支端點固定回 500。

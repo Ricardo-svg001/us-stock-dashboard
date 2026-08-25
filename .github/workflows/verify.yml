@@ -1,0 +1,61 @@
+name: Pre-deploy verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CACHE_DIR: /tmp/stock-coffee-ci-cache
+      ENABLE_PREFETCH: "0"
+      ENABLE_DAILY_UPDATE: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Python syntax
+        run: python -m py_compile app.py
+      - name: JavaScript syntax
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib, re
+          text = pathlib.Path("app.py").read_text(encoding="utf-8")
+          blocks = re.findall(r"<script([^>]*)>(.*?)</script>", text, re.S)
+          scripts = [body for attrs, body in blocks if "application/ld+json" not in attrs]
+          assert scripts, "No inline scripts found"
+          for i, script in enumerate(scripts, 1):
+              pathlib.Path(f"/tmp/inline-{i}.js").write_text(script, encoding="utf-8")
+          print(f"Extracted {len(scripts)} scripts")
+          PY
+          for script_file in /tmp/inline-*.js; do node --check "$script_file"; done
+      - name: Flask route smoke tests
+        run: |
+          python - <<'PY'
+          import app
+          client = app.app.test_client()
+          for path in ("/", "/screener", "/macro", "/api/data-health",
+                       "/api/prefetch-status", "/api/version", "/healthz"):
+              response = client.get(path)
+              assert response.status_code == 200, (path, response.status_code,
+                                                    response.get_data(as_text=True)[:300])
+          version = client.get("/api/version").get_json()
+          assert {"version", "commit", "branch", "started_at"} <= set(version)
+          homepage = client.get("/").get_data(as_text=True)
+          assert "__BUILD_INFO__" not in homepage
+          assert "site-version" in homepage
+          print("Critical routes and build metadata passed")
+          PY

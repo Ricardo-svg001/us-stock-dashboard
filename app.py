@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.25.7"
+APP_VERSION = "2026.08.26.1"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -2160,6 +2160,12 @@ MACRO_CACHE_FILE = "us_rate_inflation_v6.json"   # v6: 日債改用每日檔，�
 TREASURY_XML = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
 JGB_DAILY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv"
 JGB_HISTORY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
+FED_POLICY_CACHE_FILE = "fed_treasury_policy_v1.json"
+FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+NYFED_EFFR_API = "https://markets.newyorkfed.org/api/rates/unsecured/effr/last/30.json"
+FISCAL_DATA_API = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service"
+FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+FED_POLICY_REFRESH_HOURS = 1
 MACRO_REFRESH_HOURS = 1
 MAX_BOND_LAG_DAYS = 1
 HOLIDAY_CALENDAR_SPEC = {"us": "US+GoodFriday", "jp": "JP"}
@@ -2172,7 +2178,8 @@ UPDATE_HISTORY_LIMIT = 30
 _MACRO_REFRESH_LOCK = threading.Lock()
 _UPDATE_HISTORY_LOCK = threading.Lock()
 MACRO_STATE = {"enabled": False, "last_run": "—", "last_result": "—",
-               "latest_us_date": "—", "latest_jp_date": "—"}
+               "latest_us_date": "—", "latest_jp_date": "—",
+               "fed_policy_date": "—", "treasury_action_date": "—"}
 # ⚠️ 新增欄位一定要換快取檔名。沿用舊檔會讓新那一格永遠讀到沒有它的舊快取，
 #    畫面上少一列、卻不會報錯 —— 這是 5.5「看起來正常才最危險」的同一類。
 
@@ -2287,6 +2294,267 @@ def _macro_refresh_due(data):
         return True
     hours = 24 if _macro_bonds_are_current(data) else MACRO_REFRESH_HOURS
     return age.total_seconds() >= hours * 3600
+
+
+def _fred_series_raw(series_id, years=3):
+    """FRED 官方 CSV；回傳已去除缺值的 (日期, 數值) 序列。"""
+    start = (_utcnow() - timedelta(days=366 * years + 14)).strftime("%Y-%m-%d")
+    r = requests.get(FRED_CSV, params={"id": series_id, "cosd": start},
+                     headers=HEADERS, timeout=25)
+    r.raise_for_status()
+    rows = []
+    for item in csv.DictReader(r.text.splitlines()):
+        raw = str(item.get(series_id) or "").strip()
+        if not raw or raw in (".", "NA"):
+            continue
+        try:
+            rows.append((str(item.get("observation_date") or "")[:10], float(raw)))
+        except (TypeError, ValueError):
+            continue
+    return [row for row in rows if len(row[0]) == 10]
+
+
+def _fred_policy_series_raw():
+    """一次下載政策序列 ZIP，避免同時對 FRED 發出九個請求而被節流。"""
+    import zipfile
+    ids = ("DFF", "DFEDTARL", "DFEDTARU", "IORB", "RRPONTSYD", "RPONTSYD",
+           "WALCL", "TREAST", "WSHOMCB")
+    start = (_utcnow() - timedelta(days=366 * 3 + 14)).strftime("%Y-%m-%d")
+    # FRED 的批次 ZIP 對瀏覽器型 User-Agent 偶爾長時間掛住；官方下載端點用
+    # 簡單的資料客戶端標頭反而穩定，且只需一個請求。
+    r = requests.get(FRED_CSV, params={"id": ",".join(ids), "cosd": start},
+                     headers={"User-Agent": "curl/8.7.1", "Accept": "*/*"}, timeout=45)
+    r.raise_for_status()
+    output = {key: [] for key in ids}
+    with zipfile.ZipFile(io.BytesIO(r.content)) as archive:
+        for name in archive.namelist():
+            if not name.lower().endswith(".csv"):
+                continue
+            text = archive.read(name).decode("utf-8-sig", errors="replace")
+            for item in csv.DictReader(text.splitlines()):
+                date_text = str(item.get("observation_date") or "")[:10]
+                if len(date_text) != 10:
+                    continue
+                for key in ids:
+                    raw = str(item.get(key) or "").strip()
+                    if not raw or raw in (".", "NA"):
+                        continue
+                    try:
+                        output[key].append((date_text, float(raw)))
+                    except ValueError:
+                        continue
+    return output
+
+
+def _fiscal_tga_raw():
+    """Daily Treasury Statement 的 TGA 收盤水位，單位百萬美元。
+
+    Fiscal Data 目前把這一列的數值放在 open_today_bal；account_type 已明確標示
+    Closing Balance，因此依官方欄位內容取值，避免誤拿整張表其他帳戶。
+    """
+    r = requests.get(
+        FISCAL_DATA_API + "/v1/accounting/dts/operating_cash_balance",
+        params={
+            "filter": "account_type:eq:Treasury General Account (TGA) Closing Balance",
+            "sort": "-record_date", "page[size]": 100,
+        }, headers=HEADERS, timeout=25)
+    r.raise_for_status()
+    rows = []
+    for item in r.json().get("data", []):
+        raw = item.get("close_today_bal")
+        if raw in (None, "", "null"):
+            raw = item.get("open_today_bal")
+        try:
+            rows.append((str(item.get("record_date") or "")[:10], float(raw)))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(rows))
+
+
+def _nyfed_effr_raw():
+    """紐約聯準銀行每日 EFFR；比 FRED 轉載通常早一個資料日。"""
+    r = requests.get(NYFED_EFFR_API, headers=HEADERS, timeout=25)
+    r.raise_for_status()
+    rows = []
+    for item in r.json().get("refRates", []):
+        try:
+            rows.append((str(item.get("effectiveDate") or "")[:10],
+                         float(item.get("percentRate"))))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(rows))
+
+
+def _fiscal_auctions_raw():
+    """未來 14 日美國國債標售；只讀官方已公告資料。"""
+    et_today = (_utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))).date()
+    end = et_today + timedelta(days=14)
+    fields = ("record_date,cusip,security_type,security_term,auction_date,issue_date,"
+              "offering_amt,total_accepted,bid_to_cover_ratio,high_yield")
+    r = requests.get(
+        FISCAL_DATA_API + "/v1/accounting/od/auctions_query",
+        params={"fields": fields,
+                "filter": "auction_date:gte:%s,auction_date:lte:%s" % (et_today, end),
+                "sort": "auction_date", "page[size]": 100},
+        headers=HEADERS, timeout=25)
+    r.raise_for_status()
+    seen, rows = set(), []
+    for item in r.json().get("data", []):
+        key = (item.get("cusip"), item.get("auction_date"))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            amount = float(item.get("offering_amt") or 0) / 1e9
+        except (TypeError, ValueError):
+            amount = 0
+        rows.append({"auction_date": str(item.get("auction_date") or "")[:10],
+                     "issue_date": str(item.get("issue_date") or "")[:10],
+                     "type": str(item.get("security_type") or ""),
+                     "term": str(item.get("security_term") or ""),
+                     "offering_bn": round(amount, 1)})
+    return rows
+
+
+def _fomc_calendar_raw():
+    """由聯準會官方行事曆找下一場已排定 FOMC 會議。"""
+    import html as _html
+    r = requests.get(FOMC_CALENDAR_URL, headers=HEADERS, timeout=25)
+    r.raise_for_status()
+    body = r.text
+    et_today = (_utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))).date()
+    months = {name: i for i, name in enumerate(
+        ("January", "February", "March", "April", "May", "June",
+         "July", "August", "September", "October", "November", "December"), 1)}
+    meetings = []
+    for year in (et_today.year, et_today.year + 1):
+        marker = re.search(r">%d FOMC Meetings<" % year, body)
+        if not marker:
+            continue
+        block = body[marker.start():]
+        nxt = re.search(r">%d FOMC Meetings<" % (year - 1), block[1:])
+        if nxt:
+            block = block[:nxt.start() + 1]
+        for chunk in re.split(r'row fomc-meeting[^>]*>', block)[1:]:
+            month_m = re.search(r'fomc-meeting__month[^>]*>\s*<strong>([^<]+)', chunk)
+            date_m = re.search(r'fomc-meeting__date[^>]*>(.*?)</div>', chunk, re.S)
+            if not month_m or not date_m:
+                continue
+            month = months.get(_html.unescape(month_m.group(1)).strip())
+            days = re.findall(r"\d{1,2}", re.sub(r"<[^>]+>", "", date_m.group(1)))
+            if not month or not days:
+                continue
+            try:
+                start_day, end_day = int(days[0]), int(days[-1])
+                start_date = datetime(year, month, start_day).date()
+                decision_date = datetime(year, month, end_day).date()
+            except ValueError:
+                continue
+            meetings.append({"start_date": str(start_date), "decision_date": str(decision_date),
+                             "label": "%s %s" % (month_m.group(1).strip(),
+                                                   re.sub(r"<[^>]+>", "", date_m.group(1)).strip())})
+    return next((row for row in sorted(meetings, key=lambda x: x["decision_date"])
+                 if row["decision_date"] >= str(et_today)), {})
+
+
+def _series_change(rows, periods):
+    if len(rows) <= periods:
+        return None
+    return round(rows[-1][1] - rows[-1 - periods][1], 3)
+
+
+def _fed_policy_refresh_due(data):
+    if not data:
+        return True
+    try:
+        fetched = datetime.strptime(data.get("fetched_at"), "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+        return (_utcnow() - fetched).total_seconds() >= FED_POLICY_REFRESH_HOURS * 3600
+    except (TypeError, ValueError):
+        return True
+
+
+def _fed_treasury_policy_data(force=False):
+    """首頁用聯準會與財政部快照。只在背景排程更新，首頁本身不連網。"""
+    old = _load_cache(FED_POLICY_CACHE_FILE, None) or {}
+    if not force and not _fed_policy_refresh_due(old):
+        return old
+    started = time.perf_counter()
+    series = {}
+    errors = []
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        fred_future = ex.submit(_fred_policy_series_raw)
+        effr_future = ex.submit(_nyfed_effr_raw)
+        tga_future = ex.submit(_fiscal_tga_raw)
+        auction_future = ex.submit(_fiscal_auctions_raw)
+        fomc_future = ex.submit(_fomc_calendar_raw)
+        try:
+            series = fred_future.result(timeout=55)
+        except Exception as exc:
+            errors.append("FRED:%s" % type(exc).__name__)
+        try:
+            effr = effr_future.result(timeout=35)
+            if effr and (not series.get("DFF") or effr[-1][0] >= series["DFF"][-1][0]):
+                series["DFF"] = effr
+        except Exception:
+            pass  # FRED DFF 是備援；NY Fed 暫時失敗不讓整張政策卡變成失敗。
+        try:
+            tga = tga_future.result(timeout=35)
+        except Exception as exc:
+            tga, errors = [], errors + ["TGA:%s" % type(exc).__name__]
+        try:
+            auctions = auction_future.result(timeout=35)
+        except Exception as exc:
+            auctions, errors = [], errors + ["Auctions:%s" % type(exc).__name__]
+        try:
+            fomc = fomc_future.result(timeout=35)
+        except Exception as exc:
+            fomc, errors = {}, errors + ["FOMC:%s" % type(exc).__name__]
+
+    def latest(key):
+        rows = series.get(key) or []
+        return ({"date": rows[-1][0], "value": rows[-1][1]} if rows else {})
+
+    policy = {key.lower(): latest(key) for key in ("DFF", "DFEDTARL", "DFEDTARU", "IORB")}
+    liquidity = {
+        "on_rrp": {**latest("RRPONTSYD"), "change_20": _series_change(series.get("RRPONTSYD", []), 20)},
+        "repo": {**latest("RPONTSYD"), "change_20": _series_change(series.get("RPONTSYD", []), 20)},
+    }
+    balance = {}
+    for key, name in (("WALCL", "total_assets"), ("TREAST", "treasury_holdings"),
+                      ("WSHOMCB", "mbs_holdings")):
+        balance[name] = {**latest(key), "change_4w": _series_change(series.get(key, []), 4),
+                         "change_13w": _series_change(series.get(key, []), 13)}
+    treasury = {
+        "tga": ({"date": tga[-1][0], "value": tga[-1][1],
+                 "change_20": _series_change(tga, min(20, max(1, len(tga) - 1)))} if tga else {}),
+        "auctions": auctions,
+        "next_7d_offering_bn": round(sum(row["offering_bn"] for row in auctions
+            if row.get("auction_date") <= str(((_utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))).date()
+                                               + timedelta(days=7)))), 1),
+    }
+    fresh_dates = [x.get("date") for x in (policy.get("dff"), liquidity.get("on_rrp"), treasury.get("tga"))
+                   if x and x.get("date")]
+    data = {"policy": policy, "liquidity": liquidity, "balance_sheet": balance,
+            "treasury": treasury, "next_fomc": fomc,
+            "as_of": max(fresh_dates) if fresh_dates else "",
+            "fetched_at": _utcnow().strftime("%Y-%m-%d %H:%M UTC"), "errors": errors}
+    # 部分來源失敗時保留前次完整子區塊；不能把正常畫面倒退成空白。
+    def has_observation(value):
+        if isinstance(value, dict):
+            return (value.get("value") is not None or value.get("date") or value.get("decision_date") or
+                    any(has_observation(v) for v in value.values()))
+        if isinstance(value, list):
+            return bool(value)
+        return False
+    for key in ("policy", "liquidity", "balance_sheet", "treasury", "next_fomc"):
+        if not has_observation(data.get(key)) and old.get(key):
+            data[key] = old[key]
+    if any((data.get("policy"), data.get("liquidity"), data.get("balance_sheet"), data.get("treasury"))):
+        _save_cache(FED_POLICY_CACHE_FILE, data)
+    outcome = "success" if not errors else ("parse_failed" if not old else "source_not_published")
+    _record_update("聯準會 FRED＋美國財政部 Fiscal Data", data.get("as_of"), outcome,
+                   started, ", ".join(errors))
+    return data or old
 
 
 def _treasury_yields_raw():
@@ -2567,7 +2835,7 @@ def _us_rate_inflation_data(force=False):
 
 
 def _macro_updater():
-    """美日公債背景排程：任一市場落後時每小時重試。"""
+    """美日公債、聯準會與財政部背景排程；落後時每小時重試。"""
     MACRO_STATE["enabled"] = True
     while True:
         try:
@@ -2588,6 +2856,12 @@ def _macro_updater():
                     "更新完成" if _macro_bonds_are_current(data)
                     else "來源仍落後，1 小時後重試")
                 MACRO_STATE["last_run"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
+            policy_cached = _load_cache(FED_POLICY_CACHE_FILE, None)
+            if _fed_policy_refresh_due(policy_cached):
+                policy_data = _fed_treasury_policy_data(force=True)
+                MACRO_STATE["fed_policy_date"] = policy_data.get("as_of") or "—"
+                MACRO_STATE["treasury_action_date"] = (
+                    (policy_data.get("treasury") or {}).get("tga") or {}).get("date") or "—"
         except Exception as exc:
             MACRO_STATE["last_result"] = "更新失敗，1 小時後重試：%s" % str(exc)[:100]
             MACRO_STATE["last_run"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -4502,6 +4776,10 @@ __SEO_HEAD__
   .home-industry-list>span{width:100%;padding:7px 10px;border-radius:10px;background:rgba(255,255,255,.72);font-size:14px}
   html[data-theme="c"] .home-industry{background:#21343A;border-color:#466068}
   html[data-theme="c"] .home-industry-list>span{background:#17252B;color:#F5EAD7}
+  .fed-policy-panel{max-width:none;margin:0;padding:20px 22px}.fed-policy-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}.fed-policy-head h2{margin:0 0 4px;font-size:20px}.fed-policy-head p{margin:0;color:var(--mocha);font-size:12px;line-height:1.55}.fed-policy-status{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.policy-status{white-space:nowrap;border:1px solid var(--grounds);border-radius:999px;padding:4px 8px;font-size:11px;color:var(--mocha);background:var(--foam)}.policy-status.ok{color:var(--up);border-color:color-mix(in srgb,var(--up) 45%,var(--grounds))}.policy-status.warn{color:var(--caramel-2)}.policy-status.danger{color:var(--down)}
+  .fed-policy-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.fed-policy-block{border:1px solid var(--grounds);border-radius:12px;padding:13px 14px;background:color-mix(in srgb,var(--foam) 88%,var(--grounds))}.fed-policy-block h3{font-size:15px;margin:0 0 9px}.policy-kpis{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.policy-kpi{min-width:0}.policy-kpi small{display:block;color:var(--mocha);font-size:11px;line-height:1.35}.policy-kpi b{display:block;margin-top:2px;font:700 17px var(--font-num);overflow-wrap:anywhere}.policy-note{margin:9px 0 0;color:var(--mocha);font-size:11px;line-height:1.55}.auction-list{margin:8px 0 0;padding:0;list-style:none;color:var(--mocha);font-size:11px;line-height:1.55}.auction-list b{color:var(--espresso)}.fomc-line{margin-top:10px;padding:10px 13px;border-left:4px solid var(--caramel);background:color-mix(in srgb,var(--foam) 82%,var(--caramel) 18%);font-size:12px}.fed-reading{margin-top:12px}.fed-source{margin-top:10px;color:var(--mocha);font-size:10.5px;line-height:1.5}.fed-source a{color:var(--caramel-2)}
+  .policy-board{margin:0;padding:0;list-style:none;border-top:1px solid var(--grounds)}.policy-board li{display:grid;grid-template-columns:112px minmax(0,.9fr) minmax(0,1.3fr);align-items:center;gap:14px;padding:12px 2px;border-bottom:1px dashed var(--grounds)}.policy-board-label{font-weight:800;color:var(--espresso)}.policy-board-data{font:700 13px/1.55 var(--font-num);color:var(--espresso)}.policy-board-read{font-size:12px;line-height:1.6;color:var(--mocha)}.policy-board-read b{color:var(--caramel-2)}.policy-board-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:11px}.policy-board-limit{margin:0;max-width:650px;color:var(--mocha);font-size:10.5px;line-height:1.55}
+  @media(max-width:560px){.fed-policy-panel{padding:17px 16px}.fed-policy-head{display:block}.fed-policy-status{justify-content:flex-start;margin-top:10px}.fed-policy-grid{grid-template-columns:1fr}.policy-kpis{grid-template-columns:1fr 1fr}.policy-board li{grid-template-columns:1fr;gap:3px;padding:12px 0}.policy-board-label{color:var(--caramel-2)}.policy-board-data{font-size:13px}.policy-board-read{font-size:11.5px}}
   @media(max-width:560px){.home-actions,.home-action-panel .home-actions{grid-template-columns:1fr}.updnote{font-size:14px}.updnote small{font-size:12.5px}}
   @media(max-width:560px){.reading-row{grid-template-columns:54px 1fr}.ind-change-grid,.ind-stock-list{grid-template-columns:1fr}}
   @media(max-width:560px){.market-now-grid{grid-template-columns:1fr}.market-now-hero{padding:17px 18px}.market-now-title h1{font-size:27px}.market-now-badge{padding:6px 13px}.market-return-row{grid-template-columns:105px 1fr 88px}.market-return-row>span{padding:10px 8px}.market-return-main b,.market-return-med b{font-size:16px}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods{width:100%}.market-periods button{flex:1;padding:7px 5px}}
@@ -4786,6 +5064,8 @@ __SEO_HEAD__
 __HOME_MARKET_DASHBOARD__
 
 __UPDATE_NOTE__
+
+__FED_POLICY_PANEL__
 
   <section class="home-action-panel"><div class="qhead"><span class="q-zh">今日觀察 · ACTIONS</span><span class="q-en" style="display:none">WHAT TO EXPLORE</span></div>
   <div class="home-section-note"><span class="q-zh">先看近期選股結果，再查看強勢股與產業集中方向。以下都是過去資料的整理，不是未來預測。</span><span class="q-en" style="display:none">Start with realised selection results, then explore strong stocks and sector concentration. Nothing here predicts the future.</span></div>
@@ -7764,7 +8044,7 @@ async function loadMacro(){
 
 /* ---- 全站資料品質提示：外觀切換不改變這個固定資訊層級。 ---- */
 let DATA_HEALTH=null;
-const PAGE_DATA_SOURCES={home:['market_returns','market_breadth','nasdaq_index','us_yields','jp_yields'],pind:['market_breadth'],pmac:['us_yields','jp_yields'],p1:['market_returns'],p3:['market_returns'],pgrow:['market_returns'],p11:['nasdaq_index'],p7:['nasdaq_index'],p8:['market_returns'],p12:['market_returns'],p10:['nasdaq_index'],p4:['market_returns'],p5:['market_returns'],p9:['market_returns']};
+const PAGE_DATA_SOURCES={home:['market_returns','market_breadth','nasdaq_index','fed_policy','treasury_actions'],pind:['market_breadth'],pmac:['us_yields','jp_yields'],p1:['market_returns'],p3:['market_returns'],pgrow:['market_returns'],p11:['nasdaq_index'],p7:['nasdaq_index'],p8:['market_returns'],p12:['market_returns'],p10:['nasdaq_index'],p4:['market_returns'],p5:['market_returns'],p9:['market_returns']};
 function qualityChip(item){const cls={ok:'dq-ok',pending:'dq-pending',warn:'dq-warn',danger:'dq-danger'}[item.severity]||'dq-danger';const zh=`${item.label_zh||'資料'}：${item.status_zh||'更新失敗，沿用舊資料'}`;const en=`${item.label_en||'Data'}: ${item.status_en||'Update failed; using older data'}`;return `<span class="data-quality-chip ${cls}" title="${item.actual||''}"><span class="q-zh"${LANG==='zh'?'':' style="display:none"'}>${zh}</span><span class="q-en"${LANG==='en'?'':' style="display:none"'}>${en}</span></span>`}
 function renderDataQuality(){if(!DATA_HEALTH)return;Object.entries(PAGE_DATA_SOURCES).forEach(([pid,keys])=>{const page=document.getElementById(pid);if(!page)return;let strip=page.querySelector(':scope > .data-quality-strip');if(!strip){strip=document.createElement('div');strip.className='data-quality-strip';const title=page.querySelector(':scope > .ptitle');title?title.insertAdjacentElement('afterend',strip):page.prepend(strip)}strip.innerHTML=keys.map(k=>qualityChip(DATA_HEALTH.items[k]||{})).join('')})}
 async function loadDataQuality(){try{DATA_HEALTH=await readJson(await fetch('/api/data-health'));renderDataQuality()}catch(e){DATA_HEALTH={items:{market_returns:{severity:'danger',status_zh:'更新失敗，沿用舊資料',status_en:'Update failed; using older data',label_zh:'資料',label_en:'Data'}}};Object.keys(PAGE_DATA_SOURCES).forEach(k=>PAGE_DATA_SOURCES[k]=['market_returns']);renderDataQuality()}}
@@ -8518,6 +8798,23 @@ def _data_health_snapshot():
         if y_status in ("failed", "overdue"):
             warnings_zh.append(zh_label + "：" + y_zh)
             warnings_en.append(en_label + ": " + y_en)
+    fed_data = _load_cache(FED_POLICY_CACHE_FILE, None) or {}
+    fed_policy = fed_data.get("policy") or {}
+    treasury_actions = fed_data.get("treasury") or {}
+    for health_key, actual, zh_label, en_label in (
+            ("fed_policy", str((fed_policy.get("dff") or {}).get("date") or ""),
+             "聯準會政策資料", "Federal Reserve policy data"),
+            ("treasury_actions", str((treasury_actions.get("tga") or {}).get("date") or ""),
+             "美國財政部行動", "U.S. Treasury actions")):
+        lag = _business_days_behind(actual, market="us")
+        p_status, p_zh, p_en, p_severity = quality(
+            lag, bool(fed_data.get("errors")), "us")
+        items[health_key] = {"actual": actual, "business_days_behind": lag,
+                             "status": p_status, "status_zh": p_zh, "status_en": p_en,
+                             "severity": p_severity, "label_zh": zh_label, "label_en": en_label}
+        if p_status in ("failed", "overdue"):
+            warnings_zh.append(zh_label + "：" + p_zh)
+            warnings_en.append(en_label + ": " + p_en)
     heartbeat = SCHED_STATE.get("heartbeat_ts") or 0
     schedule_status = "running" if heartbeat and time.time() - heartbeat <= 360 else ("starting" if SCHED_STATE.get("thread_started") else "stopped")
     if schedule_status == "stopped":
@@ -8528,6 +8825,111 @@ def _data_health_snapshot():
                          "last_result": SCHED_STATE.get("last_result"), "completed_session": SCHED_STATE.get("completed_session")},
             "warnings_zh": warnings_zh, "warnings_en": warnings_en,
             "checked_at": _fmt_et(_utcnow())}
+
+
+def _fed_policy_panel_html():
+    """首頁聯準會與財政部快照；只讀背景排程快取，不在頁面請求中連外。"""
+    import html as _h
+    data = _load_cache(FED_POLICY_CACHE_FILE, None) or {}
+    if not data:
+        return ('<section class="card fed-policy-panel"><div class="fed-policy-head"><div>'
+                '<h2><span class="q-zh">聯準會與財政部動向</span><span class="q-en" style="display:none">Fed &amp; Treasury watch</span></h2>'
+                '<p><span class="q-zh">官方資料正在首次整理，完成後會自動顯示。</span><span class="q-en" style="display:none">Official data are being prepared for the first time.</span></p>'
+                '</div><span class="policy-status warn"><span class="q-zh">資料整理中</span><span class="q-en" style="display:none">Updating</span></span></div></section>')
+
+    policy = data.get("policy") or {}; liquid = data.get("liquidity") or {}
+    balance = data.get("balance_sheet") or {}; treasury = data.get("treasury") or {}
+    dff, lower, upper, iorb = (policy.get(k) or {} for k in ("dff", "dfedtarl", "dfedtaru", "iorb"))
+    rrp, repo = liquid.get("on_rrp") or {}, liquid.get("repo") or {}
+    assets = balance.get("total_assets") or {}; treas = balance.get("treasury_holdings") or {}
+    mbs = balance.get("mbs_holdings") or {}; tga = treasury.get("tga") or {}
+
+    def number(item, scale=1, suffix=""):
+        try:
+            return ("{:,.2f}".format(float(item.get("value")) / scale).rstrip("0").rstrip(".") + suffix)
+        except (TypeError, ValueError):
+            return "—"
+
+    def signed(value, scale=1, suffix=""):
+        try:
+            return "%+.1f%s" % (float(value) / scale, suffix)
+        except (TypeError, ValueError):
+            return "—"
+
+    def status(label_zh, label_en, date_text, weekly=False):
+        if not date_text:
+            return '<span class="policy-status danger"><span class="q-zh">%s：更新失敗</span><span class="q-en" style="display:none">%s: failed</span></span>' % (label_zh, label_en)
+        if weekly:
+            try:
+                age = ((_utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))).date()
+                       - datetime.strptime(date_text[:10], "%Y-%m-%d").date()).days
+            except ValueError:
+                age = 99
+            level, zh_state, en_state = (("ok", "資料最新", "current") if age <= 8 else
+                                         ("danger", "資料落後", "delayed"))
+        else:
+            lag = _business_days_behind(date_text, market="us")
+            level, zh_state, en_state = (("ok", "資料最新", "current") if lag <= 0 else
+                                         ("warn", "落後一個交易日", "one session behind") if lag == 1 else
+                                         ("danger", "資料落後", "delayed"))
+        return '<span class="policy-status %s"><span class="q-zh">%s：%s</span><span class="q-en" style="display:none">%s: %s</span></span>' % (level, label_zh, zh_state, label_en, en_state)
+
+    within = False
+    try:
+        within = float(lower["value"]) <= float(dff["value"]) <= float(upper["value"])
+    except (KeyError, TypeError, ValueError):
+        pass
+    policy_read_zh = ("有效聯邦基金利率仍在目標區間內。" if within else "有效聯邦基金利率與目標區間需要留意。")
+    policy_read_en = ("The effective fed funds rate remains inside the target range." if within else
+                      "The effective fed funds rate versus the target range needs attention.")
+    rrp_change = rrp.get("change_20")
+    liquid_zh = ("ON RRP近20期下降，聯準會吸收的隔夜閒置現金減少。" if isinstance(rrp_change, (int, float)) and rrp_change < 0 else
+                 "ON RRP近20期增加，停放在聯準會的隔夜現金增加。" if isinstance(rrp_change, (int, float)) and rrp_change > 0 else
+                 "ON RRP近20期變化有限。")
+    liquid_en = ("ON RRP has declined over 20 observations, so less overnight cash is being absorbed." if isinstance(rrp_change, (int, float)) and rrp_change < 0 else
+                 "ON RRP has risen over 20 observations, so more overnight cash is parked at the Fed." if isinstance(rrp_change, (int, float)) and rrp_change > 0 else
+                 "ON RRP has changed little over 20 observations.")
+    holdings_4w = sum(x for x in (treas.get("change_4w"), mbs.get("change_4w")) if isinstance(x, (int, float)))
+    if holdings_4w < -5000:
+        balance_zh, balance_en = "公債與MBS持有量近4週縮減，資產負債表仍在收縮。", "Treasury and MBS holdings fell over four weeks; the balance sheet is still contracting."
+    elif holdings_4w > 5000:
+        balance_zh, balance_en = "公債與MBS持有量近4週增加；這不自動等同QE。", "Treasury and MBS holdings rose over four weeks; this alone is not QE."
+    else:
+        balance_zh, balance_en = "公債與MBS持有量近4週大致持平。", "Treasury and MBS holdings were broadly stable over four weeks."
+    tga_change = tga.get("change_20")
+    tga_zh = ("TGA近20期回補，通常會暫時吸收金融體系現金。" if isinstance(tga_change, (int, float)) and tga_change > 0 else
+              "TGA近20期下降，財政支出通常會把現金釋回金融體系。" if isinstance(tga_change, (int, float)) and tga_change < 0 else
+              "TGA近20期變化有限。")
+    tga_en = ("TGA rose over 20 observations, which usually absorbs cash from the financial system." if isinstance(tga_change, (int, float)) and tga_change > 0 else
+              "TGA fell over 20 observations; Treasury outlays usually return cash to the financial system." if isinstance(tga_change, (int, float)) and tga_change < 0 else
+              "TGA changed little over 20 observations.")
+
+    auctions = treasury.get("auctions") or []
+    auction_zh = "、".join('%s %s $%.1fB' %
+                          (_h.escape(str(x.get("auction_date") or "—")),
+                           _h.escape(str(x.get("term") or x.get("type") or "")),
+                           float(x.get("offering_bn") or 0)) for x in auctions[:3]) or "尚無已公告標售"
+    auction_en = " · ".join('%s %s $%.1fB' %
+                            (_h.escape(str(x.get("auction_date") or "—")),
+                             _h.escape(str(x.get("term") or x.get("type") or "")),
+                             float(x.get("offering_bn") or 0)) for x in auctions[:3]) or "No announced auctions"
+    fomc = data.get("next_fomc") or {}
+    fomc_date = _h.escape(str(fomc.get("decision_date") or "—"))
+    auction_total = float(treasury.get("next_7d_offering_bn") or 0)
+    as_of = _h.escape(str(data.get("as_of") or "—"))
+    return (
+        '<section class="card fed-policy-panel"><div class="fed-policy-head"><div><h2><span class="q-zh">聯準會與財政部動向</span><span class="q-en" style="display:none">Fed &amp; Treasury watch</span></h2>'
+        '<p><span class="q-zh">政策留言板・只列關鍵數字與已發生的變化</span><span class="q-en" style="display:none">Policy board · key figures and observed changes only</span></p></div><div class="fed-policy-status">'
+        + status("利率", "Rates", str(dff.get("date") or ""))
+        + status("資產負債表", "Balance sheet", str(assets.get("date") or ""), True)
+        + status("財政部", "Treasury", str(tga.get("date") or "")) + '</div></div>'
+        '<ul class="policy-board">'
+        '<li><span class="policy-board-label"><span class="q-zh">政策利率</span><span class="q-en" style="display:none">Policy rate</span></span><span class="policy-board-data"><span class="q-zh">目標 ' + number(lower, 1, "%") + '–' + number(upper, 1, "%") + '　EFFR ' + number(dff, 1, "%") + '　IORB ' + number(iorb, 1, "%") + '</span><span class="q-en" style="display:none">Target ' + number(lower, 1, "%") + '–' + number(upper, 1, "%") + ' · EFFR ' + number(dff, 1, "%") + ' · IORB ' + number(iorb, 1, "%") + '</span></span><span class="policy-board-read"><span class="q-zh">' + policy_read_zh + ' 下次FOMC決議 <b>' + fomc_date + '</b>。</span><span class="q-en" style="display:none">' + policy_read_en + ' Next FOMC decision: <b>' + fomc_date + '</b>.</span></span></li>'
+        '<li><span class="policy-board-label"><span class="q-zh">隔夜流動性</span><span class="q-en" style="display:none">Overnight liquidity</span></span><span class="policy-board-data"><span class="q-zh">ON RRP $' + number(rrp, 1, "B") + '　20期 ' + signed(rrp_change, 1, "B") + '　Repo $' + number(repo, 1, "B") + '</span><span class="q-en" style="display:none">ON RRP $' + number(rrp, 1, "B") + ' · 20 obs ' + signed(rrp_change, 1, "B") + ' · Repo $' + number(repo, 1, "B") + '</span></span><span class="policy-board-read"><span class="q-zh">' + liquid_zh + '</span><span class="q-en" style="display:none">' + liquid_en + '</span></span></li>'
+        '<li><span class="policy-board-label"><span class="q-zh">聯準會持有</span><span class="q-en" style="display:none">Fed holdings</span></span><span class="policy-board-data"><span class="q-zh">總資產 $' + number(assets, 1000000, "T") + '　美債 $' + number(treas, 1000000, "T") + '　MBS $' + number(mbs, 1000000, "T") + '　4週 ' + signed(holdings_4w, 1000, "B") + '</span><span class="q-en" style="display:none">Assets $' + number(assets, 1000000, "T") + ' · Treasuries $' + number(treas, 1000000, "T") + ' · MBS $' + number(mbs, 1000000, "T") + ' · 4w ' + signed(holdings_4w, 1000, "B") + '</span></span><span class="policy-board-read"><span class="q-zh">' + balance_zh + '</span><span class="q-en" style="display:none">' + balance_en + '</span></span></li>'
+        '<li><span class="policy-board-label"><span class="q-zh">財政部現金</span><span class="q-en" style="display:none">Treasury cash</span></span><span class="policy-board-data"><span class="q-zh">TGA $' + number(tga, 1000, "B") + '　20期 ' + signed(tga_change, 1000, "B") + '</span><span class="q-en" style="display:none">TGA $' + number(tga, 1000, "B") + ' · 20 obs ' + signed(tga_change, 1000, "B") + '</span></span><span class="policy-board-read"><span class="q-zh">' + tga_zh + '</span><span class="q-en" style="display:none">' + tga_en + '</span></span></li>'
+        '<li><span class="policy-board-label"><span class="q-zh">國債標售</span><span class="q-en" style="display:none">Treasury auctions</span></span><span class="policy-board-data"><span class="q-zh">未來7日合計 $' + ('%.1fB' % auction_total) + '</span><span class="q-en" style="display:none">Next 7 days $' + ('%.1fB' % auction_total) + '</span></span><span class="policy-board-read"><span class="q-zh">' + auction_zh + '</span><span class="q-en" style="display:none">' + auction_en + '</span></span></li></ul>'
+        '<div class="policy-board-meta"><p class="policy-board-limit"><span class="q-zh">資料截至 ' + as_of + '。逆回購、TGA與標售只描述美元流動性，不能單獨預測股市；只有官方明確啟動淨資產購買計畫才標示為QE。</span><span class="q-en" style="display:none">Data as of ' + as_of + '. ON RRP, TGA and auctions describe dollar liquidity but cannot forecast stocks alone. QE is shown only for an officially announced net asset-purchase programme.</span></p><div class="fed-source"><a href="https://fred.stlouisfed.org/" target="_blank" rel="noopener">Fed / FRED</a> · <a href="https://fiscaldata.treasury.gov/" target="_blank" rel="noopener">Treasury</a> · <a href="https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" target="_blank" rel="noopener">FOMC</a></div></div></section>')
 
 
 def _update_note_html():
@@ -8851,6 +9253,7 @@ def _render(slug=None):
     html = html.replace("__HOME_MARKET_DASHBOARD__", _home_market_dashboard_html())
     html = html.replace("__PHASE_BAR__", _phase_banner_html())
     html = html.replace("__UPDATE_NOTE__", _update_note_html())
+    html = html.replace("__FED_POLICY_PANEL__", _fed_policy_panel_html())
     html = html.replace("__HOME_SCREEN__", _home_screen_html())
     html = html.replace("__HOME_INDUSTRY_BRIEF__", _home_industry_brief_html())
     html = html.replace("__BUILD_INFO__", _build_badge_html())
@@ -10103,6 +10506,15 @@ def api_macro():
         return jsonify(_us_rate_inflation_data())
     except Exception as exc:
         return jsonify(error=str(exc), items=[]), 503
+
+
+@app.route("/api/fed-policy")
+def api_fed_policy():
+    """聯準會與財政部官方資料快照；公開唯讀且不在請求中連外。"""
+    data = _load_cache(FED_POLICY_CACHE_FILE, None) or {}
+    if not data:
+        return jsonify(pending=True, error="官方政策資料正在背景整理"), 202
+    return jsonify(data)
 
 
 @app.route("/api/market-years")

@@ -24,6 +24,10 @@ class SharedDataContractTest(unittest.TestCase):
         self.assertEqual(app.TREASURY_XML, sources["us_treasury"]["url"])
         self.assertEqual(app.JGB_DAILY_CSV, sources["jgb_daily"]["url"])
         self.assertEqual(app.JGB_HISTORY_CSV, sources["jgb_history"]["url"])
+        self.assertEqual(app.FRED_CSV, sources["fred_policy"]["url"])
+        self.assertEqual(app.NYFED_EFFR_API, sources["nyfed_effr"]["url"])
+        self.assertEqual(app.FISCAL_DATA_API, sources["treasury_fiscal_data"]["url"])
+        self.assertEqual(app.FOMC_CALENDAR_URL, sources["fomc_calendar"]["url"])
         fn = getattr(app, "_jgb_yield_series_raw", None) or app._jgb_yields_raw
         source = inspect.getsource(fn)
         self.assertIn("JGB_DAILY_CSV", source)
@@ -34,7 +38,8 @@ class SharedDataContractTest(unittest.TestCase):
         self.assertEqual(app.MAX_BOND_LAG_DAYS, 1)
         self.assertEqual(self.contract["allowed_lag_business_days"],
                          {"us_yields": app.MAX_BOND_LAG_DAYS,
-                          "jp_yields": app.MAX_BOND_LAG_DAYS})
+                          "jp_yields": app.MAX_BOND_LAG_DAYS,
+                          "fed_policy": 1, "treasury_actions": 1})
         self.assertEqual(app.HOLIDAY_CALENDAR_SPEC, self.contract["holiday_calendars"])
         self.assertEqual(app.QUALITY_STATUS_ZH, self.contract["quality_statuses_zh"])
         self.assertIn(date(2026, 4, 3), app._market_holidays("us", [2026]))

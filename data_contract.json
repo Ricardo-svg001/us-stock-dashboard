@@ -1,5 +1,5 @@
 {
-  "contract_version": "2026-08-25.1",
+  "contract_version": "2026-08-26.1",
   "sources": {
     "us_treasury": {
       "url": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml",
@@ -10,11 +10,27 @@
     },
     "jgb_history": {
       "url": "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
+    },
+    "fred_policy": {
+      "url": "https://fred.stlouisfed.org/graph/fredgraph.csv",
+      "series": ["DFF", "DFEDTARL", "DFEDTARU", "IORB", "RRPONTSYD", "RPONTSYD", "WALCL", "TREAST", "WSHOMCB"]
+    },
+    "nyfed_effr": {
+      "url": "https://markets.newyorkfed.org/api/rates/unsecured/effr/last/30.json"
+    },
+    "treasury_fiscal_data": {
+      "url": "https://api.fiscaldata.treasury.gov/services/api/fiscal_service",
+      "datasets": ["operating_cash_balance", "auctions_query"]
+    },
+    "fomc_calendar": {
+      "url": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
     }
   },
   "allowed_lag_business_days": {
     "us_yields": 1,
-    "jp_yields": 1
+    "jp_yields": 1,
+    "fed_policy": 1,
+    "treasury_actions": 1
   },
   "holiday_calendars": {
     "us": "US+GoodFriday",

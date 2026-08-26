@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.26.1"
+APP_VERSION = "2026.08.26.2"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -8807,8 +8807,11 @@ def _data_health_snapshot():
             ("treasury_actions", str((treasury_actions.get("tga") or {}).get("date") or ""),
              "美國財政部行動", "U.S. Treasury actions")):
         lag = _business_days_behind(actual, market="us")
+        # EFFR 與 Daily Treasury Statement 都是下一營業日發布；這一日是正常發布差，
+        # 不應標成資料落後。超過它才進入「待公布／落後」判斷。
+        quality_lag = max(0, lag - 1)
         p_status, p_zh, p_en, p_severity = quality(
-            lag, bool(fed_data.get("errors")), "us")
+            quality_lag, bool(fed_data.get("errors")), "us")
         items[health_key] = {"actual": actual, "business_days_behind": lag,
                              "status": p_status, "status_zh": p_zh, "status_en": p_en,
                              "severity": p_severity, "label_zh": zh_label, "label_en": en_label}
@@ -8856,7 +8859,7 @@ def _fed_policy_panel_html():
         except (TypeError, ValueError):
             return "—"
 
-    def status(label_zh, label_en, date_text, weekly=False):
+    def status(label_zh, label_en, date_text, weekly=False, expected_lag=0, publish_hour=17):
         if not date_text:
             return '<span class="policy-status danger"><span class="q-zh">%s：更新失敗</span><span class="q-en" style="display:none">%s: failed</span></span>' % (label_zh, label_en)
         if weekly:
@@ -8869,8 +8872,11 @@ def _fed_policy_panel_html():
                                          ("danger", "資料落後", "delayed"))
         else:
             lag = _business_days_behind(date_text, market="us")
-            level, zh_state, en_state = (("ok", "資料最新", "current") if lag <= 0 else
-                                         ("warn", "落後一個交易日", "one session behind") if lag == 1 else
+            adjusted = max(0, lag - expected_lag)
+            et_now = _utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))
+            level, zh_state, en_state = (("ok", "資料最新", "current") if adjusted <= 0 else
+                                         ("warn", "尚待今日公布", "awaiting today's release") if adjusted == 1 and et_now.hour < publish_hour else
+                                         ("warn", "落後一個交易日", "one session behind") if adjusted == 1 else
                                          ("danger", "資料落後", "delayed"))
         return '<span class="policy-status %s"><span class="q-zh">%s：%s</span><span class="q-en" style="display:none">%s: %s</span></span>' % (level, label_zh, zh_state, label_en, en_state)
 
@@ -8920,9 +8926,9 @@ def _fed_policy_panel_html():
     return (
         '<section class="card fed-policy-panel"><div class="fed-policy-head"><div><h2><span class="q-zh">聯準會與財政部動向</span><span class="q-en" style="display:none">Fed &amp; Treasury watch</span></h2>'
         '<p><span class="q-zh">政策留言板・只列關鍵數字與已發生的變化</span><span class="q-en" style="display:none">Policy board · key figures and observed changes only</span></p></div><div class="fed-policy-status">'
-        + status("利率", "Rates", str(dff.get("date") or ""))
+        + status("利率", "Rates", str(dff.get("date") or ""), expected_lag=1, publish_hour=10)
         + status("資產負債表", "Balance sheet", str(assets.get("date") or ""), True)
-        + status("財政部", "Treasury", str(tga.get("date") or "")) + '</div></div>'
+        + status("財政部", "Treasury", str(tga.get("date") or ""), expected_lag=1, publish_hour=16) + '</div></div>'
         '<ul class="policy-board">'
         '<li><span class="policy-board-label"><span class="q-zh">政策利率</span><span class="q-en" style="display:none">Policy rate</span></span><span class="policy-board-data"><span class="q-zh">目標 ' + number(lower, 1, "%") + '–' + number(upper, 1, "%") + '　EFFR ' + number(dff, 1, "%") + '　IORB ' + number(iorb, 1, "%") + '</span><span class="q-en" style="display:none">Target ' + number(lower, 1, "%") + '–' + number(upper, 1, "%") + ' · EFFR ' + number(dff, 1, "%") + ' · IORB ' + number(iorb, 1, "%") + '</span></span><span class="policy-board-read"><span class="q-zh">' + policy_read_zh + ' 下次FOMC決議 <b>' + fomc_date + '</b>。</span><span class="q-en" style="display:none">' + policy_read_en + ' Next FOMC decision: <b>' + fomc_date + '</b>.</span></span></li>'
         '<li><span class="policy-board-label"><span class="q-zh">隔夜流動性</span><span class="q-en" style="display:none">Overnight liquidity</span></span><span class="policy-board-data"><span class="q-zh">ON RRP $' + number(rrp, 1, "B") + '　20期 ' + signed(rrp_change, 1, "B") + '　Repo $' + number(repo, 1, "B") + '</span><span class="q-en" style="display:none">ON RRP $' + number(rrp, 1, "B") + ' · 20 obs ' + signed(rrp_change, 1, "B") + ' · Repo $' + number(repo, 1, "B") + '</span></span><span class="policy-board-read"><span class="q-zh">' + liquid_zh + '</span><span class="q-en" style="display:none">' + liquid_en + '</span></span></li>'

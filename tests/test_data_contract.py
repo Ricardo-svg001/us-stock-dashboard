@@ -52,7 +52,7 @@ class SharedDataContractTest(unittest.TestCase):
         self.assertTrue({"executed_at", "source", "latest_date", "result",
                          "duration_sec"} <= set(history[-1]))
 
-    def test_five_stage_market_contract(self):
+    def test_four_stage_market_contract(self):
         spec = self.contract["market_phase"]
         self.assertEqual(tuple(spec["moving_averages"]), app.MARKET_PHASE_MAS)
         self.assertEqual(spec["stage_count"], len(app.MARKET_LIFECYCLE))
@@ -72,22 +72,20 @@ class SharedDataContractTest(unittest.TestCase):
 
         rising = [100 * (1.01 ** i) for i in range(145)]
         tailwind = rising + [rising[-1] * .98] * 5  # 最後形成 5MA < 10MA，仍屬多頭
-        self.assertEqual(app._five_stage_from_index(series(tailwind))[0], "tailwind")
+        self.assertEqual(app._market_stage_from_index(series(tailwind))[0], "tailwind")
         base = [100 * (1.002 ** i) for i in range(140)]
         consolidation = base + [base[-1] * .98] * 10
-        self.assertEqual(app._five_stage_from_index(series(consolidation))[0], "transition")
-        self.assertEqual(app._five_stage_from_index(
+        self.assertEqual(app._market_stage_from_index(series(consolidation))[0], "transition")
+        self.assertEqual(app._market_stage_from_index(
             series([200 * (.995 ** i) for i in range(150)]))[0], "riskoff")
-        early = [200 * (.995 ** i) for i in range(140)] + [100] * 5 + [50] * 2 + [115] * 3
-        self.assertEqual(app._five_stage_from_index(series(early))[0], "recovery_early")
         confirmed = [200 * (.995 ** i) for i in range(147)] + [140] * 3
-        confirmed_result = app._five_stage_from_index(series(confirmed))
+        confirmed_result = app._market_stage_from_index(series(confirmed))
         self.assertEqual(confirmed_result[0], "recovery_confirmed")
         self.assertTrue(confirmed_result[2]["recovery_watch"])
         self.assertTrue(confirmed_result[2]["broad_bear"])
         unmatched = consolidation + [126.8973, 127.2110, 113.1703, 138.3940, 111.2081,
                                      111.4505, 118.1711, 115.9632, 124.4106, 110.7484]
-        carried = app._five_stage_from_index(series(unmatched))
+        carried = app._market_stage_from_index(series(unmatched))
         self.assertEqual(carried[0], "transition")
         self.assertTrue(carried[2]["carried"])
 

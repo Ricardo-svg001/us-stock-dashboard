@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.25.6"
+APP_VERSION = "2026.08.25.7"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1201,7 +1201,6 @@ REGIME_TAGS = {
     "transition": ["耐心與等待", "操作頻率", "紀律與節制", "等待的重要",
                    "等市場確認", "選擇戰場", "樂觀的代價", "賣出的重要"],
     "riskoff": ["下跌與虧損", "永遠不要攤平", "停損", "情緒管理", "快速停損"],
-    "recovery_early": ["底部的勇氣"],
     "recovery_confirmed": ["趨勢才是真相", "順勢而為", "先勝後戰"],
 }
 # 不綁盤勢的通用主題。首頁固定會多顯示一張，每天輪替。
@@ -2124,9 +2123,8 @@ MARKET_COUNT_KEEP = 3 * 252
 MARKET_COUNT_CACHE = "market_count_3y.json"
 MARKET_INDEX_KEEP = 3 * 252       # 首頁大盤折線圖：近三年納斯達克綜合指數
 
-# 洗盤記憶維持近 90 日最低寬度 ≤30%。收復 50MA 是初步復甦，收復 100MA
-# 是復甦確認；三日黏著消除單日假突破。歷史寬度以今日前 300 大回算，仍有
-# 存活者偏誤，門檻只應保守解讀。
+# 歷史寬度以今日前 300 大回算，仍有存活者偏誤；它只描述市場參與度，
+# 不參與首頁四階段判斷，門檻應保守解讀。
 
 # ---- 長期成長股列表 ----------------------------------------------------
 # ⚠️⚠️ 這份資料**不在線上計算**，由本機 `研究/腳本/長期成長股列表.py` 算好、
@@ -3328,20 +3326,16 @@ PHASE_UI = {
     "riskoff": {"dot": "🔴", "zh": "逆風市場", "en": "Headwind",
                 "zh_do": "大盤連續三日低於半年線3%以上",
                 "en_do": "The index has stayed more than 3% below its 120-day MA for three sessions"},
-    "recovery_early": {"dot": "🔵", "zh": "初步復甦", "en": "Early Recovery",
-                       "zh_do": "均線仍嚴格空頭，但大盤已連續三日站上季線",
-                       "en_do": "MAs remain strictly bearish, but the index has closed above its 60-day MA for three sessions"},
     "recovery_confirmed": {"dot": "🔵", "zh": "復甦確認", "en": "Recovery Confirmed",
                            "zh_do": "廣義空頭啟動觀察後，大盤連續三日站上半年線4%以上",
                            "en_do": "After a broad bearish alignment triggered observation, the index stayed more than 4% above its 120-day MA for three sessions"},
 }
 
-# 首頁五階段依均線排列與乖離判斷；順序依使用者指定的判斷表呈現。
+# 首頁四階段依均線排列與乖離判斷；順序依使用者指定的判斷表呈現。
 MARKET_LIFECYCLE = [
     ("tailwind", "順風趨勢", "5MA與10MA可互換，但都高於20MA；20MA>60MA>120MA", "Tailwind", "5MA/10MA may swap; both above 20MA, with 20MA > 60MA > 120MA"),
     ("transition", "多頭回檔", "非多頭排列；至少兩條短均線與季線乖離<5%連3日；季線>半年線", "Bull-market Pullback", "Not bullish; two short MAs within 5% of 60MA for 3 sessions; 60MA above 120MA"),
     ("riskoff", "逆風市場", "連三日低於半年線3%以上", "Headwind", "More than 3% below the 120-day MA for three sessions"),
-    ("recovery_early", "初步復甦", "空頭排列中連三日站上季線", "Early Recovery", "Above the 60-day MA for three sessions while MAs remain bearish"),
     ("recovery_confirmed", "復甦確認", "120MA>20MA或60MA後啟動觀察；連三日站上120MA逾4%", "Recovery Confirmed", "Watch after 120MA rises above 20MA or 60MA; then 3 closes over 4% above 120MA"),
 ]
 LIFECYCLE_STAGE = {phase: i for i, (phase, *_rest) in enumerate(MARKET_LIFECYCLE, 1)}
@@ -3433,8 +3427,8 @@ def _maybe_topup_index():
         pass
 
 
-def _five_stage_from_index(index_data):
-    """以大盤 5/10/20/60/120MA 排列、乖離與連續三日條件判斷五階段。"""
+def _market_stage_from_index(index_data):
+    """以大盤 5/10/20/60/120MA 排列、乖離與連續三日條件判斷四階段。"""
     try:
         points = sorted((str(date), float(value)) for date, value in (index_data or {}).items())
     except (TypeError, ValueError):
@@ -3467,9 +3461,7 @@ def _five_stage_from_index(index_data):
             recovery_watch = False
         elif broad_bear:
             recovery_watch = True
-        strict_bear = all(mas[a] < mas[b] for a, b in zip(MARKET_PHASE_MAS, MARKET_PHASE_MAS[1:]))
         compressed_3d = all(row[2] for row in recent)
-        above_60_3d = all(row[0] > row[1][60] for row in recent)
         above_120_4pct_3d = all(row[0] > row[1][120] * (1 + PHASE_RECOVERY_PCT / 100)
                                for row in recent)
         below_120_3pct_3d = all(row[0] < row[1][120] * (1 - PHASE_RISKOFF_PCT / 100)
@@ -3481,8 +3473,6 @@ def _five_stage_from_index(index_data):
             signal = "recovery_confirmed"
         elif compressed_3d and mas[60] > mas[120]:
             signal = "transition"
-        elif strict_bear and above_60_3d:
-            signal = "recovery_early"
         elif below_120_3pct_3d:
             signal = "riskoff"
         if signal:
@@ -3498,14 +3488,14 @@ def _five_stage_from_index(index_data):
 
 
 def _phase_compute():
-    """以納斯達克指數均線排列與乖離判斷五階段。"""
+    """以納斯達克指數均線排列與乖離判斷四階段。"""
     try:
         snap = get_ma_breadth_snapshot() or {}
         long_rows = [r for r in snap.get("rows", [])
                      if int(r.get("period") or 0) in (150, 200)]
         long_breadth = (sum(float(r.get("pct") or 0) for r in long_rows) / len(long_rows)
                         if long_rows else None)
-        phase, date, detail = _five_stage_from_index(
+        phase, date, detail = _market_stage_from_index(
             _load_cache("nasdaq_index.json", None) or {})
         if phase == "unknown":
             _PHASE_WHY.update(why="指數資料不足，無法計算120日線", steps=[])
@@ -6705,7 +6695,7 @@ function breadthHtmlLegacy(j){
        values may be biased upward (survivorship bias).</p>`
     : `<p style="font-size:12px;color:var(--mocha);line-height:1.8;margin:10px 0 0">
        紅線是<b>頂部門檻 ${j.top}%</b>，綠線是<b>洗盤門檻 ${j.wash}%</b>。
-       這張寬度圖與五階段標籤分開判讀；五階段改用大盤 5／10／20／60／120 日均線排列與乖離。
+       這張寬度圖與四階段標籤分開判讀；四階段改用大盤 5／10／20／60／120 日均線排列與乖離。
        150MA 寬度只描述有多少成分股仍站在中長期趨勢上。<br>
        ⚠️ 上面的分位數只涵蓋圖上這 ${j.span_years} 年；
        ${j.top}%／${j.wash}% 的門檻是用 10 年回測訂的，兩者母體不同。<br>
@@ -8593,20 +8583,18 @@ def _phase_banner_html():
     stage_html = ""
     if stage:
         stage_html = (
-            '<span class="mk-stage q-zh">第 ' + str(stage) + ' / 5 階段</span>'
-            '<span class="mk-stage q-en" style="display:none">Stage ' + str(stage) + ' of 5</span>')
+            '<span class="mk-stage q-zh">第 ' + str(stage) + ' / 4 階段</span>'
+            '<span class="mk-stage q-en" style="display:none">Stage ' + str(stage) + ' of 4</span>')
     zh_rule = {
         "tailwind": "5日線與10日線可互換，但兩者都高於20日線，且20日線高於60日線、60日線高於120日線",
         "transition": "均線非多頭排列，至少兩條短期均線與60日線乖離小於5%並持續三日，且60日線高於120日線",
         "riskoff": "收盤價連續三日低於120日線3%以上",
-        "recovery_early": "均線嚴格空頭排列，但收盤價連續三日站上60日線",
         "recovery_confirmed": "120日線高於20日線或60日線後啟動觀察，接著收盤價連續三日站上120日線4%以上",
     }.get(phase, "")
     en_rule = {
         "tailwind": "the 5-day and 10-day MAs may swap order, but both stay above 20MA, with 20MA above 60MA and 60MA above 120MA",
         "transition": "MAs are not bullish, at least two short MAs stay within 5% of the 60-day MA for three sessions, and the 60-day MA remains above the 120-day MA",
         "riskoff": "the close stays more than 3% below the 120-day MA for three sessions",
-        "recovery_early": "MAs remain strictly bearish while the close stays above the 60-day MA for three sessions",
         "recovery_confirmed": "observation starts after 120MA rises above 20MA or 60MA, followed by three closes more than 4% above 120MA",
     }.get(phase, "")
     return (
@@ -8709,7 +8697,7 @@ def _home_market_dashboard_html():
 
 
 def _lifecycle_html(phase):
-    """首頁五階段市場地圖；中英文同時渲染，交由既有語言切換顯示。"""
+    """首頁四階段市場地圖；中英文同時渲染，交由既有語言切換顯示。"""
     import html as _h
 
     def one(lang):

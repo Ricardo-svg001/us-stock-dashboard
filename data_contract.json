@@ -28,7 +28,7 @@
     "overdue": "資料落後超過允許天數"
   },
   "market_phase": {
-    "stage_count": 5,
+    "stage_count": 4,
     "moving_averages": [5, 10, 20, 60, 120],
     "gap_pct": 5.0,
     "riskoff_below_120ma_pct": 3.0,
@@ -39,6 +39,6 @@
     "recovery_watch_trigger_any": ["120ma_gt_20ma", "120ma_gt_60ma"],
     "recovery_watch_reset_on_tailwind": true,
     "carry_forward_when_unmatched": true,
-    "stage_keys": ["tailwind", "transition", "riskoff", "recovery_early", "recovery_confirmed"]
+    "stage_keys": ["tailwind", "transition", "riskoff", "recovery_confirmed"]
   }
 }

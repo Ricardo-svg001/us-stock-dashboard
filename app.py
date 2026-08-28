@@ -41,10 +41,14 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.28.2"
+APP_VERSION = "2026.08.28.3"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+BREAKOUT_STRUCTURE_FILE = os.path.join(BASE_DIR, "breakout_structure_seed.json")
+STRUCTURE_VERSION = 2
+STRUCTURE_PERIODS = {"6m": 126, "1y": 252, "2y": 504, "5y": 1260}
+_BREAKOUT_STRUCTURE_MEMO = {"mtime": None, "rows": {}, "meta": {}}
 
 
 def _build_info():
@@ -1395,7 +1399,7 @@ def _recent_slope(closes, lookback=DEDUCT_SLOPE_LOOKBACK):
 # ⚠️⚠️ **停損價是這個站上唯一一個使用者會直接照著下單的數字。**
 #    其他欄位算錯，使用者頂多多看兩眼；停損算錯，他會真的把單掛在錯的價位。
 #    所以這一區的任何一個數字，寧可顯示「—」也不要顯示可疑的值。
-RISK_MAX = 3                    # 最多幾檔（跟台股版一致）
+RISK_MAX = 5                    # 最多五檔，與台股風控版一致
 RISK_ATR_PERIOD = 14
 RISK_VOL_SESSIONS = 126         # 半年年化波動率
 RISK_BETA_SESSIONS = 252        # Beta 用近一年
@@ -1520,10 +1524,39 @@ def _beta(dated_closes, idx_map, sessions=RISK_BETA_SESSIONS):
     return cov / var
 
 
+def _relative_strength_scores(periods=(20, 60, 120)):
+    """以目前市值前 300 大為固定比較母體，轉成 1～99 百分位。
+
+    只讀已有 hist_ 快取，不因使用者開風控頁就連網抓 300 檔。
+    """
+    universe = (_load_cache("universe.json", None) or [])[:300]
+    histories = {}
+    for stock in universe:
+        sym = str(stock.get("symbol") or "").upper()
+        rows = _load_cache("hist_%s.json" % sym, None) or []
+        if sym and rows:
+            histories[sym] = rows
+    result = {sym: {} for sym in histories}
+    for period in periods:
+        gains = {}
+        for sym, rows in histories.items():
+            closes = [float(r[1]) for r in rows if len(r) > 1 and r[1] is not None]
+            if len(closes) > period and closes[-period - 1] > 0:
+                gains[sym] = closes[-1] / closes[-period - 1] - 1
+        ordered = sorted(gains, key=lambda sym: (gains[sym], sym))
+        total = len(ordered)
+        for index, sym in enumerate(ordered):
+            score = 99 if total == 1 else 1 + index / max(1, total - 1) * 98
+            result.setdefault(sym, {})["rs%d" % period] = int(round(score))
+    return result
+
+
 def risk_metrics(symbols):
     """回傳每一檔的風控指標。找不到資料的欄位一律 None，前端顯示「—」。"""
     idx = _load_cache("nasdaq_index.json", 24 * 365) or {}
     uni = {u.get("symbol"): u for u in (_load_cache("universe.json", None) or [])}
+    rs_scores = _relative_strength_scores()
+    structures = get_breakout_structures(symbols)
     out = []
     for sym in symbols[:RISK_MAX]:
         sym = (sym or "").upper().strip()
@@ -1556,6 +1589,10 @@ def risk_metrics(symbols):
             "beta": round(beta, 2) if beta is not None else None,
             "ma": {str(p): (round(v, 2) if v else None) for p, v in mas.items()},
             "sessions": len(ohlc),
+            "rs20": rs_scores.get(sym, {}).get("rs20"),
+            "rs60": rs_scores.get(sym, {}).get("rs60"),
+            "rs120": rs_scores.get(sym, {}).get("rs120"),
+            "structure": structures.get(sym, {}),
         })
     return out
 
@@ -1609,7 +1646,7 @@ ALIGN_NAMES = {
 
 # ---------------------------------------------------------------- 飆股前期結構回溯
 
-def _structure_shape_labels(prices):
+def _structure_shape_labels(prices, allow_short=False):
     """只用收盤價輪廓做啟發式分類，不冒充 OHLCV 型態確認。"""
     vals = [float(x) for x in prices if x is not None]
     if len(vals) < 30:
@@ -1635,9 +1672,9 @@ def _structure_shape_labels(prices):
         labels.append("VCP 波動收縮")
 
     central = .18 <= trough / max(1, n - 1) <= .78
-    if n >= 120 and central:
+    if n >= (60 if allow_short else 120) and central:
         labels.append("U 型底")
-    if n >= 90 and central:
+    if n >= (60 if allow_short else 90) and central:
         tail = vals[-min(35, n // 4):]
         ceiling = max(vals[0], vals[-1])
         handle_dd = min(tail) / ceiling - 1 if ceiling else 0
@@ -1650,7 +1687,7 @@ def _structure_shape_labels(prices):
     return labels[:3]
 
 
-def analyze_breakout_structure(rows):
+def analyze_breakout_structure(rows, lookback_sessions=None):
     """辨識前高、至少 20% 回落、三個月整理與近期重回前高。"""
     clean = {}
     for row in rows or []:
@@ -1661,10 +1698,11 @@ def analyze_breakout_structure(rows):
                 clean[d] = v
         except (TypeError, ValueError, IndexError):
             continue
-    points = sorted(clean.items())[-1260:]
-    if len(points) < 252:
+    points = sorted(clean.items())[-int(lookback_sessions or 1260):]
+    min_required = 110 if lookback_sessions and int(lookback_sessions) <= 126 else 252
+    if len(points) < min_required:
         return {"available": False, "matched": False,
-                "reason": "長期資料不足 1 年", "chart": []}
+                "reason": "所選期間的長期資料不足", "chart": []}
 
     # 美股真實單日漲跌可超過 15%，只攔截接近整數比例的疑似未還原拆股。
     split_breaks = _find_split_breaks(points)
@@ -1724,9 +1762,18 @@ def analyze_breakout_structure(rows):
 
     _close, months, peak, peak_i, trough_i, near_i, breakout_i, drawdown = \
         max(candidates, key=lambda x: (x[0], x[1]))
-    end_i = breakout_i if breakout_i is not None else near_i
+    def gain_at(pos):
+        gains = []
+        for days in (20, 40, 60):
+            if pos > days and values[pos - days] > 0:
+                gains.append((values[pos] / values[pos - days] - 1) * 100)
+        return max(gains) if gains else float("-inf")
+
+    confirmation_i = next((j for j in range(near_i, n)
+                           if values[j] >= peak * .98 and gain_at(j) > 30), None)
+    end_i = confirmation_i if confirmation_i is not None else near_i
     base.update({
-        "matched": recent_gain > 30,
+        "matched": confirmation_i is not None,
         "prior_high": round(peak, 2),
         "prior_high_date": dates[peak_i].replace("-", "/"),
         "trough": round(values[trough_i], 2),
@@ -1734,25 +1781,120 @@ def analyze_breakout_structure(rows):
         "max_drawdown_pct": round(drawdown, 1),
         "consolidation_months": max(3, int(round(months))),
         "near_high_date": dates[near_i].replace("-", "/"),
+        "early_warning_date": dates[near_i].replace("-", "/"),
+        "confirmation_date": (dates[confirmation_i].replace("-", "/")
+                              if confirmation_i is not None else None),
+        "signal_lead_days": ((datetime.strptime(dates[confirmation_i], "%Y-%m-%d") -
+                              datetime.strptime(dates[near_i], "%Y-%m-%d")).days
+                             if confirmation_i is not None else None),
         "breakout_date": (dates[breakout_i][:7].replace("-", "/")
                           if breakout_i is not None else None),
         "post_breakout_gain_pct": round((current / peak - 1) * 100, 1),
-        "pattern_labels": _structure_shape_labels(values[peak_i:end_i + 1]),
+        "pattern_labels": _structure_shape_labels(
+            values[peak_i:end_i + 1],
+            allow_short=bool(lookback_sessions and int(lookback_sessions) <= 252)),
         "markers": {"peak": dates[peak_i], "trough": dates[trough_i],
+                    "warning": dates[near_i],
+                    "confirmation": dates[confirmation_i] if confirmation_i is not None else None,
                     "breakout": dates[breakout_i] if breakout_i is not None else None},
     })
-    if recent_gain <= 30:
-        base["reason"] = "前期結構成立，但近 1～3 個月最大漲幅尚未超過 30%"
+    if confirmation_i is None:
+        base["reason"] = "已進入前高 90% 的提早觀察區，尚未同時達成前高 98% 與 30% 動能確認"
     return base
+
+
+def breakout_structure_status(data):
+    data = data or {}
+    if not data.get("available"):
+        return "unavailable"
+    if data.get("matched"):
+        return "matched"
+    if data.get("prior_high") is not None:
+        return "near"
+    return "none"
+
+
+def _load_breakout_structure_seed():
+    """讀取離線建立的前 300 大結構回測，HTTP 請求期間不批次連網。"""
+    try:
+        mtime = os.path.getmtime(BREAKOUT_STRUCTURE_FILE)
+    except OSError:
+        return {}, {}
+    if _BREAKOUT_STRUCTURE_MEMO["mtime"] == mtime:
+        return _BREAKOUT_STRUCTURE_MEMO["rows"], _BREAKOUT_STRUCTURE_MEMO["meta"]
+    try:
+        with open(BREAKOUT_STRUCTURE_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if int(payload.get("version", 0)) != STRUCTURE_VERSION:
+            raise ValueError("unsupported breakout-structure seed")
+        rows = {str(k): v for k, v in (payload.get("rows") or {}).items()
+                if isinstance(v, dict)}
+        meta = {k: payload.get(k) for k in
+                ("version", "generated_at", "as_of", "universe", "source",
+                 "period_sessions")}
+    except Exception:
+        return {}, {}
+    _BREAKOUT_STRUCTURE_MEMO.update(mtime=mtime, rows=rows, meta=meta)
+    return rows, meta
+
+
+def breakout_structure_period_result(row, period):
+    value = ((row or {}).get("periods") or {}).get(period)
+    if isinstance(value, dict):
+        return value
+    return row if period == "5y" else {}
+
+
+def _structure_filter_pass(data, mode):
+    state = breakout_structure_status(data)
+    return state in (("matched", "near") if mode == "qualified" else (mode,))
+
+
+def _pattern_filter_pass(data, mode):
+    labels = set((data or {}).get("pattern_labels") or [])
+    if mode == "u":
+        return "U 型底" in labels
+    if mode == "cup":
+        return "杯柄" in labels
+    return bool(labels.intersection(("U 型底", "杯柄")))
+
+
+def get_breakout_structure_screen(period="5y", status="qualified", pattern="u_or_cup"):
+    period = period if period in STRUCTURE_PERIODS else "5y"
+    status = status if status in ("matched", "near", "qualified") else "qualified"
+    pattern = pattern if pattern in ("u", "cup", "u_or_cup") else "u_or_cup"
+    seeded, meta = _load_breakout_structure_seed()
+    results, counts = [], {"matched": 0, "near": 0, "none": 0, "unavailable": 0}
+    for symbol, source in seeded.items():
+        value = breakout_structure_period_result(source, period)
+        state = breakout_structure_status(value)
+        counts[state] = counts.get(state, 0) + 1
+        if not _structure_filter_pass(value, status) or not _pattern_filter_pass(value, pattern):
+            continue
+        results.append({"rank": source.get("rank"), "symbol": symbol,
+                        "name": source.get("name") or symbol,
+                        "name_zh": source.get("name_zh") or source.get("name") or symbol,
+                        "sector": source.get("sector") or "-",
+                        "sector_zh": source.get("sector_zh") or source.get("sector") or "-",
+                        "structure_status": state, "structure": value})
+    results.sort(key=lambda r: (0 if r["structure_status"] == "matched" else 1,
+                                r.get("rank") or 9999, r["symbol"]))
+    return {"as_of": meta.get("as_of"), "universe": meta.get("universe") or len(seeded),
+            "period": period, "status_filter": status, "pattern_filter": pattern,
+            "status_counts": counts, "results": results}
 
 
 def get_breakout_structures(symbols, histories=None, status_cb=None):
     """只分析勾選後的結果股票；使用既有五年 hist 快取，不增加外部請求。"""
     histories, out = histories or {}, {}
+    seeded, _meta = _load_breakout_structure_seed()
     total = len(symbols)
     for i, symbol in enumerate(symbols, 1):
         if status_cb:
             status_cb(i, total)
+        if symbol in seeded:
+            out[symbol] = seeded[symbol]
+            continue
         rows = histories.get(symbol)
         if rows is None:
             rows = _load_cache("hist_%s.json" % symbol.upper(), None) or []
@@ -4660,6 +4802,8 @@ __SEO_HEAD__
   .rk-stops span { font-size:12px; color:var(--mocha); }
   .rk-stops b { font-family:var(--font-num); font-size:15px; color:var(--espresso); }
   .rk-hint { margin-top:10px; font-size:12.5px; color:var(--mocha); line-height:1.7; }
+  .rk-analysis{margin-top:12px;border-top:1px solid var(--grounds);padding-top:9px}.rk-analysis>summary{cursor:pointer;font-weight:800;color:var(--espresso)}
+  .rk-rs-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:9px 0}.rk-rs-grid div{padding:9px;border-radius:10px;background:var(--milk);text-align:center}.rk-rs-grid small{display:block;color:var(--mocha);font-size:10.5px}.rk-rs-grid b{font:700 18px var(--font-num)}
   @media (max-width:640px){
     .rk-grid, .rk-stops { grid-template-columns:1fr; }
   }
@@ -4832,6 +4976,18 @@ __SEO_HEAD__
   .structure-chart-read{min-height:18px;margin-left:42px;font:11px var(--font-num);color:var(--mocha)}
   .structure-note{font-size:10.5px;color:var(--mocha);line-height:1.55;margin-top:5px}
   .structure-reason{padding:8px 10px;border-radius:9px;background:rgba(137,107,77,.08);color:var(--mocha);font-size:12px;line-height:1.6;margin-bottom:8px}
+  .structure-screen-controls{max-width:760px;margin:0 auto 14px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+  .structure-screen-controls label{min-width:0;padding:13px;background:var(--foam);border:1px solid var(--grounds);border-radius:14px;box-shadow:var(--shadow)}
+  .structure-screen-controls label>span{display:block;margin-bottom:7px;color:var(--mocha);font-size:12px;font-weight:800}
+  .structure-screen-controls select{width:100%;box-sizing:border-box}
+  .structure-screen-list{max-width:920px;margin:14px auto 0;display:grid;gap:11px}
+  .structure-screen-item{min-width:0;padding:13px 15px;background:var(--foam);border:1px solid var(--grounds);border-radius:15px;box-shadow:var(--shadow)}
+  .structure-screen-head{display:grid;grid-template-columns:70px minmax(150px,1fr) minmax(100px,.7fr) auto;gap:10px;align-items:center;padding-bottom:10px;border-bottom:1px solid var(--grounds)}
+  .structure-screen-head small{display:block;color:var(--mocha);font-size:10.5px}.structure-screen-head b{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--espresso)}
+  .structure-screen-company b{font-family:var(--font-head);font-size:15px}.structure-screen-company span{margin-right:7px;color:var(--caramel-2);font-family:var(--font-num)}
+  .structure-screen-item>.structure-details{margin-top:10px}.structure-screen-item .structure-panel{width:100%;box-sizing:border-box;box-shadow:none}
+  .structure-screen-badge{padding:6px 10px;border-radius:999px;font-size:12px;font-weight:800;white-space:nowrap}.structure-screen-badge.matched{background:rgba(61,139,103,.12);color:#2f7657}.structure-screen-badge.near{background:rgba(211,154,44,.16);color:#8a6200}
+  @media(max-width:700px){.structure-screen-controls{grid-template-columns:1fr}.structure-screen-head{grid-template-columns:54px minmax(0,1fr) auto}.structure-screen-sector{display:none}.structure-screen-item{padding:11px}.structure-screen-badge{padding:5px 8px;font-size:11px}}
   .scard .structure-panel{width:100%;box-shadow:none}.scard .structure-details{grid-column:1/-1;margin-top:7px}
   /* RS 電腦版：股票摘要列搭配全寬結構面板，不把長期圖表塞進表格欄位。 */
   .rs-card{max-width:920px}.rs-structure-list{display:grid;gap:10px;overflow:visible}
@@ -5222,6 +5378,7 @@ __SEO_HEAD__
     <a class="navitem sub" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
     <a class="navitem sub" data-page="pind" href="/industries"><i>🧱</i><b data-i18n="nav.industry">產業分析</b><small data-i18n="nav.industry.sub">動能擴散・產業領先股</small></a>
     <a class="navitem sub" data-page="p3" href="/pullback"><i>⭐</i><b data-i18n="p3.title">拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
+    <a class="navitem sub" data-page="pstructure" href="/breakout-structure"><i>🏗️</i><b data-i18n="nav.structure">飆股結構回測</b><small data-i18n="nav.structure.sub">6個月～5年・U型底與杯柄</small></a>
     <a class="navitem sub" data-page="pgrow" href="/growth"><i>🌱</i><b data-i18n="grow.title">長期成長股列表</b><small data-i18n="nav.grow.sub">十年累計・年化報酬</small></a>
   </details>
   <details class="navgroup">
@@ -5441,6 +5598,23 @@ __QUOTES_HTML__
   <button class="gobtn" id="go3" data-i18n="btn.screen">開始篩選</button>
   <div class="status" id="status3"></div>
   <div id="result3"></div>
+</div>
+
+<!-- ============ 飆股結構回測 ============ -->
+<div class="page" id="pstructure">
+  <h2 class="ptitle" data-i18n="structureScreen.title">飆股結構回測</h2>
+  <details class="pgintro" open>
+    <summary data-i18n="structureScreen.introT">回看前高、深度整理與重新轉強的完整路徑</summary>
+    <div class="pgintro-b" data-i18n-html="structureScreen.intro"><p>從目前市值前 300 大美股中，回看所選的最近 6 個月、1 年、2 年或 5 年。依序尋找重要前高、高點後至少 20% 回落、至少 3 個月整理，以及重新接近或突破前高。</p><p>價格第一次回到前高 90% 範圍以黃色「結構接近完成」預警；之後同時到達前高 98% 且近 1～3 個月動能超過 30%，才轉為綠色「結構符合」。U 型底與杯柄是收盤輪廓候選，不是未來預測。</p></div>
+  </details>
+  <div class="structure-screen-controls">
+    <label><span data-i18n="structureScreen.period">回測期間</span><select id="structurePeriod"><option value="6m" data-i18n="structureScreen.6m">6 個月</option><option value="1y" data-i18n="structureScreen.1y">1 年</option><option value="2y" data-i18n="structureScreen.2y">2 年</option><option value="5y" data-i18n="structureScreen.5y" selected>5 年</option></select></label>
+    <label><span data-i18n="structureScreen.status">完成程度</span><select id="structureStatus"><option value="matched" data-i18n="structureScreen.matched">結構符合</option><option value="near" data-i18n="structureScreen.near">結構接近完成</option><option value="qualified" data-i18n="structureScreen.qualified" selected>符合或接近完成</option></select></label>
+    <label><span data-i18n="structureScreen.pattern">型態</span><select id="structurePattern"><option value="u" data-i18n="structureScreen.u">U 型底</option><option value="cup" data-i18n="structureScreen.cup">杯柄</option><option value="u_or_cup" data-i18n="structureScreen.uOrCup" selected>U 型底或杯柄</option></select></label>
+  </div>
+  <button class="gobtn" id="structureRun" data-i18n="structureScreen.run">開始回測篩選</button>
+  <div class="status" id="structureScreenStatus"></div>
+  <div id="structureScreenResult" class="structure-screen-list"></div>
 </div>
 
 <!-- ============ 強勢股整理觀察 ============ -->
@@ -5667,7 +5841,7 @@ __QUOTES_HTML__
   </details>
 
   <div class="card">
-    <h2><span class="stepno">01</span><span data-i18n="risk.pick">選擇持股（最多 3 檔）</span></h2>
+    <h2><span class="stepno">01</span><span data-i18n="risk.pick">選擇持股（最多 5 檔）</span></h2>
     <div class="stockpick" style="position:relative">
       <input id="rkInput" type="text" autocomplete="off" data-i18n-ph="risk.ph"
              placeholder="輸入代號或公司名，例如 AAPL">
@@ -5905,6 +6079,7 @@ const I18N = { en: {
   "nav.screen.sub": "Find leading stocks",
   "nav.industry": "Sector Analysis", "nav.industry.sub": "Breadth · sector leaders",
   "nav.pull.sub": "Close back within ±3% of an MA",
+  "nav.structure": "Breakout Structure Backtest", "nav.structure.sub": "6 months–5 years · U-base and cup",
   "nav.lev.sub": "QLD · realised multiple",
   "lev.title": "2x ETF Monthly Performance",
   "lev.introT": "The realised multiple is never exactly 2x",
@@ -6041,7 +6216,7 @@ const I18N = { en: {
   "ded.warn": "\u26a0\ufe0f This is arithmetic extrapolation, not a forecast. It assumes the same daily move every session, which real markets do not do. Treat the session count as a rough \"if this pace holds\" estimate, not a guarantee.",
   "risk.introT": "Work out what you can lose before what you can make",
   "risk.intro": "<p>This page lays out four things about the stocks you hold: <b>how much it typically moves in a day (ATR)</b>, <b>how choppy it is overall (volatility)</b>, <b>whether the trend is still intact (MA alignment)</b>, and <b>how tightly it tracks the market (Beta)</b>.</p><p>Enter your entry price and it computes an <b>initial stop</b> and a <b>trailing stop</b> from ATR. The value isn't in the precision of that number — it's in <b>forcing you to write down the exit before you buy</b>. Decide a stop after you're underwater and you usually won't take it.</p><p><b>Why ATR instead of a fixed percentage</b>: 5% is a distant stop for a utility that moves 1% a day, and a same-day stop-out for a name that moves 6%. ATR is \"how much this stock normally moves in a day\", so using it as the unit makes the stop distance adapt to the character of the stock.</p><p><b>Everything stays in this browser</b> — nothing is uploaded and there is no account system. Changing device or clearing site data loses it, which is worth saying plainly rather than pretending there is sync.</p>",
-  "risk.pick": "Pick your holdings (up to 3)",
+  "risk.pick": "Pick your holdings (up to 5)",
   "risk.ph": "Ticker or company name, e.g. AAPL",
   "risk.pickNote": "Top 300 by market cap only. Choose them, then press the button below.",
   "risk.mult": "Stop multiple",
@@ -6050,7 +6225,7 @@ const I18N = { en: {
   "risk.btn": "Calculate Risk Metrics",
   "risk.calc": "Calculating… (the first run fetches data, ~15 seconds)",
   "risk.none": "Pick at least one stock first",
-  "risk.max": "Up to 3 at a time — remove one first",
+  "risk.max": "Up to 5 at a time — remove one first",
   "risk.fail": "Calculation failed, please try again later",
   "risk.needEntry": "Enter your entry price and the initial and trailing stops will appear here",
   "risk.initStop": "Initial stop", "risk.trailStop": "Trailing stop",
@@ -6140,6 +6315,17 @@ const I18N = { en: {
   "screen.valuation": "Show P/E and dividend yield",
   "screen.valuationNote": "P/E and dividend yield stay hidden by default; select this option to load and add both columns.",
   "screen.structure": "Trace pre-breakout structure (1–5 years)",
+  "structureScreen.title": "Breakout Structure Backtest",
+  "structureScreen.introT": "Trace the full path from prior high through a deep base and renewed strength",
+  "structureScreen.intro": "<p>Review the 300 largest US stocks over six months, one year, two years or five years. The screen looks for a prior high, a drawdown of at least 20%, at least three months of consolidation, and a return toward that high.</p><p>A first close within 90% of the prior high is a yellow early warning. Green requires a close at 98% or higher plus a best 1–3 month gain above 30%. U-shaped bases and cups are heuristic closing-price outlines, not forecasts.</p>",
+  "structureScreen.period": "Backtest period", "structureScreen.status": "Completion status",
+  "structureScreen.pattern": "Pattern", "structureScreen.run": "Run structure screen",
+  "structureScreen.6m": "6 months", "structureScreen.1y": "1 year",
+  "structureScreen.2y": "2 years", "structureScreen.5y": "5 years",
+  "structureScreen.matched": "Structure matched", "structureScreen.near": "Structure nearly complete",
+  "structureScreen.qualified": "Matched or nearly complete",
+  "structureScreen.u": "U-shaped base", "structureScreen.cup": "Cup",
+  "structureScreen.uOrCup": "U-shaped base or cup",
   "screen.structureNote": "Trace the prior high, maximum drawdown, consolidation length and breakout date, with a draggable long-term closing-price chart. US stocks reuse the existing five-year price cache.",
   "screen.saveName": "Custom strategy name", "screen.save": "Save", "screen.saved": "Saved presets",
   "screen.apply": "Apply", "screen.delete": "Delete", "screen.export": "Export CSV",
@@ -6677,7 +6863,7 @@ function initStructureChart(box){
     const grid=[hi,(hi+lo)/2,lo].map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grounds)" stroke-dasharray="4 3"/><text x="${L-5}" y="${y(v)+3}" text-anchor="end" font-size="10" fill="var(--mocha)">${v.toFixed(v>=100?0:1)}</text>`).join("");
     const pts=visible.map((r,k)=>`${x(start+k).toFixed(1)},${y(Number(r[1])).toFixed(1)}`).join(" ");
     const highLine=Number.isFinite(high)&&high>=lo&&high<=hi?`<line x1="${L}" x2="${W-R}" y1="${y(high)}" y2="${y(high)}" stroke="#a66b45" stroke-width="1.2" stroke-dasharray="6 4"/><text x="${W-R-3}" y="${y(high)-4}" text-anchor="end" font-size="10" fill="#a66b45">${LANG==="en"?"Prior high":"前高"} ${high}</text>`:"";
-    const markerSpec=[["peak","前高","#a66b45"],["trough","低點","#3d8b67"],["breakout","突破","#b93c32"]];let marks="";markerSpec.forEach(([key,zh,color])=>{const i=nearestDate(markers[key],start,start+win);if(i>=start&&i<start+win){const v=Number(rows[i][1]);marks+=`<circle cx="${x(i)}" cy="${y(v)}" r="4" fill="${color}" stroke="#fff" stroke-width="1.5"/><text x="${x(i)}" y="${Math.max(11,y(v)-7)}" text-anchor="middle" font-size="9.5" fill="${color}">${LANG==="en"?{peak:"High",trough:"Low",breakout:"Breakout"}[key]:zh}</text>`}});
+    const markerSpec=[["peak","前高","#a66b45"],["trough","低點","#3d8b67"],["warning","預警","#d39a2c"],["confirmation","確認","#2f7657"]];let marks="";markerSpec.forEach(([key,zh,color])=>{const i=nearestDate(markers[key],start,start+win);if(i>=start&&i<start+win){const v=Number(rows[i][1]);marks+=`<circle cx="${x(i)}" cy="${y(v)}" r="4" fill="${color}" stroke="#fff" stroke-width="1.5"/><text x="${x(i)}" y="${Math.max(11,y(v)-7)}" text-anchor="middle" font-size="9.5" fill="${color}">${LANG==="en"?{peak:"High",trough:"Low",warning:"Warning",confirmation:"Confirmed"}[key]:zh}</text>`}});
     box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" aria-label="${LANG==="en"?"Draggable pre-breakout closing-price chart":"可拖曳的飆股前期收盤價圖"}">${grid}${highLine}<polyline points="${pts}" fill="none" stroke="var(--caramel-2)" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>${marks}<line class="structure-guide" y1="${T}" y2="${H-B}" stroke="var(--espresso)" opacity="0"/><circle class="structure-dot" r="4" fill="var(--caramel-2)" stroke="#fff" stroke-width="1.5" opacity="0"/><text x="${L}" y="${H-6}" font-size="10" fill="var(--mocha)">${visible[0][0].slice(0,7)}</text><text x="${W-R}" y="${H-6}" text-anchor="end" font-size="10" fill="var(--mocha)">${visible.at(-1)[0].slice(0,7)}</text></svg>`;
     range.textContent=`${visible[0][0].slice(0,7)} — ${visible.at(-1)[0].slice(0,7)}`;wire();
   }
@@ -6694,6 +6880,23 @@ function initStructureChart(box){
   buttons.forEach(b=>b.onclick=e=>{e.preventDefault();win=Math.min(maxWindow,Number(b.dataset.weeks));start=maxWindow-win;buttons.forEach(q=>q.classList.toggle("on",q===b));draw()});draw();
 }
 function setupStructureCharts(root){if(!root)return;root.querySelectorAll(".structure-details").forEach(d=>d.addEventListener("toggle",()=>{if(d.open)d.querySelectorAll(".structure-chart").forEach(initStructureChart)}))}
+
+let STRUCTURE_SCREEN_DATA=null,STRUCTURE_SCREEN_SIGNATURE="";
+function renderBreakoutStructureScreen(data){
+  const box=$("#structureScreenResult"),status=$("#structureScreenStatus");if(!box)return;
+  const rows=data.results||[],periodNames={"6m":LANG==="en"?"6 months":"6 個月","1y":LANG==="en"?"1 year":"1 年","2y":LANG==="en"?"2 years":"2 年","5y":LANG==="en"?"5 years":"5 年"};
+  status.textContent=LANG==="en"?`${rows.length} candidates from ${data.universe||300} stocks · ${periodNames[data.period]||data.period} · as of ${data.as_of||"—"}`:`市值前 ${data.universe||300} 大中找到 ${rows.length} 檔候選・回測 ${periodNames[data.period]||data.period}・資料截至 ${data.as_of||"—"}`;
+  if(!rows.length){box.innerHTML=`<div class="concl gray">${LANG==="en"?"No candidate matches all selected filters.":"沒有同時符合目前完成程度與型態的候選。"}</div>`;return}
+  box.innerHTML=rows.map(r=>{const state=r.structure_status,label=state==="matched"?(LANG==="en"?"Structure match":"結構符合"):(LANG==="en"?"Nearly complete":"結構接近完成"),name=LANG==="en"?r.name:(r.name_zh||r.name),sector=LANG==="en"?r.sector:(r.sector_zh||r.sector);return `<article class="structure-screen-item"><div class="structure-screen-head"><div><small>${LANG==="en"?"Cap rank":"市值排名"}</small><b>#${r.rank||"—"}</b></div><div class="structure-screen-company"><small>${LANG==="en"?"Company":"公司名稱"}</small><b><span>${screenEsc(r.symbol)}</span>${screenEsc(name)}</b></div><div class="structure-screen-sector"><small>${LANG==="en"?"Sector":"產業"}</small><b>${screenEsc(sector)}</b></div><span class="structure-screen-badge ${state}">${label}</span></div>${structurePanel({structure:r.structure})}</article>`}).join("");
+  setupStructureCharts(box);
+}
+async function loadBreakoutStructureScreen(force=false){
+  const period=$("#structurePeriod")?.value||"5y",statusFilter=$("#structureStatus")?.value||"qualified",pattern=$("#structurePattern")?.value||"u_or_cup",sig=[period,statusFilter,pattern].join("|");
+  if(!force&&STRUCTURE_SCREEN_DATA&&STRUCTURE_SCREEN_SIGNATURE===sig){renderBreakoutStructureScreen(STRUCTURE_SCREEN_DATA);return}
+  const status=$("#structureScreenStatus"),box=$("#structureScreenResult");if(!status||!box)return;status.textContent=LANG==="en"?"Reading the offline structure backtest…":"讀取離線飆股結構回測…";box.innerHTML="";
+  try{const d=await readJson(await fetch(`/api/breakout-structure?period=${encodeURIComponent(period)}&status=${encodeURIComponent(statusFilter)}&pattern=${encodeURIComponent(pattern)}`));if(!d.ok)throw Error(d.error||"No data");STRUCTURE_SCREEN_DATA=d;STRUCTURE_SCREEN_SIGNATURE=sig;renderBreakoutStructureScreen(d)}catch(e){status.textContent="";box.innerHTML=`<div class="concl gray">${LANG==="en"?"Structure data is temporarily unavailable.":"飆股結構資料暫時無法使用。"}</div>`}
+}
+if($("#structureRun"))$("#structureRun").onclick=()=>loadBreakoutStructureScreen(true);
 
 /* 符合日期：檢查多天時一併顯示「符合幾天」，否則看不出「部分符合」的差別 */
 function fmtHit(s){
@@ -8010,8 +8213,8 @@ function rkAdd(code){
   $("#rkInput").value = "";
   $("#rkSuggest").classList.remove("show");
   if (rkList.indexOf(code) >= 0) return;
-  if (rkList.length >= 3){
-    $("#rkStatus").textContent = t("risk.max", "最多同時看 3 檔，請先移除一檔");
+  if (rkList.length >= 5){
+    $("#rkStatus").textContent = t("risk.max", "最多同時看 5 檔，請先移除一檔");
     return;
   }
   rkList.push(code); rkChips(); $("#rkStatus").textContent = "";
@@ -8098,8 +8301,12 @@ function rkRender(data){
       + '<div class="rk-entry"><span>' + t("risk.entry", "進場價") + "</span>"
       + '<input type="number" step="0.01" value="' + ((rkLoad()[r.symbol] || {}).entry || "")
       + '" onchange="rkSetEntry(\'' + r.symbol + '\', this.value)"></div>'
-      + stopHtml + "</div>";
+      + stopHtml
+      + '<details class="rk-analysis"><summary>' + (LANG==="en"?"Stock analysis: RS & breakout structure":"個股分析：RS 與飆股結構") + '</summary>'
+      + '<div class="rk-rs-grid"><div><small>20D RS</small><b>' + rkFmt(r.rs20,0) + '</b></div><div><small>60D RS</small><b>' + rkFmt(r.rs60,0) + '</b></div><div><small>120D RS</small><b>' + rkFmt(r.rs120,0) + '</b></div></div>'
+      + structurePanel({structure:r.structure}) + '</details></div>';
   }).join("");
+  setupStructureCharts($("#rkResult"));
 }
 
 async function runRisk(){
@@ -8349,7 +8556,7 @@ async function loadMacro(){
 
 /* ---- 全站資料品質提示：外觀切換不改變這個固定資訊層級。 ---- */
 let DATA_HEALTH=null;
-const PAGE_DATA_SOURCES={home:['market_returns','market_breadth','nasdaq_index','fed_policy','treasury_actions'],pind:['market_breadth'],pmac:['us_yields','jp_yields'],p1:['market_returns'],p3:['market_returns'],pgrow:['market_returns'],p11:['nasdaq_index'],p7:['nasdaq_index'],p8:['market_returns'],p12:['market_returns'],p10:['nasdaq_index'],p4:['market_returns'],p5:['market_returns'],p9:['market_returns']};
+const PAGE_DATA_SOURCES={home:['market_returns','market_breadth','nasdaq_index','fed_policy','treasury_actions'],pind:['market_breadth'],pmac:['us_yields','jp_yields'],p1:['market_returns'],p3:['market_returns'],pstructure:['market_returns'],pgrow:['market_returns'],p11:['nasdaq_index'],p7:['nasdaq_index'],p8:['market_returns'],p12:['market_returns'],p10:['nasdaq_index'],p4:['market_returns'],p5:['market_returns'],p9:['market_returns']};
 function qualityChip(item){const cls={ok:'dq-ok',pending:'dq-pending',warn:'dq-warn',danger:'dq-danger'}[item.severity]||'dq-danger';const zh=`${item.label_zh||'資料'}：${item.status_zh||'更新失敗，沿用舊資料'}`;const en=`${item.label_en||'Data'}: ${item.status_en||'Update failed; using older data'}`;return `<span class="data-quality-chip ${cls}" title="${item.actual||''}"><span class="q-zh"${LANG==='zh'?'':' style="display:none"'}>${zh}</span><span class="q-en"${LANG==='en'?'':' style="display:none"'}>${en}</span></span>`}
 function renderDataQuality(){if(!DATA_HEALTH)return;Object.entries(PAGE_DATA_SOURCES).forEach(([pid,keys])=>{const page=document.getElementById(pid);if(!page)return;let strip=page.querySelector(':scope > .data-quality-strip');if(!strip){strip=document.createElement('div');strip.className='data-quality-strip';const title=page.querySelector(':scope > .ptitle');title?title.insertAdjacentElement('afterend',strip):page.prepend(strip)}strip.innerHTML=keys.map(k=>qualityChip(DATA_HEALTH.items[k]||{})).join('')})}
 async function loadDataQuality(){try{DATA_HEALTH=await readJson(await fetch('/api/data-health'));renderDataQuality()}catch(e){DATA_HEALTH={items:{market_returns:{severity:'danger',status_zh:'更新失敗，沿用舊資料',status_en:'Update failed; using older data',label_zh:'資料',label_en:'Data'}}};Object.keys(PAGE_DATA_SOURCES).forEach(k=>PAGE_DATA_SOURCES[k]=['market_returns']);renderDataQuality()}}
@@ -8513,6 +8720,7 @@ if (START_PAGE === "p12") cmpInit();
 if (START_PAGE === "pmac") loadMacro();
 if (START_PAGE === "pgrow") loadGrowth();
 if (START_PAGE === "pind") loadIndustries();
+if (START_PAGE === "pstructure") loadBreakoutStructureScreen();
 loadHomeIndustryBrief();
 applyCafeTheme(document.documentElement.dataset.theme||'b');
 const themeBtn=$("#themeBtn"),themePicker=$("#themePicker");if(themeBtn&&themePicker){themeBtn.onclick=e=>{e.stopPropagation();const open=themePicker.classList.toggle('show');themeBtn.setAttribute('aria-expanded',open?'true':'false')};themePicker.onclick=e=>e.stopPropagation();document.querySelectorAll('[data-theme-choice]').forEach(el=>el.onclick=()=>{applyCafeTheme(el.dataset.themeChoice);closeThemePicker()});document.addEventListener('click',closeThemePicker);document.addEventListener('keydown',e=>{if(e.key==='Escape')closeThemePicker()})}
@@ -8614,6 +8822,15 @@ PAGE_ROUTES = {
                "Find US stocks whose close has returned to within ±3% of the 10/20/50/150-day "
                "moving average, sorted by absolute deviation — for timing entries on pullbacks."),
     },
+    "breakout-structure": {
+        "page": "pstructure", "index": True,
+        "zh": ("飆股結構回測｜美股 U 型底與杯柄候選篩選",
+               "從市值前 300 大美股回測最近 6 個月、1 年、2 年或 5 年的長期整理，"
+               "篩選結構符合或接近完成的 U 型底與杯柄候選。"),
+        "en": ("Breakout Structure Backtest｜US U-Base and Cup-with-Handle Candidates",
+               "Screen the 300 largest US stocks for matched or nearly complete U-shaped bases "
+               "and cup-with-handle candidates over six months, one year, two years or five years."),
+    },
     "consolidation": {
         "page": "p11", "index": True,
         "zh": ("正2 逐月績效｜QLD 對納斯達克的實際倍數",
@@ -8675,11 +8892,11 @@ PAGE_ROUTES = {
     "risk": {
         "page": "p8", "index": True,
         "zh": ("風控管理｜自選股 ATR、波動率、均線趨勢與 Beta",
-               "選最多 3 檔持股，一次看清 14 日 ATR、半年年化波動率、均線趨勢與對納斯達克的 Beta，"
+               "選最多 5 檔持股，一次看清 ATR、波動率、Beta、20／60／120 日 RS 與飆股結構，"
                "並用進場價算出初始停損與移動停損。資料只存在你的瀏覽器，免註冊。"),
         "en": ("Risk Dashboard｜ATR, Volatility, MA Trend and Beta",
-               "Pick up to 3 holdings and see 14-day ATR, six-month annualised volatility, "
-               "moving-average trend and beta to the Nasdaq Composite, plus initial and trailing "
+               "Pick up to 5 holdings and see ATR, volatility, Nasdaq beta, 20/60/120-day RS "
+               "and the pre-breakout structure, plus initial and trailing "
                "stops from your entry price. Stored only in your browser, no sign-up."),
     },
     "deduction": {
@@ -10017,10 +10234,10 @@ def api_deduct():
 
 @app.route("/api/risk", methods=["POST"])
 def api_risk():
-    """風控頁：一次算最多 3 檔的 ATR／波動率／均線趨勢／Beta。
+    """風控頁：一次算最多 5 檔，並附 RS 與飆股結構。
 
     ⚠️ 會連網抓 OHLC（每檔 12 小時快取一次），所以**必須限制檔數**。
-       上限 3 檔與台股版一致 —— 這不是效能考量而已，
+       上限 5 檔與台股版一致 —— 這不是效能考量而已，
        風控本來就該只放在你真的持有的部位上。
     """
     if not _valid_app_token(request.headers.get("X-App-Token")):
@@ -10716,6 +10933,17 @@ def api_screen():
     if params["align"] not in ALIGN_NAMES:
         return jsonify(error="均線排列條件不支援"), 400
     return jsonify(job=start_job(screen_watchlist, params))
+
+
+@app.route("/api/breakout-structure")
+def api_breakout_structure():
+    """六個月～五年的 U 型底／杯柄候選；只讀離線回測種子。"""
+    data = get_breakout_structure_screen(
+        request.args.get("period", "5y"), request.args.get("status", "qualified"),
+        request.args.get("pattern", "u_or_cup"))
+    if not data.get("universe"):
+        return jsonify(ok=False, error="飆股結構資料尚未建立"), 503
+    return jsonify(ok=True, **data)
 
 
 @app.route("/api/pullback", methods=["POST"])

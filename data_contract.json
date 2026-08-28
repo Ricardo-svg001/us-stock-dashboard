@@ -1,5 +1,23 @@
 {
-  "contract_version": "2026-08-26.1",
+  "contract_version": "2026-08-28.1",
+  "breakout_structure": {
+    "universe": 300,
+    "independent_page": "/breakout-structure",
+    "periods": ["6m", "1y", "2y", "5y"],
+    "statuses": ["matched", "near", "none", "unavailable"],
+    "screen_filters": ["matched", "near", "qualified"],
+    "pattern_filters": ["u", "cup", "u_or_cup"],
+    "near": "first close at or above 90% of prior high",
+    "matched": "first close at or above 98% of prior high with best 20/40/60-day gain above 30%",
+    "seed_file": "breakout_structure_seed.json"
+  },
+  "risk_watchlist": {
+    "maximum_stocks": 5,
+    "rs_periods": [20, 60, 120],
+    "rs_universe": "current_top_300",
+    "stock_analysis_default_collapsed": true,
+    "includes_breakout_structure": true
+  },
   "sources": {
     "us_treasury": {
       "url": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml",

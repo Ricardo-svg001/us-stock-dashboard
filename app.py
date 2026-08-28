@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.26.2"
+APP_VERSION = "2026.08.28.2"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1607,11 +1607,164 @@ ALIGN_NAMES = {
 }
 
 
+# ---------------------------------------------------------------- 飆股前期結構回溯
+
+def _structure_shape_labels(prices):
+    """只用收盤價輪廓做啟發式分類，不冒充 OHLCV 型態確認。"""
+    vals = [float(x) for x in prices if x is not None]
+    if len(vals) < 30:
+        return []
+    n, lo = len(vals), min(vals)
+    trough = vals.index(lo)
+    labels = []
+    lows = []
+    for i in range(10, n - 10):
+        if vals[i] <= lo * 1.10 and vals[i] <= min(vals[i - 10:i + 11]):
+            if not lows or i - lows[-1] >= 25:
+                lows.append(i)
+    if any(max(vals[a:b + 1]) >= max(vals[a], vals[b]) * 1.12
+           for a, b in zip(lows, lows[1:])):
+        labels.append("多重底")
+
+    recent = vals[-min(120, n):]
+    cuts = [recent[:len(recent) // 3],
+            recent[len(recent) // 3:2 * len(recent) // 3],
+            recent[2 * len(recent) // 3:]]
+    amps = [(max(x) / min(x) - 1) for x in cuts if x and min(x) > 0]
+    if len(amps) == 3 and amps[0] > amps[1] > amps[2] and amps[2] <= amps[0] * .72:
+        labels.append("VCP 波動收縮")
+
+    central = .18 <= trough / max(1, n - 1) <= .78
+    if n >= 120 and central:
+        labels.append("U 型底")
+    if n >= 90 and central:
+        tail = vals[-min(35, n // 4):]
+        ceiling = max(vals[0], vals[-1])
+        handle_dd = min(tail) / ceiling - 1 if ceiling else 0
+        if -.20 <= handle_dd <= -.04:
+            labels.append("杯柄")
+    if n >= 240:
+        middle = vals[int(n * .15):max(int(n * .85), int(n * .15) + 1)]
+        if middle and min(middle) > 0 and max(middle) / min(middle) - 1 <= .50:
+            labels.append("長期橫盤")
+    return labels[:3]
+
+
+def analyze_breakout_structure(rows):
+    """辨識前高、至少 20% 回落、三個月整理與近期重回前高。"""
+    clean = {}
+    for row in rows or []:
+        try:
+            d, v = str(row[0])[:10], float(row[1])
+            datetime.strptime(d, "%Y-%m-%d")
+            if v > 0:
+                clean[d] = v
+        except (TypeError, ValueError, IndexError):
+            continue
+    points = sorted(clean.items())[-1260:]
+    if len(points) < 252:
+        return {"available": False, "matched": False,
+                "reason": "長期資料不足 1 年", "chart": []}
+
+    # 美股真實單日漲跌可超過 15%，只攔截接近整數比例的疑似未還原拆股。
+    split_breaks = _find_split_breaks(points)
+    if split_breaks:
+        bad, ratio = split_breaks[-1]
+        return {"available": False, "matched": False,
+                "reason": "收盤價在 %s 有疑似拆股斷層（%s）" % (bad, ratio),
+                "chart": []}
+
+    dates = [x[0] for x in points]
+    values = [float(x[1]) for x in points]
+    n, current = len(values), values[-1]
+    recent = {days: (current / values[-days - 1] - 1) * 100
+              for days in (20, 40, 60)
+              if n > days and values[-days - 1] > 0}
+    recent_days, recent_gain = max(recent.items(), key=lambda x: x[1])
+    candidates = []
+    for i in range(40, n - 60):
+        peak = values[i]
+        if peak <= 0 or peak < max(values[i - 40:i + 1]) * .995:
+            continue
+        if current < peak * .90:
+            continue
+        trough_i = min(range(i + 1, n), key=lambda j: values[j])
+        drawdown = (values[trough_i] / peak - 1) * 100
+        if drawdown > -20:
+            continue
+        eligible = max(i + 60, trough_i + 1)
+        near_i = next((j for j in range(eligible, n) if values[j] >= peak * .90), None)
+        if near_i is None or near_i < n - 120:
+            continue
+        peak_dt = datetime.strptime(dates[i], "%Y-%m-%d")
+        near_dt = datetime.strptime(dates[near_i], "%Y-%m-%d")
+        months = (near_dt - peak_dt).days / 30.4375
+        if months < 3:
+            continue
+        breakout_i = next((j for j in range(eligible, n) if values[j] >= peak * .98), None)
+        closeness = min(current / peak, peak / current)
+        candidates.append((closeness, months, peak, i, trough_i, near_i,
+                           breakout_i, drawdown))
+
+    weekly = {}
+    for d, v in points:
+        dt = datetime.strptime(d, "%Y-%m-%d")
+        weekly[(dt.isocalendar()[0], dt.isocalendar()[1])] = [d, round(v, 2)]
+    chart = list(weekly.values())
+    first_dt = datetime.strptime(dates[0], "%Y-%m-%d")
+    last_dt = datetime.strptime(dates[-1], "%Y-%m-%d")
+    base = {"available": True, "matched": False,
+            "as_of": dates[-1].replace("-", "/"),
+            "recent_gain_pct": round(recent_gain, 1),
+            "recent_period_days": recent_days, "chart": chart,
+            "lookback_years": round((last_dt - first_dt).days / 365.25, 1)}
+    if not candidates:
+        base["reason"] = "未同時找到「回落 20%、整理 3 個月、近期重回前高」"
+        return base
+
+    _close, months, peak, peak_i, trough_i, near_i, breakout_i, drawdown = \
+        max(candidates, key=lambda x: (x[0], x[1]))
+    end_i = breakout_i if breakout_i is not None else near_i
+    base.update({
+        "matched": recent_gain > 30,
+        "prior_high": round(peak, 2),
+        "prior_high_date": dates[peak_i].replace("-", "/"),
+        "trough": round(values[trough_i], 2),
+        "trough_date": dates[trough_i].replace("-", "/"),
+        "max_drawdown_pct": round(drawdown, 1),
+        "consolidation_months": max(3, int(round(months))),
+        "near_high_date": dates[near_i].replace("-", "/"),
+        "breakout_date": (dates[breakout_i][:7].replace("-", "/")
+                          if breakout_i is not None else None),
+        "post_breakout_gain_pct": round((current / peak - 1) * 100, 1),
+        "pattern_labels": _structure_shape_labels(values[peak_i:end_i + 1]),
+        "markers": {"peak": dates[peak_i], "trough": dates[trough_i],
+                    "breakout": dates[breakout_i] if breakout_i is not None else None},
+    })
+    if recent_gain <= 30:
+        base["reason"] = "前期結構成立，但近 1～3 個月最大漲幅尚未超過 30%"
+    return base
+
+
+def get_breakout_structures(symbols, histories=None, status_cb=None):
+    """只分析勾選後的結果股票；使用既有五年 hist 快取，不增加外部請求。"""
+    histories, out = histories or {}, {}
+    total = len(symbols)
+    for i, symbol in enumerate(symbols, 1):
+        if status_cb:
+            status_cb(i, total)
+        rows = histories.get(symbol)
+        if rows is None:
+            rows = _load_cache("hist_%s.json" % symbol.upper(), None) or []
+        out[symbol] = analyze_breakout_structure(rows)
+    return out
+
+
 # ---------------------------------------------------------------- 觀察清單篩選
 
 def screen_watchlist(universe_n=150, ma=50, direction="above", days=1,
                      match="any", align="none", eps_halves=False,
-                     valuation=False, status_cb=None):
+                     valuation=False, structure_history=False, status_cb=None):
     """觀察清單策略。
 
     universe_n  股票範圍：市值前 N 大（150 / 300）
@@ -1701,6 +1854,11 @@ def screen_watchlist(universe_n=150, ma=50, direction="above", days=1,
             r["yield"] = value.get("yield")
 
     rows.sort(key=lambda r: r["rank"])
+    if structure_history:
+        structures = get_breakout_structures(
+            [r["symbol"] for r in rows], histories=hist, status_cb=status_cb)
+        for row in rows:
+            row["structure"] = structures.get(row["symbol"], {})
     rows, qmeta = attach_quotes(rows)      # 只抓結果那幾檔，不是全部 300 檔
     return {"rows": rows, "as_of": as_of, "quote": qmeta,
             "ma_name": MA_NAMES.get(ma, str(ma)),
@@ -1708,7 +1866,8 @@ def screen_watchlist(universe_n=150, ma=50, direction="above", days=1,
 
 
 def screen_pullback(universe_n=150, ma=50, band=3.0, align="strict_bull",
-                    eps_halves=False, valuation=False, status_cb=None):
+                    eps_halves=False, valuation=False, structure_history=False,
+                    status_cb=None):
     """飆股拉回找買點。
 
     找出**最近一日收盤價回到指定均線 ±band%** 範圍內的股票。
@@ -1787,6 +1946,11 @@ def screen_pullback(universe_n=150, ma=50, band=3.0, align="strict_bull",
 
     # 越貼近均線的排越前面（乖離絕對值小 → 拉回得剛剛好）
     rows.sort(key=lambda r: abs(r["gap"]))
+    if structure_history:
+        structures = get_breakout_structures(
+            [r["symbol"] for r in rows], histories=hist, status_cb=status_cb)
+        for row in rows:
+            row["structure"] = structures.get(row["symbol"], {})
     rows, qmeta = attach_quotes(rows)      # 只抓結果那幾檔，不是全部 300 檔
     return {"rows": rows, "as_of": as_of, "band": band, "quote": qmeta,
             "ma_name": MA_NAMES.get(ma, str(ma)),
@@ -1994,7 +2158,7 @@ def build_rs_cache(universe=None, histories=None):
     return out
 
 
-def screen_pro_rs(period=60, threshold=90, status_cb=None):
+def screen_pro_rs(period=60, threshold=90, structure_history=False, status_cb=None):
     """市值前 300 大指定期間價格報酬的 1～99 市場百分位。"""
     period, threshold = int(period), int(threshold)
     if period not in RS_PERIODS:
@@ -2018,6 +2182,11 @@ def screen_pro_rs(period=60, threshold=90, status_cb=None):
                      "sector_zh": zh_sector(u["sector"]), "close": d["close"],
                      "gain": d["gain"], "rs": d["rs"]})
     rows.sort(key=lambda r: (-r["rs"], -r["gain"], r["rank"]))
+    if structure_history:
+        structures = get_breakout_structures(
+            [r["symbol"] for r in rows], status_cb=status_cb)
+        for row in rows:
+            row["structure"] = structures.get(row["symbol"], {})
     return {"rows": rows, "results": rows, "scanned": len(data), "period": period,
             "threshold": threshold, "as_of": cache.get("as_of")}
 
@@ -4639,6 +4808,43 @@ __SEO_HEAD__
            border:1.5px solid var(--grounds); border-radius:10px; background:var(--foam);
            color:var(--espresso); min-width:170px; }
   .resfilter select:focus { outline:none; border-color:var(--caramel); }
+  .structure-details { min-width:112px; text-align:left; }
+  .structure-details > summary { display:inline-flex; align-items:center; gap:5px; cursor:pointer;
+    list-style:none; white-space:nowrap; border:1px solid var(--grounds); border-radius:999px;
+    padding:5px 9px; background:var(--milk); color:var(--mocha); font-size:12px; font-weight:700; }
+  .structure-details > summary::-webkit-details-marker{display:none}
+  .structure-details > summary::before{content:'▸';font-size:10px}.structure-details[open]>summary::before{content:'▾'}
+  .structure-details > summary.structure-hit{background:rgba(61,139,103,.12);border-color:rgba(61,139,103,.42);color:#2f7657}
+  .structure-details > summary.structure-near{background:rgba(211,154,44,.14);border-color:rgba(211,154,44,.48);color:#8a6200}
+  .structure-details > summary.structure-miss{background:rgba(190,66,49,.10);border-color:rgba(190,66,49,.35);color:var(--up)}
+  .structure-panel { width:min(680px,82vw); margin-top:8px; padding:13px; border-radius:14px;
+    background:var(--foam); border:1px solid var(--grounds); box-shadow:var(--shadow); color:var(--espresso); }
+  .structure-title { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:9px; }
+  .structure-title b{font-family:var(--font-head);font-size:15px}.structure-title small{color:var(--mocha);line-height:1.5;text-align:right}
+  .structure-tags{display:flex;gap:5px;flex-wrap:wrap;margin:0 0 9px}.structure-tags span{padding:3px 8px;border-radius:999px;background:var(--milk);border:1px solid var(--grounds);font-size:11px;color:var(--mocha)}
+  .structure-metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:7px; margin-bottom:10px; }
+  .structure-metric { min-width:0; padding:8px 9px; border-radius:10px; background:var(--milk); }
+  .structure-metric small{display:block;color:var(--mocha);font-size:10.5px}.structure-metric b{display:block;margin-top:3px;font:700 15px var(--font-num);overflow-wrap:anywhere}
+  .structure-chart-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:7px 0 2px}
+  .structure-chart-range{font:11px var(--font-num);color:var(--mocha)}
+  .structure-chart-buttons{display:flex}.structure-chart-buttons button{border:1px solid var(--grounds);border-right:0;background:var(--foam);color:var(--mocha);padding:4px 8px;cursor:pointer;font-size:11px}.structure-chart-buttons button:first-child{border-radius:7px 0 0 7px}.structure-chart-buttons button:last-child{border-right:1px solid var(--grounds);border-radius:0 7px 7px 0}.structure-chart-buttons button.on{background:var(--espresso);color:#fff}
+  .structure-chart svg{width:100%;height:auto;display:block;touch-action:none;cursor:grab;user-select:none}.structure-chart svg.dragging{cursor:grabbing}
+  .structure-chart-read{min-height:18px;margin-left:42px;font:11px var(--font-num);color:var(--mocha)}
+  .structure-note{font-size:10.5px;color:var(--mocha);line-height:1.55;margin-top:5px}
+  .structure-reason{padding:8px 10px;border-radius:9px;background:rgba(137,107,77,.08);color:var(--mocha);font-size:12px;line-height:1.6;margin-bottom:8px}
+  .scard .structure-panel{width:100%;box-shadow:none}.scard .structure-details{grid-column:1/-1;margin-top:7px}
+  /* RS 電腦版：股票摘要列搭配全寬結構面板，不把長期圖表塞進表格欄位。 */
+  .rs-card{max-width:920px}.rs-structure-list{display:grid;gap:10px;overflow:visible}
+  .rs-structure-item{min-width:0;padding:12px 14px;background:var(--foam);border:1px solid var(--grounds);border-radius:14px;box-shadow:var(--shadow)}
+  .rs-structure-head{display:grid;grid-template-columns:72px minmax(180px,1.5fr) minmax(110px,1fr) repeat(3,minmax(88px,.7fr));gap:10px;align-items:center;padding-bottom:10px;border-bottom:1px solid var(--grounds)}
+  .rs-structure-cell{min-width:0}.rs-structure-cell small{display:block;margin-bottom:2px;color:var(--mocha);font-size:10.5px}.rs-structure-cell b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:700 14px var(--font-num);color:var(--espresso)}
+  .rs-structure-company b{font-family:var(--font-head);font-size:15px}.rs-structure-company span{margin-right:7px;font-family:var(--font-num);color:var(--caramel-2)}
+  .rs-structure-item>.structure-details{margin-top:10px}.rs-structure-item .structure-panel{width:100%;box-sizing:border-box;box-shadow:none}.rs-structure-item .structure-details>summary{font-size:13px;padding:6px 11px}
+  @media(min-width:1000px){.rs-structure-item .structure-metrics{grid-template-columns:repeat(6,minmax(0,1fr))}}
+  /* 640px 以下只顯示既有手機卡片；此規則必須放在 rs-structure-list 的桌機 display:grid 之後。 */
+  @media(max-width:640px){.res-wide.rs-structure-list{display:none}}
+  @media(max-width:760px) and (min-width:641px){.rs-structure-head{grid-template-columns:62px minmax(160px,1.4fr) repeat(2,minmax(85px,.7fr))}.rs-structure-industry,.rs-structure-close{display:none}}
+  @media(max-width:560px){.structure-panel{width:100%;padding:10px}.structure-metrics{grid-template-columns:1fr 1fr}.structure-title{display:block}.structure-title small{display:block;text-align:left;margin-top:3px}}
   .screen-tools { max-width:560px; margin:10px auto; padding:10px; border:1px solid var(--grounds); border-radius:12px; background:var(--foam); display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
   .screen-tools input,.screen-tools select { min-width:0; height:38px; padding:7px 10px; border:1px solid var(--grounds); border-radius:9px; background:var(--milk); color:var(--espresso); font:inherit; }
   .screen-tools input { flex:1 1 145px; }.screen-tools select { flex:1 1 150px; }
@@ -5162,8 +5368,10 @@ __QUOTES_HTML__
   <div class="card"><h2><span class="stepno">06</span><span data-i18n="screen.advanced">基本面與進階資料</span></h2>
     <label class="opt"><input type="checkbox" id="epsHalves1"><span data-i18n="screen.eps">追加近兩年 H1／H2 EPS</span></label>
     <label class="opt"><input type="checkbox" id="valuation1"><span data-i18n="screen.valuation">顯示本益比與殖利率</span></label>
+    <label class="opt"><input type="checkbox" id="structureHistory1"><span data-i18n="screen.structure">飆股前期結構回溯（1～5 年）</span></label>
     <div style="font-size:12px;color:var(--mocha);margin-top:7px;line-height:1.7" data-i18n="screen.epsNote">H1 是上半年兩季 EPS 合計，H2 是下半年兩季 EPS 合計；勾選後在公司名稱下方展開，不增加表格欄數。</div>
     <div style="font-size:12px;color:var(--mocha);margin-top:4px;line-height:1.7" data-i18n="screen.valuationNote">本益比與殖利率預設不顯示；勾選後才載入並增加兩欄。</div>
+    <div style="font-size:12px;color:var(--mocha);margin-top:4px;line-height:1.7" data-i18n="screen.structureNote">回溯前高、最大回落、整理月數與突破時點，並顯示可拖曳平移的長期收盤價圖。美股使用既有五年收盤快取。</div>
   </div>
 
   <div class="screen-tools" id="screenTools1"></div>
@@ -5223,8 +5431,10 @@ __QUOTES_HTML__
   <div class="card"><h2><span class="stepno">04</span><span data-i18n="screen.advanced">基本面與進階資料</span></h2>
     <label class="opt"><input type="checkbox" id="epsHalves3"><span data-i18n="screen.eps">追加近兩年 H1／H2 EPS</span></label>
     <label class="opt"><input type="checkbox" id="valuation3"><span data-i18n="screen.valuation">顯示本益比與殖利率</span></label>
+    <label class="opt"><input type="checkbox" id="structureHistory3"><span data-i18n="screen.structure">飆股前期結構回溯（1～5 年）</span></label>
     <div style="font-size:12px;color:var(--mocha);margin-top:7px;line-height:1.7" data-i18n="screen.epsNote">H1 是上半年兩季 EPS 合計，H2 是下半年兩季 EPS 合計；勾選後在公司名稱下方展開，不增加表格欄數。</div>
     <div style="font-size:12px;color:var(--mocha);margin-top:4px;line-height:1.7" data-i18n="screen.valuationNote">本益比與殖利率預設不顯示；勾選後才載入並增加兩欄。</div>
+    <div style="font-size:12px;color:var(--mocha);margin-top:4px;line-height:1.7" data-i18n="screen.structureNote">回溯前高、最大回落、整理月數與突破時點，並顯示可拖曳平移的長期收盤價圖。美股使用既有五年收盤快取。</div>
   </div>
 
   <div class="screen-tools" id="screenTools3"></div>
@@ -5609,7 +5819,7 @@ __QUOTES_HTML__
 <!-- ============ 升級專業版：RS 指數 ============ -->
 <div class="page" id="p9">
   <h2 class="ptitle" data-i18n="p9.title">專業版｜RS 指數</h2>
-  <div class="card">
+  <div class="card rs-card">
     <div style="display:flex;align-items:center;gap:9px;margin-bottom:8px">
       <h2 style="margin:0" data-i18n="rs.title">RS 相對強弱排名</h2>
       <span class="badge" data-i18n="pro.beta">功能試作</span>
@@ -5629,6 +5839,10 @@ __QUOTES_HTML__
       <label class="opt" style="margin:0"><input type="radio" name="proRsThreshold" value="80"><span>RS ≥ 80</span></label>
       <label class="opt" style="margin:0"><input type="radio" name="proRsThreshold" value="90" checked><span>RS ≥ 90</span></label>
       <label class="opt" style="margin:0"><input type="radio" name="proRsThreshold" value="95"><span>RS ≥ 95</span></label>
+    </div>
+    <div style="margin:0 0 14px">
+      <label class="opt" style="margin:0"><input type="checkbox" id="structureHistoryRs"><span data-i18n="screen.structure">飆股前期結構回溯（1～5 年）</span></label>
+      <div style="font-size:12px;color:var(--mocha);margin-top:4px;line-height:1.7" data-i18n="screen.structureNote">回溯前高、最大回落、整理月數與突破時點，並顯示可拖曳平移的長期收盤價圖。美股使用既有五年收盤快取。</div>
     </div>
     <button class="gobtn" id="proRsBtn" data-i18n="rs.btn">顯示 RS 排名</button>
     <div class="status" id="proRsStatus"></div><div id="proRsResult"></div>
@@ -5925,6 +6139,8 @@ const I18N = { en: {
   "screen.epsNote": "H1 and H2 each combine two reported quarters. Results expand below the company name without adding four crowded columns.",
   "screen.valuation": "Show P/E and dividend yield",
   "screen.valuationNote": "P/E and dividend yield stay hidden by default; select this option to load and add both columns.",
+  "screen.structure": "Trace pre-breakout structure (1–5 years)",
+  "screen.structureNote": "Trace the prior high, maximum drawdown, consolidation length and breakout date, with a draggable long-term closing-price chart. US stocks reuse the existing five-year price cache.",
   "screen.saveName": "Custom strategy name", "screen.save": "Save", "screen.saved": "Saved presets",
   "screen.apply": "Apply", "screen.delete": "Delete", "screen.export": "Export CSV",
   "screen.savedOk": "Preset saved on this device", "screen.appliedOk": "Preset applied",
@@ -6096,8 +6312,8 @@ document.querySelectorAll("input[name=days]").forEach(r =>
    只存在這台裝置；CSV 直接讀表格 DOM，因此會保留目前下拉篩選與排序。 */
 const SCREEN_PRESET_KEY = 'us-screen-presets-v1';
 const SCREEN_FIELDS = {
-  '1': {names:['universe','days','mode','ma','direction','align'], checks:['epsHalves1','valuation1']},
-  '3': {names:['universe3','ma3','align3'], checks:['epsHalves3','valuation3']}
+  '1': {names:['universe','days','mode','ma','direction','align'], checks:['epsHalves1','valuation1','structureHistory1']},
+  '3': {names:['universe3','ma3','align3'], checks:['epsHalves3','valuation3','structureHistory3']}
 };
 function screenPresetsRead(){try{return JSON.parse(localStorage.getItem(SCREEN_PRESET_KEY)||'[]')||[]}catch(e){return []}}
 function screenPresetsWrite(rows){try{localStorage.setItem(SCREEN_PRESET_KEY,JSON.stringify(rows.slice(-20)))}catch(e){}}
@@ -6191,7 +6407,8 @@ if ($("#go1")) $("#go1").onclick = () => {
     match: val("mode") || "any",
     align: val("align"),
     eps_halves: !!($("#epsHalves1") && $("#epsHalves1").checked),
-    valuation: !!($("#valuation1") && $("#valuation1").checked)
+    valuation: !!($("#valuation1") && $("#valuation1").checked),
+    structure_history: !!($("#structureHistory1") && $("#structureHistory1").checked)
   };
   $("#go1").disabled = true;
   $("#result1").innerHTML = "";
@@ -6233,6 +6450,7 @@ function render(res){
   const showQ = hasQuote(res.quote);
   const showHalves = !!($("#epsHalves1") && $("#epsHalves1").checked);
   const showValuation = !!($("#valuation1") && $("#valuation1").checked);
+  const showStructure = !!($("#structureHistory1") && $("#structureHistory1").checked);
   const per = lastRows.find(r => r.period);
   $("#status1").innerHTML = t("st.asof","資料日期") + " " + (res.as_of || "—")
     + (per ? "｜" + t("st.quarter","財報季") + " " + per.period : "")
@@ -6263,7 +6481,7 @@ function render(res){
   }
   h += "<div class='tblwrap res-wide'><table><thead><tr>"
      + "<th>" + t("th.rank","市值排名") + "</th><th>" + t("th.sym","代號")
-     + "</th><th>" + t("th.name","公司名稱") + "</th><th>" + t("th.sector","產業") + "</th>"
+     + "</th><th>" + t("th.name","公司名稱") + "</th>" + (showStructure ? "<th>" + (LANG==="en"?"Pre-breakout structure":"前期結構") + "</th>" : "") + "<th>" + t("th.sector","產業") + "</th>"
      + "<th>" + t("th.close","收盤") + "</th>"
      + (showQ ? "<th>" + t("th.last","現價") + "</th><th>"
               + t("th.lastgap","與收盤差%") + "</th>" : "")
@@ -6273,10 +6491,11 @@ function render(res){
      + "<th>" + t("th.eps","季EPS年增") + "</th><th>" + t("th.rev","季營收年增")
      + "</th><th>" + t("th.nh","創新高") + "</th>"
      + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
-     + "<th>" + t("th.hit","符合日期") + "</th></tr></thead><tbody id='tb1'>" + rowsHtml(lastRows, showAlign, showQ, showHalves, showValuation)
+     + "<th>" + t("th.hit","符合日期") + "</th></tr></thead><tbody id='tb1'>" + rowsHtml(lastRows, showAlign, showQ, showHalves, showValuation, showStructure)
      + "</tbody></table></div>";
-  h += "<div id='cd1'>" + cardsHtml(lastRows, showAlign, t("th.hit","符合日期"), showQ, showHalves, showValuation) + "</div>";
+  h += "<div id='cd1'>" + cardsHtml(lastRows, showAlign, t("th.hit","符合日期"), showQ, showHalves, showValuation, showStructure) + "</div>";
   $("#result1").innerHTML = h;
+  if(showStructure)setupStructureCharts($("#result1"));
 }
 
 /* ---- 創新高（與後端 NH_TIERS / NH_LABEL 對應）---- */
@@ -6414,6 +6633,68 @@ function epsHalfPanel(s,show){
   return `<details class="eps-half"><summary>${LANG==="en"?"2-year H1 / H2 EPS":"近兩年 H1／H2 EPS"}</summary><div class="eps-half-grid">${cells}</div></details>`;
 }
 
+const STRUCTURE_PATTERN_EN={"多重底":"Multiple bottom","VCP 波動收縮":"VCP contraction","U 型底":"U-shaped base","杯柄":"Cup with handle","長期橫盤":"Long base"};
+function structurePatternName(v){return LANG==="en"?(STRUCTURE_PATTERN_EN[v]||v):v}
+function structureNumber(v,prefix="",suffix=""){return v==null?"—":prefix+Number(v).toLocaleString(undefined,{maximumFractionDigits:1})+suffix}
+function structurePanel(s){
+  const d=s&&s.structure;if(!d)return "";
+  const summary=!d.available?(LANG==="en"?"Unavailable":"無法回溯")
+    :d.matched?(LANG==="en"?"✓ Structure match":"✓ 結構符合")
+    :(d.prior_high!=null?(LANG==="en"?"Structure nearly complete":"結構接近完成"):(LANG==="en"?"Not formed":"未形成"));
+  const summaryClass=!d.available?"":d.matched?"structure-hit":d.prior_high!=null?"structure-near":"structure-miss";
+  const reasonText=!d.reason?"":LANG==="en"
+    ?(!d.available?"Long-term prices are unavailable or contain a suspected split discontinuity.":d.prior_high==null?"The 20% drawdown, three-month base and recent return to the prior high were not all found.":"The earlier structure qualifies, but the best 1–3 month gain has not exceeded 30%.")
+    :d.reason;
+  const reason=reasonText?`<div class="structure-reason">${screenEsc(reasonText)}</div>`:"";
+  if(!d.available)return `<details class="structure-details"><summary>${summary}</summary><div class="structure-panel">${reason}</div></details>`;
+  const tags=(d.pattern_labels||[]).map(x=>`<span>${screenEsc(structurePatternName(x))}</span>`).join("");
+  const gain=structureNumber(d.recent_gain_pct,d.recent_gain_pct>0?"+":"","%");
+  const post=structureNumber(d.post_breakout_gain_pct,d.post_breakout_gain_pct>0?"+":"","%");
+  const metrics=d.prior_high!=null?`<div class="structure-metrics">
+    <div class="structure-metric"><small>${LANG==="en"?"Recent gain":"近期漲幅"} · ${d.recent_period_days}${LANG==="en"?"D":"日"}</small><b>${gain}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"Prior high":"前期高點"} · ${d.prior_high_date||""}</small><b>${structureNumber(d.prior_high,"$")}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"Max drawdown":"最大跌幅"} · ${d.trough_date||""}</small><b>${structureNumber(d.max_drawdown_pct,"","%")}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"Consolidation":"整理時間"}</small><b>${structureNumber(d.consolidation_months,"",LANG==="en"?" months":" 個月")}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"Breakout month":"突破時間"}</small><b>${d.breakout_date||(LANG==="en"?"Not yet":"尚未突破")}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"Vs prior high":"突破後漲幅"}</small><b>${post}</b></div>
+  </div>`:`<div class="structure-metrics"><div class="structure-metric"><small>${LANG==="en"?"Best 1–3M gain":"近 1～3 月最大漲幅"}</small><b>${gain}</b></div><div class="structure-metric"><small>${LANG==="en"?"History available":"可回溯期間"}</small><b>${d.lookback_years||"—"} ${LANG==="en"?"years":"年"}</b></div></div>`;
+  const encoded=encodeURIComponent(JSON.stringify(d.chart||[])),markers=encodeURIComponent(JSON.stringify(d.markers||{}));
+  const chart=(d.chart||[]).length>1?`<div class="structure-chart-head"><span class="structure-chart-range"></span><span class="structure-chart-buttons"><button type="button" data-weeks="52">1Y</button><button type="button" data-weeks="156" class="on">3Y</button><button type="button" data-weeks="9999">5Y</button></span></div><div class="structure-chart" data-series="${encoded}" data-markers="${markers}" data-high="${d.prior_high==null?"":d.prior_high}"></div><div class="structure-chart-read"></div>`:"";
+  const note=LANG==="en"?"Drag the line horizontally to pan; use the wheel or buttons to zoom. Weekly closing prices only. Pattern labels are heuristic outlines, not OHLCV confirmation.":"在折線圖上左右拖曳可平移；滾輪或 1Y／3Y／5Y 可縮放。圖為每週最後收盤價；型態標籤只是收盤輪廓候選，不是 OHLCV 確認。";
+  return `<details class="structure-details"><summary class="${summaryClass}">${summary}</summary><div class="structure-panel"><div class="structure-title"><b>${LANG==="en"?"Pre-breakout structure":"飆股前期結構回溯"}</b><small>${LANG==="en"?"As of":"資料截至"} ${d.as_of||"—"} · ${d.lookback_years||"—"}${LANG==="en"?"Y":" 年"}</small></div>${tags?`<div class="structure-tags">${tags}</div>`:""}${reason}${metrics}${chart}<div class="structure-note">${note}</div></div></details>`;
+}
+function initStructureChart(box){
+  if(!box||box.dataset.ready==="1")return;box.dataset.ready="1";
+  let rows=[],markers={};try{rows=JSON.parse(decodeURIComponent(box.dataset.series||""));markers=JSON.parse(decodeURIComponent(box.dataset.markers||""))}catch(e){}
+  if(rows.length<2)return;
+  const panel=box.closest(".structure-panel"),range=panel.querySelector(".structure-chart-range"),read=panel.querySelector(".structure-chart-read"),buttons=panel.querySelectorAll(".structure-chart-buttons button");
+  const W=680,H=238,L=44,R=12,T=20,B=27,high=Number(box.dataset.high),maxWindow=rows.length;
+  let win=Math.min(156,maxWindow),start=Math.max(0,maxWindow-win),drag=null;
+  const clamp=()=>{win=Math.max(Math.min(52,maxWindow),Math.min(maxWindow,win));start=Math.max(0,Math.min(maxWindow-win,start))};
+  const nearestDate=(date,a,b)=>{if(!date)return -1;const ts=Date.parse(date);let best=-1,dist=Infinity;for(let i=a;i<b;i++){const q=Math.abs(Date.parse(rows[i][0])-ts);if(q<dist){dist=q;best=i}}return best};
+  function draw(){
+    clamp();const visible=rows.slice(start,start+win),vals=visible.map(r=>Number(r[1]));let lo=Math.min(...vals),hi=Math.max(...vals);if(Number.isFinite(high)&&high>=lo*.92&&high<=hi*1.08){lo=Math.min(lo,high);hi=Math.max(hi,high)}let pad=Math.max((hi-lo)*.08,hi*.01,.01);lo-=pad;hi+=pad;const span=Math.max(.01,hi-lo),x=i=>L+(i-start)/Math.max(1,win-1)*(W-L-R),y=v=>T+(hi-v)/span*(H-T-B);
+    const grid=[hi,(hi+lo)/2,lo].map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grounds)" stroke-dasharray="4 3"/><text x="${L-5}" y="${y(v)+3}" text-anchor="end" font-size="10" fill="var(--mocha)">${v.toFixed(v>=100?0:1)}</text>`).join("");
+    const pts=visible.map((r,k)=>`${x(start+k).toFixed(1)},${y(Number(r[1])).toFixed(1)}`).join(" ");
+    const highLine=Number.isFinite(high)&&high>=lo&&high<=hi?`<line x1="${L}" x2="${W-R}" y1="${y(high)}" y2="${y(high)}" stroke="#a66b45" stroke-width="1.2" stroke-dasharray="6 4"/><text x="${W-R-3}" y="${y(high)-4}" text-anchor="end" font-size="10" fill="#a66b45">${LANG==="en"?"Prior high":"前高"} ${high}</text>`:"";
+    const markerSpec=[["peak","前高","#a66b45"],["trough","低點","#3d8b67"],["breakout","突破","#b93c32"]];let marks="";markerSpec.forEach(([key,zh,color])=>{const i=nearestDate(markers[key],start,start+win);if(i>=start&&i<start+win){const v=Number(rows[i][1]);marks+=`<circle cx="${x(i)}" cy="${y(v)}" r="4" fill="${color}" stroke="#fff" stroke-width="1.5"/><text x="${x(i)}" y="${Math.max(11,y(v)-7)}" text-anchor="middle" font-size="9.5" fill="${color}">${LANG==="en"?{peak:"High",trough:"Low",breakout:"Breakout"}[key]:zh}</text>`}});
+    box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" aria-label="${LANG==="en"?"Draggable pre-breakout closing-price chart":"可拖曳的飆股前期收盤價圖"}">${grid}${highLine}<polyline points="${pts}" fill="none" stroke="var(--caramel-2)" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>${marks}<line class="structure-guide" y1="${T}" y2="${H-B}" stroke="var(--espresso)" opacity="0"/><circle class="structure-dot" r="4" fill="var(--caramel-2)" stroke="#fff" stroke-width="1.5" opacity="0"/><text x="${L}" y="${H-6}" font-size="10" fill="var(--mocha)">${visible[0][0].slice(0,7)}</text><text x="${W-R}" y="${H-6}" text-anchor="end" font-size="10" fill="var(--mocha)">${visible.at(-1)[0].slice(0,7)}</text></svg>`;
+    range.textContent=`${visible[0][0].slice(0,7)} — ${visible.at(-1)[0].slice(0,7)}`;wire();
+  }
+  function wire(){const svg=box.querySelector("svg"),guide=svg.querySelector(".structure-guide"),dot=svg.querySelector(".structure-dot");
+    const inspect=clientX=>{const r=svg.getBoundingClientRect(),px=(clientX-r.left)/r.width*W;let i=Math.round(start+(px-L)/(W-L-R)*(win-1));i=Math.max(start,Math.min(start+win-1,i));const xx=L+(i-start)/Math.max(1,win-1)*(W-L-R),visible=rows.slice(start,start+win),vals=visible.map(q=>Number(q[1]));let lo=Math.min(...vals),hi=Math.max(...vals);const pad=Math.max((hi-lo)*.08,hi*.01,.01);lo-=pad;hi+=pad;if(Number.isFinite(high)&&high>=lo*.92&&high<=hi*1.08){lo=Math.min(lo,high-pad*.2);hi=Math.max(hi,high+pad*.2)}const yy=T+(hi-Number(rows[i][1]))/Math.max(.01,hi-lo)*(H-T-B);guide.setAttribute("x1",xx);guide.setAttribute("x2",xx);guide.setAttribute("opacity",".4");dot.setAttribute("cx",xx);dot.setAttribute("cy",yy);dot.setAttribute("opacity","1");read.textContent=`${rows[i][0]}  $${Number(rows[i][1]).toLocaleString()}`};
+    const panTo=clientX=>{const r=box.getBoundingClientRect(),shift=Math.round((clientX-drag.x)/r.width*win);start=drag.start-shift;draw()};
+    box.onpointerdown=e=>{e.preventDefault();drag={x:e.clientX,start};box.setPointerCapture(e.pointerId);svg.classList.add("dragging");inspect(e.clientX)};
+    box.onpointermove=e=>{if(drag&&box.hasPointerCapture(e.pointerId))panTo(e.clientX);else if(e.pointerType==="mouse")inspect(e.clientX)};
+    const release=e=>{drag=null;const current=box.querySelector("svg");if(current)current.classList.remove("dragging");if(box.hasPointerCapture(e.pointerId))box.releasePointerCapture(e.pointerId)};box.onpointerup=release;box.onpointercancel=release;
+    box.onmousedown=e=>{if(e.button===0&&!drag){drag={x:e.clientX,start};const current=box.querySelector("svg");if(current)current.classList.add("dragging")}};
+    box.onmousemove=e=>{if(drag&&e.buttons===1)panTo(e.clientX)};box.onmouseup=()=>{drag=null;const current=box.querySelector("svg");if(current)current.classList.remove("dragging")};
+    svg.addEventListener("wheel",e=>{e.preventDefault();const center=start+win/2;win=Math.round(win*(e.deltaY>0?1.22:.82));clamp();start=Math.round(center-win/2);draw()},{passive:false});
+  }
+  buttons.forEach(b=>b.onclick=e=>{e.preventDefault();win=Math.min(maxWindow,Number(b.dataset.weeks));start=maxWindow-win;buttons.forEach(q=>q.classList.toggle("on",q===b));draw()});draw();
+}
+function setupStructureCharts(root){if(!root)return;root.querySelectorAll(".structure-details").forEach(d=>d.addEventListener("toggle",()=>{if(d.open)d.querySelectorAll(".structure-chart").forEach(initStructureChart)}))}
+
 /* 符合日期：檢查多天時一併顯示「符合幾天」，否則看不出「部分符合」的差別 */
 function fmtHit(s){
   const d = (s.hit_date || "").slice(5);           /* MM-DD */
@@ -6421,11 +6702,12 @@ function fmtHit(s){
   return d + " <small style='color:var(--mocha)'>(" + s.hit_days + "/" + s.days + ")</small>";
 }
 
-function rowsHtml(rows, showAlign, showQ, showHalves, showValuation){
+function rowsHtml(rows, showAlign, showQ, showHalves, showValuation, showStructure=false){
   return rows.map((s,i) =>
     "<tr data-i='"+i+"' data-sector=\"" + sectorKey(s) + "\">"
     + "<td>" + s.rank + "</td><td><b>" + s.symbol + "</b></td>"
     + "<td class='coname' title=\"" + s.name + "\">" + coName(s) + epsHalfPanel(s,showHalves) + "</td>"
+    + (showStructure ? "<td>" + structurePanel(s) + "</td>" : "")
     + "<td class='sector' title=\"" + s.sector + "\">" + coSector(s) + "</td>"
     + "<td>" + s.price.toFixed(2) + "</td>"
     + (showQ ? "<td>" + fmtLast(s) + "</td><td>" + fmtLastPct(s) + "</td>" : "")
@@ -6446,7 +6728,7 @@ function rowsHtml(rows, showAlign, showQ, showHalves, showValuation){
    改顯示 .res-cards。**所以每個輸出表格的地方都必須同時輸出卡片**，
    否則手機上會只剩狀態列、下面一片空白（狀態列還會顯示「符合 N 檔」，
    看起來像資料抓不到，其實是版面問題）。這個坑踩過，見變更紀錄。 */
-function cardsHtml(rows, showAlign, lastLabel, showQ, showHalves, showValuation){
+function cardsHtml(rows, showAlign, lastLabel, showQ, showHalves, showValuation, showStructure=false){
   return "<div class='res-cards'>" + rows.map((s, i) =>
     "<details class='scard' data-i='" + i + "'>"
     /* 卡片標題列優先顯示現價（手機上只看得到這一行，要放最新的那個數字） */
@@ -6473,6 +6755,7 @@ function cardsHtml(rows, showAlign, lastLabel, showQ, showHalves, showValuation)
     + (showAlign ? "<div class='kv'><span>" + t("th.align","均線排列")
                  + "</span><b>" + alignName(s.align) + "</b></div>" : "")
     + "<div class='kv'><span>" + lastLabel + "</span><b>" + fmtHit(s) + "</b></div>"
+    + (showStructure ? structurePanel(s) : "")
     + "</div></details>").join("") + "</div>";
 }
 
@@ -6486,7 +6769,8 @@ if ($("#go3")) $("#go3").onclick = () => {
     ma: parseInt(val("ma3"), 10),
     align: val("align3"),
     eps_halves: !!($("#epsHalves3") && $("#epsHalves3").checked),
-    valuation: !!($("#valuation3") && $("#valuation3").checked)
+    valuation: !!($("#valuation3") && $("#valuation3").checked),
+    structure_history: !!($("#structureHistory3") && $("#structureHistory3").checked)
   };
   $("#go3").disabled = true;
   $("#result3").innerHTML = "";
@@ -6525,6 +6809,7 @@ function render3(res){
   const showQ = hasQuote(res.quote);
   const showHalves3 = !!($("#epsHalves3") && $("#epsHalves3").checked);
   const showValuation3 = !!($("#valuation3") && $("#valuation3").checked);
+  const showStructure3 = !!($("#structureHistory3") && $("#structureHistory3").checked);
   const per3 = lastRows3.find(r => r.period);
   $("#status3").innerHTML = t("st.asof","資料日期") + " " + (res.as_of || "—")
     + (per3 ? "｜" + t("st.quarter","財報季") + " " + per3.period : "")
@@ -6556,7 +6841,7 @@ function render3(res){
   }
   h += "<div class='tblwrap res-wide'><table><thead><tr>"
      + "<th>" + t("th.rank","市值排名") + "</th><th>" + t("th.sym","代號")
-     + "</th><th>" + t("th.name","公司名稱") + "</th><th>" + t("th.sector","產業") + "</th>"
+     + "</th><th>" + t("th.name","公司名稱") + "</th>" + (showStructure3 ? "<th>" + (LANG==="en"?"Pre-breakout structure":"前期結構") + "</th>" : "") + "<th>" + t("th.sector","產業") + "</th>"
      + "<th>" + t("th.close","收盤") + "</th>"
      + (showQ ? "<th>" + t("th.last","現價") + "</th><th>"
               + t("th.lastgap","與收盤差%") + "</th>" : "")
@@ -6567,9 +6852,10 @@ function render3(res){
      + "</th><th>" + t("th.nh","創新高") + "</th>"
      + (showAlign ? "<th>" + t("th.align","均線排列") + "</th>" : "")
      + "<th>" + t("th.asof","資料日期") + "</th></tr></thead><tbody id='tb3'>"
-     + rowsHtml(lastRows3, showAlign, showQ, showHalves3, showValuation3) + "</tbody></table></div>";
-  h += "<div id='cd3'>" + cardsHtml(lastRows3, showAlign, t("th.asof","資料日期"), showQ, showHalves3, showValuation3) + "</div>";
+     + rowsHtml(lastRows3, showAlign, showQ, showHalves3, showValuation3, showStructure3) + "</tbody></table></div>";
+  h += "<div id='cd3'>" + cardsHtml(lastRows3, showAlign, t("th.asof","資料日期"), showQ, showHalves3, showValuation3, showStructure3) + "</div>";
   $("#result3").innerHTML = h;
+  if(showStructure3)setupStructureCharts($("#result3"));
 }
 
 function applyFilter3(){ applyAll("tb3", "cd3", lastRows3, "secFilter3", "epsFilter3", "alignFilter3", "nhFilter3", "momentumFilter3"); }
@@ -7110,20 +7396,39 @@ function zhSectorFromRows(rows,key){ const x=rows.find(r=>r.sector===key); retur
 
 function renderProRs(j){
   lastProRs=j; const rows=j.rows||[];
+  const showStructureRs=!!($("#structureHistoryRs")&&$("#structureHistoryRs").checked);
   $("#proRsStatus").innerHTML=(LANG==="en"?`Compared ${j.scanned} stocks over ${j.period} days: `:`比較 ${j.scanned} 檔股票近 ${j.period} 日：`)+`<span class="count">${rows.length}</span> ${LANG==="en"?`scored RS ${j.threshold}+`:`檔 RS ≥ ${j.threshold}`} · ${j.as_of||"—"}`;
   if(!rows.length){$("#proRsResult").innerHTML=`<div class="concl gray">${LANG==="en"?"No stocks match.":"目前沒有股票符合這個 RS 門檻。"}</div>`;return;}
   const sectors={};rows.forEach(s=>sectors[s.sector]=(sectors[s.sector]||0)+1);
   let opts=`<option value="">${LANG==="en"?"All sectors":"全部產業"}（${rows.length}）</option>`;
   Object.keys(sectors).sort((a,b)=>sectors[b]-sectors[a]).forEach(k=>opts+=`<option value="${k}">${LANG==="en"?k:zhSectorFromRows(rows,k)}（${sectors[k]}）</option>`);
-  let trs="",cards="";rows.forEach(s=>{const name=coName(s),sector=coSector(s),gain=proPct(s.gain);
-    trs+=`<tr data-rs-row data-sector="${s.sector}"><td>${s.rank}</td><td><b>${s.symbol}</b></td><td>${name}</td><td>${sector}</td><td>${s.close}</td><td>${gain}</td><td><span class="rs-score">${s.rs}</span></td></tr>`;
-    cards+=`<details class="scard" data-rs-row data-sector="${s.sector}"><summary><span class="sc-l"><b>${s.symbol}</b> ${name}</span><span class="sc-r"><span class="rs-score">${s.rs}</span></span></summary><div class="scard-body">${proKv(t("th.rank","市值排名"),s.rank)}${proKv(t("th.sector","產業"),sector)}${proKv(t("th.close","收盤"),s.close)}${proKv(`${j.period}${LANG==="en"?"-day gain":" 日漲幅"}`,gain)}${proKv("RS",s.rs)}</div></details>`;
+  let trs="",structureRows="",cards="";rows.forEach((s,i)=>{const name=coName(s),sector=coSector(s),gain=proPct(s.gain);
+    const match=s.structure&&s.structure.available?(s.structure.matched?2:s.structure.prior_high!=null?1:0):-1;
+    const near=s.structure&&s.structure.available?(s.structure.matched?1:s.structure.prior_high!=null?2:0):-1;
+    trs+=`<tr data-rs-row data-rs-i="${i}" data-sector="${s.sector}"><td>${s.rank}</td><td><b>${s.symbol}</b></td><td>${name}</td><td>${sector}</td><td>${s.close}</td><td>${gain}</td><td><span class="rs-score">${s.rs}</span></td></tr>`;
+    if(showStructureRs)structureRows+=`<article class="rs-structure-item" data-rs-row data-rs-i="${i}" data-structurematch="${match}" data-structurenear="${near}" data-sector="${s.sector}"><div class="rs-structure-head">`
+      +`<div class="rs-structure-cell"><small>${t("th.rank","市值排名")}</small><b>#${s.rank}</b></div>`
+      +`<div class="rs-structure-cell rs-structure-company"><small>${t("th.name","公司名稱")}</small><b><span>${s.symbol}</span>${name}</b></div>`
+      +`<div class="rs-structure-cell rs-structure-industry"><small>${t("th.sector","產業")}</small><b>${sector}</b></div>`
+      +`<div class="rs-structure-cell rs-structure-close"><small>${t("th.close","收盤")}</small><b>${s.close}</b></div>`
+      +`<div class="rs-structure-cell"><small>${j.period}${LANG==="en"?"-day gain":" 日漲幅"}</small><b>${gain}</b></div>`
+      +`<div class="rs-structure-cell"><small>RS</small><b><span class="rs-score">${s.rs}</span></b></div></div>${structurePanel(s)}</article>`;
+    cards+=`<details class="scard" data-rs-row data-rs-i="${i}" data-structurematch="${match}" data-structurenear="${near}" data-sector="${s.sector}"><summary><span class="sc-l"><b>${s.symbol}</b> ${name}</span><span class="sc-r"><span class="rs-score">${s.rs}</span></span></summary><div class="scard-body">${proKv(t("th.rank","市值排名"),s.rank)}${proKv(t("th.sector","產業"),sector)}${proKv(t("th.close","收盤"),s.close)}${proKv(`${j.period}${LANG==="en"?"-day gain":" 日漲幅"}`,gain)}${proKv("RS",s.rs)}${showStructureRs?structurePanel(s):""}</div></details>`;
   });
-  $("#proRsResult").innerHTML=`<div class="resfilter"><span class="rflabel">${t("flt.sector","產業")}</span><select onchange="filterProRs(this.value)">${opts}</select></div><div class="res-wide"><table><tr><th>${t("th.rank","排名")}</th><th>${t("th.sym","代號")}</th><th>${t("th.name","公司")}</th><th>${t("th.sector","產業")}</th><th>${t("th.close","收盤")}</th><th>${j.period}${LANG==="en"?"-day gain":" 日漲幅"}</th><th>RS</th></tr>${trs}</table></div><div class="res-cards">${cards}</div>`;
+  const sorting=showStructureRs?`<span class="rflabel">${LANG==="en"?"Sort":"排序"}</span><select data-rs-sort onchange="sortProRs(this.value)"><option value="default">${LANG==="en"?"Default":"預設排序"}</option><option value="structurematch_desc">${LANG==="en"?"Structure match first":"結構符合優先"}</option><option value="structurenear_desc">${LANG==="en"?"Nearly complete first":"結構接近完成優先"}</option></select>`:"";
+  const filters=`<div class="resfilter"><span class="rflabel">${t("flt.sector","產業")}</span><select data-rs-sector onchange="filterProRs(this.value)">${opts}</select>${sorting}</div>`;
+  const desktop=showStructureRs?`<div class="res-wide rs-structure-list">${structureRows}</div>`:`<div class="res-wide"><table><thead><tr><th>${t("th.rank","排名")}</th><th>${t("th.sym","代號")}</th><th>${t("th.name","公司")}</th><th>${t("th.sector","產業")}</th><th>${t("th.close","收盤")}</th><th>${j.period}${LANG==="en"?"-day gain":" 日漲幅"}</th><th>RS</th></tr></thead><tbody>${trs}</tbody></table></div>`;
+  $("#proRsResult").innerHTML=filters+desktop+`<div class="res-cards">${cards}</div>`;
+  if(showStructureRs)setupStructureCharts($("#proRsResult"));
 }
 function filterProRs(sector){$("#proRsResult").querySelectorAll("[data-rs-row]").forEach(el=>el.style.display=(!sector||el.dataset.sector===sector)?"":"none");}
+function sortProRs(value){
+  const parts=(value||"default").split("_"),key=parts[0],dir=parts[1]||"asc";
+  [".rs-structure-list",".res-cards"].forEach(sel=>{const parent=$("#proRsResult "+sel);if(!parent)return;const nodes=Array.from(parent.children).filter(el=>el.hasAttribute("data-rs-i"));nodes.sort((a,b)=>{const ai=Number(a.dataset.rsI),bi=Number(b.dataset.rsI);if(key==="default")return ai-bi;const av=Number(a.dataset[key]),bv=Number(b.dataset[key]);return (dir==="desc"?bv-av:av-bv)||(ai-bi)});nodes.forEach(el=>parent.appendChild(el))});
+  filterProRs($("#proRsResult [data-rs-sector]")?.value||"");
+}
 if($("#proHighBtn")) $("#proHighBtn").onclick=()=>{ $("#proHighResult").innerHTML=""; runProJob("/api/pro/new-high",{days:Number(val("proHighDays")||1)},$("#proHighBtn"),$("#proHighStatus"),renderProHigh); };
-if($("#proRsBtn")) $("#proRsBtn").onclick=()=>{ $("#proRsResult").innerHTML=""; runProJob("/api/pro/rs",{period:Number(val("proRsPeriod")||60),threshold:Number(val("proRsThreshold")||90)},$("#proRsBtn"),$("#proRsStatus"),renderProRs); };
+if($("#proRsBtn")) $("#proRsBtn").onclick=()=>{ $("#proRsResult").innerHTML=""; runProJob("/api/pro/rs",{period:Number(val("proRsPeriod")||60),threshold:Number(val("proRsThreshold")||90),structure_history:!!($("#structureHistoryRs")&&$("#structureHistoryRs").checked)},$("#proRsBtn"),$("#proRsStatus"),renderProRs); };
 
 /* ---- 我的績效：時間加權報酬率（TWR）---- */
 let twBuilt = false;
@@ -10402,6 +10707,7 @@ def api_screen():
         "align": p.get("align") or "none",
         "eps_halves": bool(p.get("eps_halves")),
         "valuation": bool(p.get("valuation")),
+        "structure_history": bool(p.get("structure_history")),
     }
     if params["universe_n"] not in (150, 300):
         return jsonify(error="股票範圍不支援"), 400
@@ -10424,6 +10730,7 @@ def api_pullback():
         "align": p.get("align") or "none",
         "eps_halves": bool(p.get("eps_halves")),
         "valuation": bool(p.get("valuation")),
+        "structure_history": bool(p.get("structure_history")),
     }
     if params["universe_n"] not in (150, 300):
         return jsonify(error="股票範圍不支援"), 400
@@ -10484,7 +10791,9 @@ def api_pro_rs():
         return jsonify(error="RS 期間只支援 20、60、120 或 250 日"), 400
     if threshold not in (80, 90, 95):
         return jsonify(error="RS 門檻只支援 80、90 或 95"), 400
-    return jsonify(job=start_job(screen_pro_rs, {"period": period, "threshold": threshold}))
+    return jsonify(job=start_job(screen_pro_rs, {
+        "period": period, "threshold": threshold,
+        "structure_history": bool(p.get("structure_history"))}))
 
 
 @app.route("/api/growth")

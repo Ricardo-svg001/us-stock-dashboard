@@ -46,7 +46,7 @@ BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 BREAKOUT_STRUCTURE_FILE = os.path.join(BASE_DIR, "breakout_structure_seed.json")
-STRUCTURE_VERSION = 2
+STRUCTURE_VERSION = 3
 STRUCTURE_PERIODS = {"6m": 126, "1y": 252, "2y": 504, "5y": 1260}
 _BREAKOUT_STRUCTURE_MEMO = {"mtime": None, "rows": {}, "meta": {}}
 
@@ -1687,6 +1687,42 @@ def _structure_shape_labels(prices, allow_short=False):
     return labels[:3]
 
 
+def _structure_progress_metrics(values, peak_i, trough_i):
+    """Price-only early diagnostics calculated with data available today."""
+    current, peak = float(values[-1]), float(values[peak_i])
+    right = [float(x) for x in values[trough_i:]]
+    cut1, cut2 = len(right) // 3, len(right) * 2 // 3
+    thirds = [right[:cut1], right[cut1:cut2], right[cut2:]]
+    lows = [min(x) for x in thirds if x]
+    higher_lows = (len(lows) == 3 and lows[1] >= lows[0] * 1.01 and
+                   lows[2] >= lows[1] * .995)
+    recent = [float(x) for x in values[-min(60, len(values)):]]
+    cut1, cut2 = len(recent) // 3, len(recent) * 2 // 3
+    blocks = [recent[:cut1], recent[cut1:cut2], recent[cut2:]]
+    amplitudes = [(max(x) / min(x) - 1) * 100
+                  for x in blocks if x and min(x) > 0]
+    contraction = (len(amplitudes) == 3 and
+                   amplitudes[0] > amplitudes[1] > amplitudes[2])
+
+    def ma_rising(period):
+        if len(values) < period + 10:
+            return False
+        return (sum(values[-period:]) / period >
+                sum(values[-period - 10:-10]) / period)
+
+    ma20_rising, ma60_rising = ma_rising(20), ma_rising(60)
+    signals = [higher_lows, contraction, ma20_rising, ma60_rising]
+    return {
+        "progress_to_prior_high_pct": round(current / peak * 100, 1),
+        "right_side_higher_lows": higher_lows,
+        "volatility_contracting": contraction,
+        "ma20_rising": ma20_rising, "ma60_rising": ma60_rising,
+        "early_signal_score": sum(bool(x) for x in signals),
+        "early_signal_total": len(signals),
+        "volume_contraction": None, "breakout_volume_expansion": None,
+    }
+
+
 def analyze_breakout_structure(rows, lookback_sessions=None):
     """辨識前高、至少 20% 回落、三個月整理與近期重回前高。"""
     clean = {}
@@ -1724,24 +1760,35 @@ def analyze_breakout_structure(rows, lookback_sessions=None):
         peak = values[i]
         if peak <= 0 or peak < max(values[i - 40:i + 1]) * .995:
             continue
-        if current < peak * .90:
+        if current < peak * .80:
             continue
         trough_i = min(range(i + 1, n), key=lambda j: values[j])
         drawdown = (values[trough_i] / peak - 1) * 100
         if drawdown > -20:
             continue
         eligible = max(i + 60, trough_i + 1)
-        near_i = next((j for j in range(eligible, n) if values[j] >= peak * .90), None)
-        if near_i is None or near_i < n - 120:
+        developing_starts = [j for j in range(eligible, n)
+                             if values[j] >= peak * .80 and
+                             (j == eligible or values[j - 1] < peak * .80)]
+        if not developing_starts:
+            continue
+        developing_i = developing_starts[-1]
+        near_i = next((j for j in range(developing_i, n)
+                       if values[j] >= peak * .90), None)
+        # A long base may develop for more than a year. It remains current when
+        # the first 90% approach happened within the latest 120 sessions.
+        if developing_i < n - 252 and (near_i is None or near_i < n - 120):
+            continue
+        if current >= peak * .90 and (near_i is None or near_i < n - 120):
             continue
         peak_dt = datetime.strptime(dates[i], "%Y-%m-%d")
-        near_dt = datetime.strptime(dates[near_i], "%Y-%m-%d")
-        months = (near_dt - peak_dt).days / 30.4375
+        developing_dt = datetime.strptime(dates[developing_i], "%Y-%m-%d")
+        months = (developing_dt - peak_dt).days / 30.4375
         if months < 3:
             continue
         breakout_i = next((j for j in range(eligible, n) if values[j] >= peak * .98), None)
         closeness = min(current / peak, peak / current)
-        candidates.append((closeness, months, peak, i, trough_i, near_i,
+        candidates.append((closeness, months, peak, i, trough_i, developing_i, near_i,
                            breakout_i, drawdown))
 
     weekly = {}
@@ -1757,10 +1804,11 @@ def analyze_breakout_structure(rows, lookback_sessions=None):
             "recent_period_days": recent_days, "chart": chart,
             "lookback_years": round((last_dt - first_dt).days / 365.25, 1)}
     if not candidates:
-        base["reason"] = "未同時找到「回落 20%、整理 3 個月、近期重回前高」"
+        base["stage"] = "none"
+        base["reason"] = "未同時找到「回落 20%、整理 3 個月、目前回到前高 80%」"
         return base
 
-    _close, months, peak, peak_i, trough_i, near_i, breakout_i, drawdown = \
+    _close, months, peak, peak_i, trough_i, developing_i, near_i, breakout_i, drawdown = \
         max(candidates, key=lambda x: (x[0], x[1]))
     def gain_at(pos):
         gains = []
@@ -1769,24 +1817,34 @@ def analyze_breakout_structure(rows, lookback_sessions=None):
                 gains.append((values[pos] / values[pos - days] - 1) * 100)
         return max(gains) if gains else float("-inf")
 
-    confirmation_i = next((j for j in range(near_i, n)
+    confirmation_i = next((j for j in range(near_i or developing_i, n)
                            if values[j] >= peak * .98 and gain_at(j) > 30), None)
-    end_i = confirmation_i if confirmation_i is not None else near_i
+    end_i = confirmation_i if confirmation_i is not None else (near_i or developing_i)
+    progress = current / peak
+    stage = ("matched" if confirmation_i is not None else
+             "near" if progress >= .90 else "developing")
     base.update({
         "matched": confirmation_i is not None,
+        "stage": stage,
         "prior_high": round(peak, 2),
         "prior_high_date": dates[peak_i].replace("-", "/"),
         "trough": round(values[trough_i], 2),
         "trough_date": dates[trough_i].replace("-", "/"),
         "max_drawdown_pct": round(drawdown, 1),
         "consolidation_months": max(3, int(round(months))),
-        "near_high_date": dates[near_i].replace("-", "/"),
-        "early_warning_date": dates[near_i].replace("-", "/"),
+        "development_date": dates[developing_i].replace("-", "/"),
+        "near_high_date": (dates[near_i].replace("-", "/")
+                           if near_i is not None else None),
+        "early_warning_date": (dates[near_i].replace("-", "/")
+                               if near_i is not None else None),
         "confirmation_date": (dates[confirmation_i].replace("-", "/")
                               if confirmation_i is not None else None),
         "signal_lead_days": ((datetime.strptime(dates[confirmation_i], "%Y-%m-%d") -
                               datetime.strptime(dates[near_i], "%Y-%m-%d")).days
-                             if confirmation_i is not None else None),
+                             if confirmation_i is not None and near_i is not None else None),
+        "development_lead_days": ((datetime.strptime(dates[confirmation_i], "%Y-%m-%d") -
+                                    datetime.strptime(dates[developing_i], "%Y-%m-%d")).days
+                                   if confirmation_i is not None else None),
         "breakout_date": (dates[breakout_i][:7].replace("-", "/")
                           if breakout_i is not None else None),
         "post_breakout_gain_pct": round((current / peak - 1) * 100, 1),
@@ -1794,13 +1852,58 @@ def analyze_breakout_structure(rows, lookback_sessions=None):
             values[peak_i:end_i + 1],
             allow_short=bool(lookback_sessions and int(lookback_sessions) <= 252)),
         "markers": {"peak": dates[peak_i], "trough": dates[trough_i],
-                    "warning": dates[near_i],
+                    "development": dates[developing_i],
+                    "warning": dates[near_i] if near_i is not None else None,
                     "confirmation": dates[confirmation_i] if confirmation_i is not None else None,
                     "breakout": dates[breakout_i] if breakout_i is not None else None},
+        **_structure_progress_metrics(values, peak_i, trough_i),
     })
-    if confirmation_i is None:
+    if stage == "developing":
+        base["reason"] = "已回到前高 80%～90% 的結構發展區，尚未進入 90% 接近完成區"
+    elif confirmation_i is None:
         base["reason"] = "已進入前高 90% 的提早觀察區，尚未同時達成前高 98% 與 30% 動能確認"
     return base
+
+
+def replay_breakout_structure(rows, lookback_sessions=None,
+                              target_prior_high_date=None, start_date=None):
+    """Point-in-time replay: each run only receives data available that day."""
+    clean = {}
+    for row in rows or []:
+        try:
+            day, value = str(row[0])[:10], float(row[1])
+            datetime.strptime(day, "%Y-%m-%d")
+            if value > 0:
+                clean[day] = value
+        except (TypeError, ValueError, IndexError):
+            continue
+    points = sorted(clean.items())
+    target = str(target_prior_high_date or "").replace("-", "/")
+    start_at = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+    minimum = 110 if lookback_sessions and int(lookback_sessions) <= 126 else 252
+    milestones, timeline = {}, []
+    for end in range(minimum - 1, len(points)):
+        result = analyze_breakout_structure(points[:end + 1], lookback_sessions)
+        stage = breakout_structure_status(result)
+        day = datetime.strptime(points[end][0], "%Y-%m-%d")
+        if start_at is not None and day < start_at:
+            continue
+        same_structure = not target or result.get("prior_high_date") == target
+        timeline.append({"date": points[end][0], "stage": stage,
+                         "same_structure": same_structure})
+        if not same_structure:
+            continue
+        if stage in ("developing", "near", "matched"):
+            milestones.setdefault("developing", points[end][0])
+        if stage in ("near", "matched"):
+            milestones.setdefault("near", points[end][0])
+        if stage == "matched":
+            milestones.setdefault("matched", points[end][0])
+        if stage == "matched":
+            break
+    return {"target_prior_high_date": target or None, "start_date": start_date,
+            "milestones": milestones, "timeline": timeline,
+            "no_future_data": True}
 
 
 def breakout_structure_status(data):
@@ -1809,6 +1912,8 @@ def breakout_structure_status(data):
         return "unavailable"
     if data.get("matched"):
         return "matched"
+    if data.get("stage") in ("near", "developing", "none"):
+        return data["stage"]
     if data.get("prior_high") is not None:
         return "near"
     return "none"
@@ -1847,7 +1952,11 @@ def breakout_structure_period_result(row, period):
 
 def _structure_filter_pass(data, mode):
     state = breakout_structure_status(data)
-    return state in (("matched", "near") if mode == "qualified" else (mode,))
+    if mode == "qualified":
+        return state in ("matched", "near")
+    if mode == "all_stages":
+        return state in ("matched", "near", "developing")
+    return state == mode
 
 
 def _pattern_filter_pass(data, mode):
@@ -1859,12 +1968,14 @@ def _pattern_filter_pass(data, mode):
     return bool(labels.intersection(("U 型底", "杯柄")))
 
 
-def get_breakout_structure_screen(period="5y", status="qualified", pattern="u_or_cup"):
+def get_breakout_structure_screen(period="5y", status="all_stages", pattern="u_or_cup"):
     period = period if period in STRUCTURE_PERIODS else "5y"
-    status = status if status in ("matched", "near", "qualified") else "qualified"
+    status = status if status in ("matched", "near", "developing", "qualified",
+                                  "all_stages") else "all_stages"
     pattern = pattern if pattern in ("u", "cup", "u_or_cup") else "u_or_cup"
     seeded, meta = _load_breakout_structure_seed()
-    results, counts = [], {"matched": 0, "near": 0, "none": 0, "unavailable": 0}
+    results, counts = [], {"matched": 0, "near": 0, "developing": 0,
+                           "none": 0, "unavailable": 0}
     for symbol, source in seeded.items():
         value = breakout_structure_period_result(source, period)
         state = breakout_structure_status(value)
@@ -1877,7 +1988,8 @@ def get_breakout_structure_screen(period="5y", status="qualified", pattern="u_or
                         "sector": source.get("sector") or "-",
                         "sector_zh": source.get("sector_zh") or source.get("sector") or "-",
                         "structure_status": state, "structure": value})
-    results.sort(key=lambda r: (0 if r["structure_status"] == "matched" else 1,
+    results.sort(key=lambda r: ({"matched": 0, "near": 1, "developing": 2}.get(
+                                    r["structure_status"], 3),
                                 r.get("rank") or 9999, r["symbol"]))
     return {"as_of": meta.get("as_of"), "universe": meta.get("universe") or len(seeded),
             "period": period, "status_filter": status, "pattern_filter": pattern,
@@ -5093,6 +5205,7 @@ __SEO_HEAD__
   .structure-details > summary::before{content:'▸';font-size:10px}.structure-details[open]>summary::before{content:'▾'}
   .structure-details > summary.structure-hit{background:rgba(61,139,103,.12);border-color:rgba(61,139,103,.42);color:#2f7657}
   .structure-details > summary.structure-near{background:rgba(211,154,44,.14);border-color:rgba(211,154,44,.48);color:#8a6200}
+  .structure-details > summary.structure-developing{background:rgba(180,103,42,.11);border-color:rgba(180,103,42,.42);color:#9a5524}
   .structure-details > summary.structure-miss{background:rgba(190,66,49,.10);border-color:rgba(190,66,49,.35);color:var(--up)}
   .structure-panel { width:min(680px,82vw); margin-top:8px; padding:13px; border-radius:14px;
     background:var(--foam); border:1px solid var(--grounds); box-shadow:var(--shadow); color:var(--espresso); }
@@ -5119,7 +5232,7 @@ __SEO_HEAD__
   .structure-screen-head small{display:block;color:var(--mocha);font-size:10.5px}.structure-screen-head b{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--espresso)}
   .structure-screen-company b{font-family:var(--font-head);font-size:15px}.structure-screen-company span{margin-right:7px;color:var(--caramel-2);font-family:var(--font-num)}
   .structure-screen-item>.structure-details{margin-top:10px}.structure-screen-item .structure-panel{width:100%;box-sizing:border-box;box-shadow:none}
-  .structure-screen-badge{padding:6px 10px;border-radius:999px;font-size:12px;font-weight:800;white-space:nowrap}.structure-screen-badge.matched{background:rgba(61,139,103,.12);color:#2f7657}.structure-screen-badge.near{background:rgba(211,154,44,.16);color:#8a6200}
+  .structure-screen-badge{padding:6px 10px;border-radius:999px;font-size:12px;font-weight:800;white-space:nowrap}.structure-screen-badge.matched{background:rgba(61,139,103,.12);color:#2f7657}.structure-screen-badge.near{background:rgba(211,154,44,.16);color:#8a6200}.structure-screen-badge.developing{background:rgba(180,103,42,.13);color:#9a5524}
   @media(max-width:700px){.structure-screen-controls{grid-template-columns:1fr}.structure-screen-head{grid-template-columns:54px minmax(0,1fr) auto}.structure-screen-sector{display:none}.structure-screen-item{padding:11px}.structure-screen-badge{padding:5px 8px;font-size:11px}}
   .scard .structure-panel{width:100%;box-shadow:none}.scard .structure-details{grid-column:1/-1;margin-top:7px}
   /* RS 電腦版：股票摘要列搭配全寬結構面板，不把長期圖表塞進表格欄位。 */
@@ -5738,11 +5851,11 @@ __QUOTES_HTML__
   <h2 class="ptitle" data-i18n="structureScreen.title">飆股結構回測</h2>
   <details class="pgintro" open>
     <summary data-i18n="structureScreen.introT">回看前高、深度整理與重新轉強的完整路徑</summary>
-    <div class="pgintro-b" data-i18n-html="structureScreen.intro"><p>從目前市值前 300 大美股中，回看所選的最近 6 個月、1 年、2 年或 5 年。依序尋找重要前高、高點後至少 20% 回落、至少 3 個月整理，以及重新接近或突破前高。</p><p>價格第一次回到前高 90% 範圍以黃色「結構接近完成」預警；之後同時到達前高 98% 且近 1～3 個月動能超過 30%，才轉為綠色「結構符合」。U 型底與杯柄是收盤輪廓候選，不是未來預測。</p></div>
+    <div class="pgintro-b" data-i18n-html="structureScreen.intro"><p>從目前市值前 300 大美股中，回看所選的最近 6 個月、1 年、2 年或 5 年。依序尋找重要前高、高點後至少 20% 回落、至少 3 個月整理，以及重新接近或突破前高。</p><p>回到前高 80%～90% 先列為橘色「結構發展中」，90%～98% 為黃色「結構接近完成」；到達前高 98% 且近 1～3 個月動能超過 30%，才轉為綠色「結構符合」。同時顯示右側低點、波動收縮及 20／60 日均線方向，日期可用逐日無未來資料回放驗證。</p></div>
   </details>
   <div class="structure-screen-controls">
     <label><span data-i18n="structureScreen.period">回測期間</span><select id="structurePeriod"><option value="6m" data-i18n="structureScreen.6m">6 個月</option><option value="1y" data-i18n="structureScreen.1y">1 年</option><option value="2y" data-i18n="structureScreen.2y">2 年</option><option value="5y" data-i18n="structureScreen.5y" selected>5 年</option></select></label>
-    <label><span data-i18n="structureScreen.status">完成程度</span><select id="structureStatus"><option value="matched" data-i18n="structureScreen.matched">結構符合</option><option value="near" data-i18n="structureScreen.near">結構接近完成</option><option value="qualified" data-i18n="structureScreen.qualified" selected>符合或接近完成</option></select></label>
+    <label><span data-i18n="structureScreen.status">完成程度</span><select id="structureStatus"><option value="developing" data-i18n="structureScreen.developing">結構發展中</option><option value="near" data-i18n="structureScreen.near">結構接近完成</option><option value="matched" data-i18n="structureScreen.matched">結構符合</option><option value="all_stages" data-i18n="structureScreen.allStages" selected>全部結構候選</option><option value="qualified" data-i18n="structureScreen.qualified">符合或接近完成</option></select></label>
     <label><span data-i18n="structureScreen.pattern">型態</span><select id="structurePattern"><option value="u" data-i18n="structureScreen.u">U 型底</option><option value="cup" data-i18n="structureScreen.cup">杯柄</option><option value="u_or_cup" data-i18n="structureScreen.uOrCup" selected>U 型底或杯柄</option></select></label>
   </div>
   <button class="gobtn" id="structureRun" data-i18n="structureScreen.run">開始回測篩選</button>
@@ -6450,12 +6563,13 @@ const I18N = { en: {
   "screen.structure": "Trace pre-breakout structure (1–5 years)",
   "structureScreen.title": "Breakout Structure Backtest",
   "structureScreen.introT": "Trace the full path from prior high through a deep base and renewed strength",
-  "structureScreen.intro": "<p>Review the 300 largest US stocks over six months, one year, two years or five years. The screen looks for a prior high, a drawdown of at least 20%, at least three months of consolidation, and a return toward that high.</p><p>A first close within 90% of the prior high is a yellow early warning. Green requires a close at 98% or higher plus a best 1–3 month gain above 30%. U-shaped bases and cups are heuristic closing-price outlines, not forecasts.</p>",
+  "structureScreen.intro": "<p>Review the 300 largest US stocks over six months, one year, two years or five years.</p><p>80–90% of the prior high is Structure Developing, 90–98% is Nearly Complete, and green Match requires 98% plus over 30% momentum. Higher lows, volatility contraction and rising 20/60-day averages are shown as early diagnostics. Milestones can be verified by point-in-time replay without future data.</p>",
   "structureScreen.period": "Backtest period", "structureScreen.status": "Completion status",
   "structureScreen.pattern": "Pattern", "structureScreen.run": "Run structure screen",
   "structureScreen.6m": "6 months", "structureScreen.1y": "1 year",
   "structureScreen.2y": "2 years", "structureScreen.5y": "5 years",
   "structureScreen.matched": "Structure matched", "structureScreen.near": "Structure nearly complete",
+  "structureScreen.developing": "Structure developing", "structureScreen.allStages": "All structure candidates",
   "structureScreen.qualified": "Matched or nearly complete",
   "structureScreen.u": "U-shaped base", "structureScreen.cup": "Cup",
   "structureScreen.uOrCup": "U-shaped base or cup",
@@ -6959,10 +7073,11 @@ function structurePanel(s){
   const d=s&&s.structure;if(!d)return "";
   const summary=!d.available?(LANG==="en"?"Unavailable":"無法回溯")
     :d.matched?(LANG==="en"?"✓ Structure match":"✓ 結構符合")
+    :d.stage==="developing"?(LANG==="en"?"Structure developing":"結構發展中")
     :(d.prior_high!=null?(LANG==="en"?"Structure nearly complete":"結構接近完成"):(LANG==="en"?"Not formed":"未形成"));
-  const summaryClass=!d.available?"":d.matched?"structure-hit":d.prior_high!=null?"structure-near":"structure-miss";
+  const summaryClass=!d.available?"":d.matched?"structure-hit":d.stage==="developing"?"structure-developing":d.prior_high!=null?"structure-near":"structure-miss";
   const reasonText=!d.reason?"":LANG==="en"
-    ?(!d.available?"Long-term prices are unavailable or contain a suspected split discontinuity.":d.prior_high==null?"The 20% drawdown, three-month base and recent return to the prior high were not all found.":"The earlier structure qualifies, but the best 1–3 month gain has not exceeded 30%.")
+    ?(!d.available?"Long-term prices are unavailable or contain a suspected split discontinuity.":d.prior_high==null?"The 20% drawdown, three-month base and return to 80% of the prior high were not all found.":d.stage==="developing"?"Price is at 80–90% of the prior high: developing, but not yet nearly complete.":"Price is at 90–98% of the prior high, but has not yet combined 98% proximity with over 30% momentum.")
     :d.reason;
   const reason=reasonText?`<div class="structure-reason">${screenEsc(reasonText)}</div>`:"";
   if(!d.available)return `<details class="structure-details"><summary>${summary}</summary><div class="structure-panel">${reason}</div></details>`;
@@ -6974,6 +7089,12 @@ function structurePanel(s){
     <div class="structure-metric"><small>${LANG==="en"?"Prior high":"前期高點"} · ${d.prior_high_date||""}</small><b>${structureNumber(d.prior_high,"$")}</b></div>
     <div class="structure-metric"><small>${LANG==="en"?"Max drawdown":"最大跌幅"} · ${d.trough_date||""}</small><b>${structureNumber(d.max_drawdown_pct,"","%")}</b></div>
     <div class="structure-metric"><small>${LANG==="en"?"Consolidation":"整理時間"}</small><b>${structureNumber(d.consolidation_months,"",LANG==="en"?" months":" 個月")}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"First developing":"首次發展中"}</small><b>${d.development_date||"—"}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"Earliest warning":"最早預警日"}</small><b>${d.early_warning_date||d.near_high_date||"—"}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"Confirmation":"確認日"}</small><b>${d.confirmation_date||(LANG==="en"?"Not yet":"尚未確認")}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"Developing lead":"發展中提前"}</small><b>${d.development_lead_days==null?"—":d.development_lead_days+(LANG==="en"?" days":" 天")}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"Progress to high":"距前高進度"}</small><b>${structureNumber(d.progress_to_prior_high_pct,"","%")}</b></div>
+    <div class="structure-metric"><small>${LANG==="en"?"Early diagnostics":"早期診斷"}</small><b>${d.early_signal_score==null?"—":d.early_signal_score+" / "+d.early_signal_total}</b></div>
     <div class="structure-metric"><small>${LANG==="en"?"Breakout month":"突破時間"}</small><b>${d.breakout_date||(LANG==="en"?"Not yet":"尚未突破")}</b></div>
     <div class="structure-metric"><small>${LANG==="en"?"Vs prior high":"突破後漲幅"}</small><b>${post}</b></div>
   </div>`:`<div class="structure-metrics"><div class="structure-metric"><small>${LANG==="en"?"Best 1–3M gain":"近 1～3 月最大漲幅"}</small><b>${gain}</b></div><div class="structure-metric"><small>${LANG==="en"?"History available":"可回溯期間"}</small><b>${d.lookback_years||"—"} ${LANG==="en"?"years":"年"}</b></div></div>`;
@@ -6996,7 +7117,7 @@ function initStructureChart(box){
     const grid=[hi,(hi+lo)/2,lo].map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grounds)" stroke-dasharray="4 3"/><text x="${L-5}" y="${y(v)+3}" text-anchor="end" font-size="10" fill="var(--mocha)">${v.toFixed(v>=100?0:1)}</text>`).join("");
     const pts=visible.map((r,k)=>`${x(start+k).toFixed(1)},${y(Number(r[1])).toFixed(1)}`).join(" ");
     const highLine=Number.isFinite(high)&&high>=lo&&high<=hi?`<line x1="${L}" x2="${W-R}" y1="${y(high)}" y2="${y(high)}" stroke="#a66b45" stroke-width="1.2" stroke-dasharray="6 4"/><text x="${W-R-3}" y="${y(high)-4}" text-anchor="end" font-size="10" fill="#a66b45">${LANG==="en"?"Prior high":"前高"} ${high}</text>`:"";
-    const markerSpec=[["peak","前高","#a66b45"],["trough","低點","#3d8b67"],["warning","預警","#d39a2c"],["confirmation","確認","#2f7657"]];let marks="";markerSpec.forEach(([key,zh,color])=>{const i=nearestDate(markers[key],start,start+win);if(i>=start&&i<start+win){const v=Number(rows[i][1]);marks+=`<circle cx="${x(i)}" cy="${y(v)}" r="4" fill="${color}" stroke="#fff" stroke-width="1.5"/><text x="${x(i)}" y="${Math.max(11,y(v)-7)}" text-anchor="middle" font-size="9.5" fill="${color}">${LANG==="en"?{peak:"High",trough:"Low",warning:"Warning",confirmation:"Confirmed"}[key]:zh}</text>`}});
+    const markerSpec=[["peak","前高","#a66b45"],["trough","低點","#3d8b67"],["development","發展中","#b4672a"],["warning","預警","#d39a2c"],["confirmation","確認","#2f7657"]];let marks="";markerSpec.forEach(([key,zh,color])=>{const i=nearestDate(markers[key],start,start+win);if(i>=start&&i<start+win){const v=Number(rows[i][1]);marks+=`<circle cx="${x(i)}" cy="${y(v)}" r="4" fill="${color}" stroke="#fff" stroke-width="1.5"/><text x="${x(i)}" y="${Math.max(11,y(v)-7)}" text-anchor="middle" font-size="9.5" fill="${color}">${LANG==="en"?{peak:"High",trough:"Low",development:"Developing",warning:"Warning",confirmation:"Confirmed"}[key]:zh}</text>`}});
     box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" aria-label="${LANG==="en"?"Draggable pre-breakout closing-price chart":"可拖曳的飆股前期收盤價圖"}">${grid}${highLine}<polyline points="${pts}" fill="none" stroke="var(--caramel-2)" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>${marks}<line class="structure-guide" y1="${T}" y2="${H-B}" stroke="var(--espresso)" opacity="0"/><circle class="structure-dot" r="4" fill="var(--caramel-2)" stroke="#fff" stroke-width="1.5" opacity="0"/><text x="${L}" y="${H-6}" font-size="10" fill="var(--mocha)">${visible[0][0].slice(0,7)}</text><text x="${W-R}" y="${H-6}" text-anchor="end" font-size="10" fill="var(--mocha)">${visible.at(-1)[0].slice(0,7)}</text></svg>`;
     range.textContent=`${visible[0][0].slice(0,7)} — ${visible.at(-1)[0].slice(0,7)}`;wire();
   }
@@ -7020,11 +7141,11 @@ function renderBreakoutStructureScreen(data){
   const rows=data.results||[],periodNames={"6m":LANG==="en"?"6 months":"6 個月","1y":LANG==="en"?"1 year":"1 年","2y":LANG==="en"?"2 years":"2 年","5y":LANG==="en"?"5 years":"5 年"};
   status.textContent=LANG==="en"?`${rows.length} candidates from ${data.universe||300} stocks · ${periodNames[data.period]||data.period} · as of ${data.as_of||"—"}`:`市值前 ${data.universe||300} 大中找到 ${rows.length} 檔候選・回測 ${periodNames[data.period]||data.period}・資料截至 ${data.as_of||"—"}`;
   if(!rows.length){box.innerHTML=`<div class="concl gray">${LANG==="en"?"No candidate matches all selected filters.":"沒有同時符合目前完成程度與型態的候選。"}</div>`;return}
-  box.innerHTML=rows.map(r=>{const state=r.structure_status,label=state==="matched"?(LANG==="en"?"Structure match":"結構符合"):(LANG==="en"?"Nearly complete":"結構接近完成"),name=LANG==="en"?r.name:(r.name_zh||r.name),sector=LANG==="en"?r.sector:(r.sector_zh||r.sector);return `<article class="structure-screen-item"><div class="structure-screen-head"><div><small>${LANG==="en"?"Cap rank":"市值排名"}</small><b>#${r.rank||"—"}</b></div><div class="structure-screen-company"><small>${LANG==="en"?"Company":"公司名稱"}</small><b><span>${screenEsc(r.symbol)}</span>${screenEsc(name)}</b></div><div class="structure-screen-sector"><small>${LANG==="en"?"Sector":"產業"}</small><b>${screenEsc(sector)}</b></div><span class="structure-screen-badge ${state}">${label}</span></div>${structurePanel({structure:r.structure})}</article>`}).join("");
+  box.innerHTML=rows.map(r=>{const state=r.structure_status,label=state==="matched"?(LANG==="en"?"Structure match":"結構符合"):state==="developing"?(LANG==="en"?"Structure developing":"結構發展中"):(LANG==="en"?"Nearly complete":"結構接近完成"),name=LANG==="en"?r.name:(r.name_zh||r.name),sector=LANG==="en"?r.sector:(r.sector_zh||r.sector);return `<article class="structure-screen-item"><div class="structure-screen-head"><div><small>${LANG==="en"?"Cap rank":"市值排名"}</small><b>#${r.rank||"—"}</b></div><div class="structure-screen-company"><small>${LANG==="en"?"Company":"公司名稱"}</small><b><span>${screenEsc(r.symbol)}</span>${screenEsc(name)}</b></div><div class="structure-screen-sector"><small>${LANG==="en"?"Sector":"產業"}</small><b>${screenEsc(sector)}</b></div><span class="structure-screen-badge ${state}">${label}</span></div>${structurePanel({structure:r.structure})}</article>`}).join("");
   setupStructureCharts(box);
 }
 async function loadBreakoutStructureScreen(force=false){
-  const period=$("#structurePeriod")?.value||"5y",statusFilter=$("#structureStatus")?.value||"qualified",pattern=$("#structurePattern")?.value||"u_or_cup",sig=[period,statusFilter,pattern].join("|");
+  const period=$("#structurePeriod")?.value||"5y",statusFilter=$("#structureStatus")?.value||"all_stages",pattern=$("#structurePattern")?.value||"u_or_cup",sig=[period,statusFilter,pattern].join("|");
   if(!force&&STRUCTURE_SCREEN_DATA&&STRUCTURE_SCREEN_SIGNATURE===sig){renderBreakoutStructureScreen(STRUCTURE_SCREEN_DATA);return}
   const status=$("#structureScreenStatus"),box=$("#structureScreenResult");if(!status||!box)return;status.textContent=LANG==="en"?"Reading the offline structure backtest…":"讀取離線飆股結構回測…";box.innerHTML="";
   try{const d=await readJson(await fetch(`/api/breakout-structure?period=${encodeURIComponent(period)}&status=${encodeURIComponent(statusFilter)}&pattern=${encodeURIComponent(pattern)}`));if(!d.ok)throw Error(d.error||"No data");STRUCTURE_SCREEN_DATA=d;STRUCTURE_SCREEN_SIGNATURE=sig;renderBreakoutStructureScreen(d)}catch(e){status.textContent="";box.innerHTML=`<div class="concl gray">${LANG==="en"?"Structure data is temporarily unavailable.":"飆股結構資料暫時無法使用。"}</div>`}
@@ -11072,7 +11193,7 @@ def api_screen():
 def api_breakout_structure():
     """六個月～五年的 U 型底／杯柄候選；只讀離線回測種子。"""
     data = get_breakout_structure_screen(
-        request.args.get("period", "5y"), request.args.get("status", "qualified"),
+        request.args.get("period", "5y"), request.args.get("status", "all_stages"),
         request.args.get("pattern", "u_or_cup"))
     if not data.get("universe"):
         return jsonify(ok=False, error="飆股結構資料尚未建立"), 503

@@ -1,14 +1,17 @@
 {
-  "contract_version": "2026-08-28.1",
+  "contract_version": "2026-08-30.1",
   "breakout_structure": {
     "universe": 300,
     "independent_page": "/breakout-structure",
     "periods": ["6m", "1y", "2y", "5y"],
-    "statuses": ["matched", "near", "none", "unavailable"],
-    "screen_filters": ["matched", "near", "qualified"],
+    "statuses": ["matched", "near", "developing", "none", "unavailable"],
+    "screen_filters": ["matched", "near", "developing", "qualified", "all_stages"],
     "pattern_filters": ["u", "cup", "u_or_cup"],
+    "developing": "current close at 80% to below 90% of prior high",
     "near": "first close at or above 90% of prior high",
     "matched": "first close at or above 98% of prior high with best 20/40/60-day gain above 30%",
+    "point_in_time_replay": true,
+    "early_diagnostics": ["right_side_higher_lows", "volatility_contracting", "ma20_rising", "ma60_rising"],
     "seed_file": "breakout_structure_seed.json"
   },
   "risk_watchlist": {

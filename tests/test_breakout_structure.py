@@ -63,6 +63,20 @@ class BreakoutStructureTest(unittest.TestCase):
         self.assertIsNotNone(result.get("prior_high"))
         self.assertIn("30%", result["reason"])
 
+    def test_developing_stage_starts_at_eighty_percent(self):
+        result = app.analyze_breakout_structure(rounded_base(final_price=85))
+        self.assertEqual(app.breakout_structure_status(result), "developing")
+        self.assertGreaterEqual(result["progress_to_prior_high_pct"], 80)
+        self.assertLess(result["progress_to_prior_high_pct"], 90)
+        self.assertIsNotNone(result["development_date"])
+
+    def test_point_in_time_replay_orders_three_stages(self):
+        replay = app.replay_breakout_structure(rounded_base())
+        milestones = replay["milestones"]
+        self.assertTrue(replay["no_future_data"])
+        self.assertLess(milestones["developing"], milestones["near"])
+        self.assertLess(milestones["near"], milestones["matched"])
+
     def test_suspected_split_discontinuity_is_rejected(self):
         rows = rounded_base()
         for row in rows[400:]:

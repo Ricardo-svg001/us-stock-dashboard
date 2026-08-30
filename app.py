@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.28.3"
+APP_VERSION = "2026.08.30.1"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -2371,23 +2371,142 @@ def screen_pro_new_high(days=1, status_cb=None):
 # ---------------------------------------------------------------- 背景工作
 
 JOBS = {}
+_JOBS_LOCK = threading.RLock()
+_JOB_KEYS = {}
+JOB_TTL_SEC = int(os.environ.get("JOB_TTL_SEC", "3600"))
+JOB_MAX_RETAINED = int(os.environ.get("JOB_MAX_RETAINED", "100"))
+
+# 選股與完整預抓都會載入大量歷史資料，必須共用同一個單工閘門。
+_HEAVY_GATE = threading.Lock()
+_HEAVY_OWNER = {"kind": None}
+
+
+def _memory_info():
+    """回傳目前 process RSS 與容器上限；取不到時安全地省略欄位。"""
+    out = {}
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    out["used_mb"] = round(int(line.split()[1]) / 1024, 1)
+                    break
+    except Exception:
+        pass
+    for path in ("/sys/fs/cgroup/memory.max",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as f:
+                value = f.read().strip()
+            if value.isdigit() and int(value) < (1 << 60):
+                out["limit_mb"] = round(int(value) / 1024 / 1024)
+                break
+        except Exception:
+            pass
+    if out.get("used_mb") and out.get("limit_mb"):
+        out["used_pct"] = round(out["used_mb"] / out["limit_mb"] * 100)
+    return out or None
+
+
+def _job_key(fn, params):
+    body = json.dumps(params or {}, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, default=str)
+    return "%s:%s" % (getattr(fn, "__name__", "job"),
+                       hashlib.sha256(body.encode("utf-8")).hexdigest())
+
+
+def _cleanup_jobs(now=None):
+    """完成工作保留一小時且最多 100 筆；執行中的工作不清除。"""
+    now = now or time.time()
+    terminal = []
+    with _JOBS_LOCK:
+        for jid, job in list(JOBS.items()):
+            if not job.get("done"):
+                continue
+            ended = float(job.get("_ended_ts") or job.get("_created_ts") or now)
+            terminal.append((ended, jid))
+            if now - ended > JOB_TTL_SEC:
+                JOBS.pop(jid, None)
+        terminal = sorted((ts, jid) for ts, jid in terminal if jid in JOBS)
+        for _ts, jid in terminal[:max(0, len(JOBS) - JOB_MAX_RETAINED)]:
+            JOBS.pop(jid, None)
+        for key, jid in list(_JOB_KEYS.items()):
+            if jid not in JOBS or JOBS[jid].get("done"):
+                _JOB_KEYS.pop(key, None)
 
 
 def start_job(fn, params):
-    jid = uuid.uuid4().hex[:12]
-    JOBS[jid] = {"status": "排隊中…", "done": False, "progress": 0}
+    now, key = time.time(), _job_key(fn, params)
+    _cleanup_jobs(now)
+    with _JOBS_LOCK:
+        existing = _JOB_KEYS.get(key)
+        if existing and existing in JOBS and not JOBS[existing].get("done"):
+            return existing
+
+        jid = uuid.uuid4().hex[:12]
+        job = {"status": "排隊中…", "done": False, "progress": 0,
+               "_created_ts": now,
+               "created_at": _utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")}
+        if _HEAVY_GATE.locked():
+            owner = _HEAVY_OWNER.get("kind")
+            job.update(status="失敗", done=True,
+                       error=("背景資料正在更新，請稍後再試。" if owner == "prefetch"
+                              else "已有一個選股任務執行中，請稍後再試。"),
+                       _ended_ts=now,
+                       ended_at=_utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"))
+            JOBS[jid] = job
+            return jid
+        JOBS[jid] = job
+        _JOB_KEYS[key] = jid
 
     def run():
-        try:
-            def cb(i, total):
-                JOBS[jid]["status"] = "讀取股價資料 %d / %d" % (i, total)
-                JOBS[jid]["progress"] = int(i * 100 / max(1, total))
-            JOBS[jid]["result"] = fn(status_cb=cb, **params)
-            JOBS[jid].update(status="完成", done=True, progress=100)
-        except Exception as e:
-            JOBS[jid].update(status="失敗", done=True, error=str(e)[:200])
+        acquired = False
+        stop = threading.Event()
 
-    threading.Thread(target=run, daemon=True).start()
+        def sample_memory():
+            while not stop.wait(0.25):
+                used = (_memory_info() or {}).get("used_mb")
+                if used is not None:
+                    with _JOBS_LOCK:
+                        if jid in JOBS:
+                            JOBS[jid]["memory_peak_mb"] = max(
+                                float(JOBS[jid].get("memory_peak_mb") or 0), float(used))
+        try:
+            acquired = _HEAVY_GATE.acquire(blocking=False)
+            if not acquired:
+                job.update(status="失敗", done=True,
+                           error="資料更新或另一個選股任務正在執行，請稍後再試。")
+                return
+            _HEAVY_OWNER["kind"] = "job"
+            start_mem = (_memory_info() or {}).get("used_mb")
+            job["memory_start_mb"] = start_mem
+            job["memory_peak_mb"] = start_mem
+            threading.Thread(target=sample_memory, name="job-memory-monitor", daemon=True).start()
+
+            def cb(i, total):
+                job["status"] = "讀取股價資料 %d / %d" % (i, total)
+                job["progress"] = int(i * 100 / max(1, total))
+            job["result"] = fn(status_cb=cb, **params)
+            job.update(status="完成", done=True, progress=100)
+        except Exception as e:
+            job.update(status="失敗", done=True, error=str(e)[:200])
+        finally:
+            stop.set()
+            end_mem = (_memory_info() or {}).get("used_mb")
+            ended = time.time()
+            job["memory_end_mb"] = end_mem
+            if end_mem is not None:
+                job["memory_peak_mb"] = max(float(job.get("memory_peak_mb") or 0), float(end_mem))
+            job["_ended_ts"] = ended
+            job["ended_at"] = _utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            with _JOBS_LOCK:
+                if _JOB_KEYS.get(key) == jid:
+                    _JOB_KEYS.pop(key, None)
+            if acquired:
+                _HEAVY_OWNER["kind"] = None
+                _HEAVY_GATE.release()
+            _cleanup_jobs(ended)
+
+    threading.Thread(target=run, name="stock-job", daemon=True).start()
     return jid
 
 
@@ -4099,7 +4218,7 @@ def _phase_compute():
         return "unknown", "", "", None
 
 
-def prefetch(universe_n=300, force=False):
+def _prefetch_impl(universe_n=300, force=False):
     """啟動時先把清單與歷史抓好，使用者才不用等。
 
     ⚠️ **force=True 表示「這次一定要真的去抓」**，給收盤後的每日更新用。
@@ -4150,6 +4269,20 @@ def prefetch(universe_n=300, force=False):
         pass                      # 算不出來就讓首頁少一塊，不能拖垮整個預抓
     PREFETCH_STATE.update(stage="完成", done=True,
                           finished_at=_utcnow().strftime("%Y-%m-%d %H:%M UTC"))
+
+
+def prefetch(universe_n=300, force=False):
+    """完整預抓與互動式選股互斥，避免兩份歷史資料同時佔用記憶體。"""
+    if not _HEAVY_GATE.acquire(blocking=False):
+        PREFETCH_STATE.update(stage="已有選股或預抓任務進行中，這次跳過", done=False)
+        return False
+    _HEAVY_OWNER["kind"] = "prefetch"
+    try:
+        _prefetch_impl(universe_n, force=force)
+        return True
+    finally:
+        _HEAVY_OWNER["kind"] = None
+        _HEAVY_GATE.release()
 
 
 # ---------------------------------------------------------------- 每日自動更新
@@ -11102,7 +11235,9 @@ def api_market_years():
 
 @app.route("/api/job/<job_id>")
 def api_job(job_id):
-    j = JOBS.get(job_id)
+    _cleanup_jobs()
+    with _JOBS_LOCK:
+        j = JOBS.get(job_id)
     if not j:
         return jsonify(error="查無此工作"), 404
     return jsonify(j)
@@ -11134,6 +11269,19 @@ def api_prefetch_status():
     # 直接序列化會讓正式站這支端點固定回 500。
     st.pop("thread_obj", None)
     st["source"] = dict(LAST_SOURCE)
+    st["memory"] = _memory_info()
+    _cleanup_jobs()
+    with _JOBS_LOCK:
+        jobs = list(JOBS.values())
+        peaks = [float(j["memory_peak_mb"]) for j in jobs
+                 if j.get("memory_peak_mb") is not None]
+        st["jobs"] = {
+            "active": sum(1 for j in jobs if not j.get("done")),
+            "retained": len(jobs),
+            "heavy_running": _HEAVY_GATE.locked(),
+            "heavy_owner": _HEAVY_OWNER.get("kind"),
+            "highest_recent_peak_mb": max(peaks) if peaks else None,
+        }
     # cache_dir 用來確認 Render 的持久化磁碟有沒有掛上 ——
     # 若顯示的是專案目錄而不是磁碟路徑，代表 CACHE_DIR 沒設，
     # 快取會在每次部署後消失，等於每次都要重新預抓 6 分鐘。

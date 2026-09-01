@@ -40,40 +40,36 @@ class DeductionBacktestTest(unittest.TestCase):
                     and event["half_break"]["sessions"] <= sessions)
                 for event in self.result["events"])
             self.assertEqual(self.result["horizons"][months]["eligible"], expected)
-            mid_expected = sum(
-                event["followup_sessions"] >= sessions
-                or (event["mid_break"]["sessions"] is not None
-                    and event["mid_break"]["sessions"] <= sessions)
-                for event in self.result["events"])
-            self.assertEqual(self.result["horizons"][months]["mid_eligible"],
-                             mid_expected)
+            self.assertNotIn("mid_eligible", self.result["horizons"][months])
             self.assertNotIn("short_breaks", self.result["horizons"][months])
 
-    def test_backtest_contract_contains_100ma_and_150ma_breaks(self):
+    def test_backtest_contract_contains_only_150ma_breaks_and_drawdown(self):
         self.assertNotIn("short_median_months", self.result)
+        self.assertNotIn("mid_median_months", self.result)
         for event in self.result["events"]:
             self.assertNotIn("short_break", event)
-            self.assertIn("mid_break", event)
+            self.assertNotIn("mid_break", event)
             self.assertIn("half_break", event)
+            self.assertIn("max_drawdown_pct", event)
 
-    def test_every_reported_break_meets_three_day_five_percent_rule(self):
+    def test_every_reported_150ma_break_meets_three_day_five_percent_rule(self):
         ordered = sorted((date, float(close)) for date, close in self.history.items())
         dates = [row[0] for row in ordered]
         closes = [row[1] for row in ordered]
-        for period, key in ((100, "mid_break"), (150, "half_break")):
-            moving = {}
-            total = sum(closes[:period])
-            moving[dates[period - 1]] = total / period
-            for index in range(period, len(closes)):
-                total += closes[index] - closes[index - period]
-                moving[dates[index]] = total / period
-            for event in self.result["events"]:
-                end_date = event[key]["date"]
-                if not end_date:
-                    continue
-                end = dates.index(end_date)
-                for index in range(end - 2, end + 1):
-                    self.assertLessEqual(closes[index], moving[dates[index]] * 0.95)
+        period = 150
+        moving = {}
+        total = sum(closes[:period])
+        moving[dates[period - 1]] = total / period
+        for index in range(period, len(closes)):
+            total += closes[index] - closes[index - period]
+            moving[dates[index]] = total / period
+        for event in self.result["events"]:
+            end_date = event["half_break"]["date"]
+            if not end_date:
+                continue
+            end = dates.index(end_date)
+            for index in range(end - 2, end + 1):
+                self.assertLessEqual(closes[index], moving[dates[index]] * 0.95)
 
     def test_renewed_bull_confirmation_can_start_another_event(self):
         signals = {event["signal_date"] for event in self.result["events"]}
@@ -83,10 +79,17 @@ class DeductionBacktestTest(unittest.TestCase):
     def test_ten_to_twelve_month_breaks_are_included(self):
         event = next(row for row in self.result["events"]
                      if row["signal_date"] == "2021-03-08")
-        self.assertEqual(event["mid_break"]["date"], "2022-01-20")
         self.assertEqual(event["half_break"]["date"], "2022-01-24")
-        self.assertEqual(self.result["horizons"]["12"]["mid_pct"], 88.9)
         self.assertEqual(self.result["horizons"]["12"]["half_pct"], 83.3)
+
+    def test_drawdown_runs_from_break_until_three_day_150ma_reclaim(self):
+        event = next(row for row in self.result["events"]
+                     if row["signal_date"] == "2021-03-08")
+        self.assertEqual(event["half_recovery"]["date"], "2022-08-16")
+        self.assertEqual(event["half_recovery"]["sessions"], 141)
+        self.assertEqual(event["max_drawdown_pct"], -23.2)
+        self.assertEqual(event["low_date"], "2022-06-16")
+        self.assertEqual(self.result["max_drawdown_median_pct"], -13.5)
 
     def test_interface_explains_method_before_event_and_probability_tables(self):
         with app.app.test_client() as client:
@@ -97,6 +100,8 @@ class DeductionBacktestTest(unittest.TestCase):
         self.assertLess(conditions, events)
         self.assertLess(events, probabilities)
         self.assertIn("超過 12 個月後，與原始回檔的因果關聯已不足", body)
+        self.assertNotIn("已跌破 100MA", body)
+        self.assertIn("跌破後最大跌幅", body)
 
 
 if __name__ == "__main__":

@@ -41,11 +41,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.08.30.1"
+APP_VERSION = "2026.09.01.1"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 BREAKOUT_STRUCTURE_FILE = os.path.join(BASE_DIR, "breakout_structure_seed.json")
+INDUSTRY_TAXONOMY_FILE = os.path.join(BASE_DIR, "industry_taxonomy_seed.json")
+_INDUSTRY_TAXONOMY_MEMO = {"mtime": None, "data": None}
 STRUCTURE_VERSION = 3
 STRUCTURE_PERIODS = {"6m": 126, "1y": 252, "2y": 504, "5y": 1260}
 _BREAKOUT_STRUCTURE_MEMO = {"mtime": None, "rows": {}, "meta": {}}
@@ -3826,11 +3828,142 @@ def build_market_count_history(universe=None, histories=None):
     return out
 
 
-INDUSTRY_CACHE = "industry_analysis_v2.json"  # v2: prior-period change, concentration and full sector list
+INDUSTRY_CACHE = "industry_analysis_v3.json"  # v3: sub-industries, themes, reasons and overlaps
 INDUSTRY_MIN_SAMPLE = 5
 INDUSTRY_MA = 50
 INDUSTRY_NEW_HIGH_WINDOW = 60
 INDUSTRY_NEW_HIGH_TOL = 0.02
+
+
+def _load_industry_taxonomy():
+    """Read reviewed US theme labels. External candidates never enter production directly."""
+    try:
+        mtime = os.path.getmtime(INDUSTRY_TAXONOMY_FILE)
+        if _INDUSTRY_TAXONOMY_MEMO["mtime"] == mtime:
+            return _INDUSTRY_TAXONOMY_MEMO["data"]
+        with open(INDUSTRY_TAXONOMY_FILE, encoding="utf-8") as f:
+            payload = json.load(f)
+        if payload.get("schema_version") != 1:
+            raise ValueError("unsupported industry taxonomy schema")
+        by_symbol = {}
+        for group in payload.get("themes", []):
+            name = str(group.get("name") or "").strip()
+            if not name:
+                continue
+            reasons = group.get("reasons") or {}
+            for symbol, relevance in (group.get("members") or {}).items():
+                if relevance not in ("core", "important", "secondary"):
+                    continue
+                reason = reasons.get(symbol) or {}
+                if isinstance(reason, str):
+                    reason = {"en": reason}
+                by_symbol.setdefault(symbol, []).append({
+                    "name": name, "name_zh": group.get("name_zh") or name,
+                    "relevance": relevance, "source": group.get("source", "curated"),
+                    "reason_zh": str(reason.get("zh") or "").strip(),
+                    "reason_en": str(reason.get("en") or "").strip(),
+                })
+        data = {**payload, "by_symbol": by_symbol}
+        _INDUSTRY_TAXONOMY_MEMO.update(mtime=mtime, data=data)
+        return data
+    except Exception as exc:
+        return {"schema_version": 1, "as_of": None, "by_symbol": {},
+                "industry_names_zh": {},
+                "error": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def _industry_median(values):
+    ordered = sorted(float(v) for v in values)
+    n = len(ordered)
+    return ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
+
+
+def _build_industry_groups(raw, memberships, minimum_sample, kind):
+    grouped, relation, localized = {}, {}, {}
+    for row in raw:
+        for item in memberships(row):
+            if isinstance(item, str):
+                name, name_zh, relevance, reason_zh, reason_en = item, item, "core", "", ""
+            else:
+                name = str(item.get("name") or "").strip()
+                name_zh = str(item.get("name_zh") or name).strip()
+                relevance = item.get("relevance", "core")
+                reason_zh = str(item.get("reason_zh") or "").strip()
+                reason_en = str(item.get("reason_en") or "").strip()
+            if not name:
+                continue
+            grouped.setdefault(name, []).append(row)
+            localized[name] = name_zh
+            relation[(name, row["symbol"])] = {
+                "relevance": relevance, "reason_zh": reason_zh, "reason_en": reason_en}
+    groups = []
+    for name, rows in grouped.items():
+        if len(rows) < minimum_sample:
+            continue
+        med20 = _industry_median(r["ret20"] for r in rows)
+        med60 = _industry_median(r["ret60"] for r in rows)
+        old20 = [r["prev20"] for r in rows if r.get("prev20") is not None]
+        old60 = [r["prev60"] for r in rows if r.get("prev60") is not None]
+        prev_med20 = _industry_median(old20) if old20 else None
+        prev_med60 = _industry_median(old60) if old60 else None
+        positive = sorted((max(0.0, r["ret20"]) for r in rows), reverse=True)
+        positive_total = sum(positive)
+        concentration = sum(positive[:3]) / positive_total * 100 if positive_total > 0 else 0.0
+        quadrant = ("strong" if med20 >= 0 and med60 >= 0 else
+                    "recovery" if med20 >= 0 else
+                    "cooling" if med60 >= 0 else "weak")
+        leaders = sorted(rows, key=lambda r: (-r["rs60"], r["rank"]))[:5]
+
+        def stock_payload(row):
+            meta = relation.get((name, row["symbol"]), {})
+            return {"rank": row["rank"], "symbol": row["symbol"],
+                    "name": row["name"], "name_zh": row["name_zh"],
+                    "ret20": round(row["ret20"], 2), "ret60": round(row["ret60"], 2),
+                    "rs60": row["rs60"], "structure_status": row["structure_status"],
+                    "relevance": meta.get("relevance", "core"),
+                    "reason_zh": meta.get("reason_zh", ""),
+                    "reason_en": meta.get("reason_en", "")}
+
+        groups.append({
+            "name": name, "name_zh": localized.get(name, name), "kind": kind,
+            "count": len(rows), "median20": round(med20, 2), "median60": round(med60, 2),
+            "previous20": round(prev_med20, 2) if prev_med20 is not None else None,
+            "previous60": round(prev_med60, 2) if prev_med60 is not None else None,
+            "change20": round(med20 - prev_med20, 2) if prev_med20 is not None else None,
+            "change60": round(med60 - prev_med60, 2) if prev_med60 is not None else None,
+            "leader_concentration_pct": round(concentration, 1),
+            "winners20": sum(r["ret20"] > 0 for r in rows),
+            "win20_pct": round(sum(r["ret20"] > 0 for r in rows) / len(rows) * 100, 1),
+            "above50": sum(r["above50"] for r in rows),
+            "above50_pct": round(sum(r["above50"] for r in rows) / len(rows) * 100, 1),
+            "newhigh": sum(r["newhigh"] for r in rows),
+            "newhigh_pct": round(sum(r["newhigh"] for r in rows) / len(rows) * 100, 1),
+            "quadrant": quadrant,
+            "leaders": [stock_payload(r) for r in leaders],
+            "stocks": [stock_payload(r) for r in sorted(
+                rows, key=lambda x: (-x["ret20"], x["rank"]))],
+        })
+    groups.sort(key=lambda row: (-row["median20"], -row["median60"], row["name"]))
+    return groups
+
+
+def _attach_theme_overlaps(groups, minimum_shared=2, limit=5):
+    code_sets = {g["name"]: {s["symbol"] for s in g.get("stocks", [])} for g in groups}
+    for group in groups:
+        current, overlaps = code_sets[group["name"]], []
+        for other in groups:
+            if other is group:
+                continue
+            shared = sorted(current & code_sets[other["name"]])
+            if len(shared) < minimum_shared:
+                continue
+            overlaps.append({"name": other["name"], "name_zh": other["name_zh"],
+                             "count": len(shared),
+                             "pct": round(len(shared) / len(current) * 100, 1),
+                             "symbols": shared})
+        group["overlaps"] = sorted(
+            overlaps, key=lambda x: (-x["count"], -x["pct"], x["name"]))[:limit]
+    return groups
 
 
 def build_industry_analysis(universe=None, histories=None):
@@ -3872,6 +4005,7 @@ def build_industry_analysis(universe=None, histories=None):
             "rank": rank, "symbol": u["symbol"], "name": u.get("name") or u["symbol"],
             "name_zh": zh_company(u["symbol"], u.get("name") or u["symbol"]),
             "sector": sector, "sector_zh": zh_sector(sector), "close": round(last, 2),
+            "industry": str(u.get("industry") or "—").strip(),
             "ret20": (last / closes[-21] - 1) * 100,
             "ret60": (last / closes[-61] - 1) * 100,
             "prev20": ((closes[-21] / closes[-41] - 1) * 100
@@ -3888,65 +4022,58 @@ def build_industry_analysis(universe=None, histories=None):
     rs_scores = _percentile_scores({r["symbol"]: r["ret60"] for r in raw})
     for row in raw:
         row["rs60"] = int(rs_scores.get(row["symbol"], 1))
-
-    grouped = {}
+    structure_rows, structure_meta = _load_breakout_structure_seed()
     for row in raw:
-        grouped.setdefault(row["sector"], []).append(row)
+        row["structure_status"] = breakout_structure_status(
+            structure_rows.get(row["symbol"]))
 
-    def median(values):
-        ordered = sorted(float(v) for v in values)
-        n = len(ordered)
-        return ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
+    taxonomy = _load_industry_taxonomy()
+    industry_names_zh = taxonomy.get("industry_names_zh", {})
+    by_symbol = taxonomy.get("by_symbol", {})
 
-    industries = []
-    for name, rows in grouped.items():
-        if len(rows) < INDUSTRY_MIN_SAMPLE:
-            continue
-        med20 = median(r["ret20"] for r in rows)
-        med60 = median(r["ret60"] for r in rows)
-        old20 = [r["prev20"] for r in rows if r.get("prev20") is not None]
-        old60 = [r["prev60"] for r in rows if r.get("prev60") is not None]
-        prev_med20 = median(old20) if old20 else None
-        prev_med60 = median(old60) if old60 else None
-        positive = sorted((max(0.0, r["ret20"]) for r in rows), reverse=True)
-        positive_total = sum(positive)
-        concentration = sum(positive[:3]) / positive_total * 100 if positive_total > 0 else 0.0
-        quadrant = ("strong" if med20 >= 0 and med60 >= 0 else
-                    "recovery" if med20 >= 0 else
-                    "cooling" if med60 >= 0 else "weak")
-        leaders = sorted(rows, key=lambda r: (-r["rs60"], r["rank"]))[:5]
-        industries.append({
-            "name": name, "name_zh": zh_sector(name), "count": len(rows),
-            "median20": round(med20, 2), "median60": round(med60, 2),
-            "previous20": round(prev_med20, 2) if prev_med20 is not None else None,
-            "previous60": round(prev_med60, 2) if prev_med60 is not None else None,
-            "change20": round(med20 - prev_med20, 2) if prev_med20 is not None else None,
-            "change60": round(med60 - prev_med60, 2) if prev_med60 is not None else None,
-            "leader_concentration_pct": round(concentration, 1),
-            "winners20": sum(r["ret20"] > 0 for r in rows),
-            "win20_pct": round(sum(r["ret20"] > 0 for r in rows) / len(rows) * 100, 1),
-            "above50": sum(r["above50"] for r in rows),
-            "above50_pct": round(sum(r["above50"] for r in rows) / len(rows) * 100, 1),
-            "newhigh": sum(r["newhigh"] for r in rows),
-            "newhigh_pct": round(sum(r["newhigh"] for r in rows) / len(rows) * 100, 1),
-            "quadrant": quadrant,
-            "leaders": [{
-                "rank": r["rank"], "symbol": r["symbol"], "name": r["name"],
-                "name_zh": r["name_zh"], "close": r["close"],
-                "ret20": round(r["ret20"], 2), "ret60": round(r["ret60"], 2),
-                "rs60": r["rs60"],
-            } for r in leaders],
-            "stocks": [{"rank": r["rank"], "symbol": r["symbol"], "name": r["name"],
-                         "name_zh": r["name_zh"], "ret20": round(r["ret20"], 2),
-                         "ret60": round(r["ret60"], 2), "rs60": r["rs60"]}
-                        for r in sorted(rows, key=lambda x: (-x["ret20"], x["rank"]))],
-        })
-    industries.sort(key=lambda r: (-r["median20"], -r["median60"], r["name"]))
+    def subindustry_memberships(row):
+        name = str(row.get("industry") or "").strip()
+        if not name or name == "—":
+            return []
+        name_zh = industry_names_zh.get(name, name)
+        return [{"name": name, "name_zh": name_zh, "relevance": "core",
+                 "reason_zh": "Nasdaq 將公司主要業務分類於「%s」。" % name_zh,
+                 "reason_en": "Nasdaq classifies the company’s primary business under “%s”." % name}]
+
+    def theme_memberships(row):
+        out = []
+        relevance_zh = {"core": "核心", "important": "重要", "secondary": "關聯"}
+        relevance_en = {"core": "core", "important": "material", "secondary": "related"}
+        for source in by_symbol.get(row["symbol"], []):
+            item = dict(source)
+            industry = str(row.get("industry") or "approved business exposure")
+            industry_zh = industry_names_zh.get(industry, industry)
+            if not item.get("reason_zh"):
+                item["reason_zh"] = "人工核准：透過「%s」業務與此題材具%s關聯。" % (
+                    industry_zh, relevance_zh[item["relevance"]])
+            if not item.get("reason_en"):
+                item["reason_en"] = "Reviewed: linked to this theme through “%s” as %s exposure." % (
+                    industry, relevance_en[item["relevance"]])
+            out.append(item)
+        return out
+
+    industries = _build_industry_groups(
+        raw, lambda row: [{"name": row["sector"], "name_zh": row["sector_zh"]}],
+        INDUSTRY_MIN_SAMPLE, "official")
+    subindustries = _build_industry_groups(raw, subindustry_memberships, 3, "subindustry")
+    themes = _attach_theme_overlaps(
+        _build_industry_groups(raw, theme_memberships, 3, "theme"))
+    tagged_symbols = {r["symbol"] for r in raw if by_symbol.get(r["symbol"])}
     data = {
         "as_of": as_of, "universe": len(universe), "sample": len(raw),
         "minimum_industry_sample": INDUSTRY_MIN_SAMPLE,
-        "grouping": "Nasdaq sector", "moving_average": INDUSTRY_MA,
-        "industries": industries,
+        "minimum_topic_sample": 3, "grouping": "Nasdaq sector",
+        "moving_average": INDUSTRY_MA, "industries": industries,
+        "subindustries": subindustries, "themes": themes,
+        "taxonomy_as_of": taxonomy.get("as_of"),
+        "subindustry_coverage": len(raw), "theme_coverage": len(tagged_symbols),
+        "taxonomy_error": taxonomy.get("error"),
+        "structure_as_of": structure_meta.get("as_of"),
     }
     _save_cache(INDUSTRY_CACHE, data)
     return data
@@ -5342,7 +5469,8 @@ __SEO_HEAD__
   /* B／C／D 僅替換色票；版面、字級、間距及資訊層級固定共用。 */
   .data-quality-strip{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 14px}.data-quality-chip{display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:5px 10px;border:1px solid var(--grounds);border-radius:999px;background:var(--foam);color:var(--mocha);font-size:12px;font-weight:700;line-height:1.4}.data-quality-chip::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--mocha)}.data-quality-chip.dq-ok::before{background:#278153}.data-quality-chip.dq-pending::before{background:#b8872e}.data-quality-chip.dq-warn::before{background:#d2782c}.data-quality-chip.dq-danger{border-color:#c84335;background:rgba(200,67,53,.13);color:#9b3026;font-weight:900}.data-quality-chip.dq-danger::before{background:#c84335;box-shadow:0 0 0 4px rgba(200,67,53,.14)}
   .reading-card{display:grid;gap:0;margin-top:14px;border:1px solid var(--grounds);border-radius:13px;overflow:hidden;background:var(--foam)}.reading-row{display:grid;grid-template-columns:68px 1fr;gap:12px;padding:10px 12px;font-size:13px;line-height:1.65;color:var(--mocha)}.reading-row+.reading-row{border-top:1px solid var(--grounds)}.reading-row b{color:var(--espresso);font-family:var(--font-head)}
-  .ind-change-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.ind-change{padding:9px;border:1px solid var(--grounds);border-radius:10px;background:var(--milk);font-size:12px}.ind-change b{display:block;margin-top:3px;font-family:var(--font-num)}.ind-stock-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:10px}.ind-stock{display:grid;grid-template-columns:1fr auto;gap:8px;padding:7px 9px;border:1px solid var(--grounds);border-radius:9px;color:inherit;text-decoration:none;font-size:12px;background:var(--foam)}
+  .ind-change-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.ind-change{padding:9px;border:1px solid var(--grounds);border-radius:10px;background:var(--milk);font-size:12px}.ind-change b{display:block;margin-top:3px;font-family:var(--font-num)}.ind-stock-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:10px}.ind-stock{display:grid;grid-template-columns:1fr auto;gap:6px 8px;padding:8px 9px;border:1px solid var(--grounds);border-radius:9px;color:inherit;text-decoration:none;font-size:12px;background:var(--foam)}
+  .ind-stock-main{min-width:0}.ind-stock-reason{grid-column:1/-1;padding-top:5px;border-top:1px solid var(--grounds);color:var(--mocha);font-size:11px;line-height:1.55}.ind-overlaps{margin:12px 0;padding:10px 12px;border:1px solid var(--grounds);border-radius:10px;background:var(--milk)}.ind-overlaps>b{display:block;margin-bottom:7px;font-size:12px}.ind-overlap-list{display:flex;flex-wrap:wrap;gap:6px}.ind-overlap-chip{appearance:none;border:1px solid var(--grounds);border-radius:999px;padding:5px 9px;background:var(--foam);color:var(--espresso);font:700 11px var(--font-num);cursor:pointer}.ind-overlap-chip:hover{border-color:var(--caramel)}.ind-overlap-chip small{color:var(--mocha);font-weight:500}.ind-structure-badge,.ind-relevance-badge{display:inline-block;margin-left:5px;padding:2px 6px;border-radius:999px;font-size:10px;font-weight:700;vertical-align:1px}.ind-relevance-badge{background:rgba(180,103,42,.12);color:var(--mocha)}.ind-structure-badge.matched{background:rgba(61,139,103,.14);color:#2f7657}.ind-structure-badge.near{background:rgba(211,154,44,.17);color:#8a6200}.ind-structure-badge.developing{background:rgba(180,103,42,.13);color:#9a5524}.ind-structure-empty{padding:18px;text-align:center;color:var(--mocha)}
   html[data-theme="c"] .data-quality-chip.dq-danger{color:#ffb0a6;background:rgba(200,67,53,.23)}
   .qhead { display:flex; align-items:center; gap:12px; max-width:560px;
            margin:26px auto 14px; font-family:var(--font-head); font-weight:700;
@@ -5535,6 +5663,9 @@ __SEO_HEAD__
   .ind-q b{display:block;margin-bottom:7px}.ind-chip{display:inline-block;margin:3px 3px 0 0;padding:4px 8px;border-radius:14px;background:var(--milk);color:var(--mocha);font-size:12px}
   html[data-theme="c"] .ind-row,html[data-theme="c"] .ind-q{background:#21343A}html[data-theme="c"] .ind-tabs button.on{background:#D2A65F;color:#17252B}
   @media(max-width:600px){.ind-row summary{grid-template-columns:1fr 1fr}.ind-name{grid-column:1/-1}.ind-leader{grid-template-columns:1fr 64px}.ind-leader span:nth-child(n+3){text-align:right}.ind-quad{grid-template-columns:1fr}}
+  .ind-kind-tabs{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 12px}.ind-kind-tabs button{border:1px solid var(--grounds);background:var(--foam);color:var(--espresso);border-radius:999px;padding:8px 13px;font-weight:800;cursor:pointer}.ind-kind-tabs button.on{background:var(--espresso);border-color:var(--espresso);color:#fff}.ind-taxonomy-meta{font-size:12px;color:var(--mocha);line-height:1.65;margin:8px 0 10px}.ind-search{position:relative}.ind-search input{width:100%;box-sizing:border-box;border:1.5px solid var(--grounds);border-radius:12px;background:#fff;color:var(--espresso);padding:11px 42px 11px 38px;font:14px var(--font-body);outline:none}.ind-search input:focus{border-color:var(--caramel);box-shadow:0 0 0 3px rgba(166,103,65,.1)}.ind-search:before{content:'⌕';position:absolute;left:13px;top:7px;color:var(--mocha);font-size:22px}.ind-search-count{position:absolute;right:12px;top:11px;color:var(--mocha);font:700 11px var(--font-num)}
+  .ind-filter-tools{position:sticky;top:8px;z-index:7;margin:8px 0 12px;border:1px solid var(--grounds);border-radius:13px;background:rgba(255,250,242,.96);box-shadow:0 5px 18px rgba(70,47,30,.08);backdrop-filter:blur(8px)}.ind-filter-tools>summary{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;cursor:pointer;font-weight:800;list-style:none;color:var(--espresso)}.ind-filter-tools>summary::-webkit-details-marker{display:none}.ind-filter-summary{font-size:13px}.ind-filter-sort{color:var(--mocha);font:700 12px var(--font-num)}.ind-filter-body{padding:0 10px 10px;border-top:1px solid var(--grounds)}.ind-filter-body .ind-tabs{margin-bottom:0}.ind-filter-selects{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}.ind-filter-selects select{padding:7px 9px;border:1px solid var(--grounds);border-radius:9px;background:var(--foam);color:var(--espresso)}.ind-q-more{display:block;margin:8px 0 0;padding:5px 8px;border:0;background:transparent;color:var(--caramel-2);font-weight:800;cursor:pointer}.ind-reading-badge{display:inline-flex;align-items:center;margin-top:5px;padding:3px 8px;border-radius:999px;font-size:10.5px;font-weight:800}.ind-reading-badge.broad{background:rgba(61,139,103,.14);color:#2f7657}.ind-reading-badge.early{background:rgba(211,154,44,.17);color:#8a6200}.ind-reading-badge.concentrated{background:rgba(180,103,42,.15);color:#9a5524}.ind-reading-badge.weak{background:rgba(125,111,101,.13);color:#6f6259}.ind-concentration{margin-top:7px}.ind-concentration-track{height:7px;border-radius:999px;background:var(--grounds);overflow:hidden}.ind-concentration-fill{height:100%;border-radius:inherit;background:var(--caramel)}.ind-concentration-fill.high{background:#b8673d}.ind-concentration small{display:flex;justify-content:space-between;gap:8px;margin-top:4px;color:var(--mocha)}
+  @media(max-width:560px){.ind-filter-tools{top:6px}.ind-filter-selects{display:grid;grid-template-columns:1fr}.ind-filter-selects select{width:100%}.ind-filter-body .ind-tabs{display:grid;grid-template-columns:1fr 1fr}.ind-filter-body .ind-tabs button:first-child{grid-column:1/-1}}
 
   .page { display:none; } .page.show { display:block; }
 
@@ -5926,17 +6057,17 @@ __QUOTES_HTML__
   <h2 class="ptitle" data-i18n="industry.title">產業分析</h2>
   <details class="pgintro" open>
     <summary data-i18n="industry.introT">資金集中在哪些產業，漲勢有沒有擴散？</summary>
-    <div class="pgintro-b" data-i18n-html="industry.intro"><p>以目前市值前 300 大美股依 Nasdaq Sector 分組，比較<b>20／60 日報酬中位數</b>與前一期變化，再搭配上漲家數比例及前三檔正報酬集中度。重點是確認整個 Sector 是否轉強，而非只列漲幅前三名。</p><p>點擊產業即可展開完整股票清單。樣本少於 5 檔不參與排名；股票池是今日前 300 大，包含存活者偏誤，所有結論只回顧過去。</p></div>
+    <div class="pgintro-b" data-i18n-html="industry.intro"><p>這一頁把 Nasdaq Sector 拆成更精確的<b>細產業</b>與可一股多標籤的<b>概念題材</b>，並保留官方 Sector 供對照。每組使用 20／60 日報酬中位數、上漲家數、站上 50 日線比例及前三檔正報酬集中度。</p><p>展開群組可查看每檔股票的分類理由；概念題材也會列出常一起出現的題材與重疊比例。新分類只用在本頁，其他篩選頁維持原本 Sector。所有結論只回顧過去。</p></div>
   </details>
-  <div class="card"><h2 data-i18n="industry.quad">產業四象限</h2><div id="indQuad" class="ind-quad"><div class="status" data-i18n="industry.loading">載入中…</div></div></div>
+  <div class="card"><div class="ind-kind-tabs" id="indKindTabs"><button class="on" data-kind="subindustry">細產業</button><button data-kind="theme">概念題材</button><button data-kind="official">Nasdaq Sector</button></div><label class="ind-search"><input id="indSearch" type="search" autocomplete="off" placeholder="搜尋產業、題材、公司或代號" aria-label="搜尋產業、題材、公司或代號"><span class="ind-search-count" id="indSearchCount"></span></label><div class="ind-taxonomy-meta" id="indTaxonomyMeta"></div><h2 data-i18n="industry.quad">產業四象限</h2><div id="indQuad" class="ind-quad"><div class="status" data-i18n="industry.loading">載入中…</div></div></div>
   <div class="card"><h2 data-i18n="industry.rank">產業強弱排名</h2>
-    <div class="ind-tabs" id="indTabs">
+    <details class="ind-filter-tools" id="indFilterTools" open><summary><span class="ind-filter-summary" id="indFilterSummary">篩選 0 項</span><span class="ind-filter-sort" id="indFilterSort">20 日動能 ↓</span></summary><div class="ind-filter-body"><div class="ind-filter-selects"><label><span id="indStructureLabel">結構</span> <select id="indStructureFilter"><option value="">不限</option></select></label><label><span id="indRelevanceLabel">關聯程度</span> <select id="indRelevanceFilter"><option value="">全部</option></select></label></div><div class="ind-tabs" id="indTabs">
       <button class="on" data-sort="median20" data-i18n="industry.m20">20日動能</button>
       <button data-sort="median60" data-i18n="industry.m60">60日趨勢</button>
       <button data-sort="win20_pct" data-i18n="industry.win">上漲比例</button>
       <button data-sort="above50_pct" data-i18n="industry.above">站上50日線</button>
       <button data-sort="newhigh_pct" data-i18n="industry.high">創新高</button>
-    </div>
+    </div></div></details>
     <div class="status" id="indStatus"></div>
     <div id="indRank" class="ind-rank"></div>
   </div>
@@ -6454,7 +6585,7 @@ const I18N = { en: {
   "grow.spinT": "A spin-off occurred in this period \u2014 return is understated",
   "industry.title": "Sector Analysis",
   "industry.introT": "Where is capital concentrating, and is the advance broadening?",
-  "industry.intro": "<p>This page groups the current top 300 US stocks by Nasdaq Sector. It compares <b>median 20- and 60-session returns</b> with their prior periods, then adds advancer share and top-three positive-return concentration. The goal is to test whether the whole sector strengthened, not merely list three winners.</p><p>Click a sector for its complete stock list. Sectors with fewer than five constituents are excluded. The universe is today’s top 300 and has survivorship bias; all readings are backward-looking.</p>",
+  "industry.intro": "<p>This page separates Nasdaq Sectors into more precise <b>sub-industries</b> and multi-label <b>investment themes</b>, while retaining official Sectors for comparison. Each group uses median 20/60-session returns, advancer share, above-50MA breadth, and top-three positive-return concentration.</p><p>Expand a group to see why each stock is classified there. Themes also show frequent overlaps and overlap ratios. The new labels are used only on this page; other screeners retain their original Sector classifications. All readings are backward-looking.</p>",
   "industry.quad": "Sector Quadrants", "industry.rank": "Sector Strength Ranking",
   "industry.loading": "Loading…", "industry.m20": "20D Momentum",
   "industry.m60": "60D Trend", "industry.win": "Advancer Share",
@@ -8817,33 +8948,51 @@ async function loadDataQuality(){try{DATA_HEALTH=await readJson(await fetch('/ap
 loadDataQuality();
 
 /* ---- 產業分析 ---- */
-let IND_DATA=null,IND_SORT="median20";
+let IND_DATA=null,IND_SORT="median20",IND_STRUCTURE="",IND_KIND="subindustry",IND_RELEVANCE="",IND_QUERY="";
+const IND_QUAD_EXPANDED={};
 const indPct=v=>`<span style="color:${Number(v)>=0?'#278153':'#c84335'}">${Number(v)>=0?'+':''}${Number(v).toFixed(2)}%</span>`;
 const indDelta=v=>v==null?'—':`${Number(v)>=0?'▲':'▼'} ${Math.abs(Number(v)).toFixed(2)} ${LANG==='en'?'pp':'個百分點'}`;
 function staleNote(date){const d=new Date(String(date).slice(0,10)+'T12:00:00'),today=new Date();if(!Number.isFinite(d.getTime()))return LANG==="en"?' · ⚠️ Data date unavailable':' · ⚠️ 缺少資料日期';d.setHours(12,0,0,0);today.setHours(12,0,0,0);let n=0;while(d<today){d.setDate(d.getDate()+1);if(d.getDay()>0&&d.getDay()<6)n++;}return n>1?(LANG==="en"?` · ⚠️ ${n} weekdays behind; updating`:` · ⚠️ 落後 ${n} 個平日，正在更新`):'';}
 function indName(row){return LANG==="zh"?(row.name_zh||row.name):row.name}
+function industryStructurePass(status){return !IND_STRUCTURE||status===IND_STRUCTURE||(IND_STRUCTURE==="qualified"&&(status==="matched"||status==="near"))||(IND_STRUCTURE==="all_stages"&&(status==="matched"||status==="near"||status==="developing"));}
+function industryRelevancePass(level){return !IND_RELEVANCE||level==="core"||(IND_RELEVANCE==="important"&&level==="important");}
+function industryRelevanceBadge(level){if(IND_KIND==="official"||!level)return "";const labels=LANG==="en"?{core:"Core",important:"Important",secondary:"Related"}:{core:"核心",important:"重要",secondary:"關聯"};return `<span class="ind-relevance-badge">${labels[level]||level}</span>`;}
+function industryStructureBadge(status){if(status==="matched")return `<span class="ind-structure-badge matched">${LANG==="en"?"Match":"結構符合"}</span>`;if(status==="near")return `<span class="ind-structure-badge near">${LANG==="en"?"Nearly complete":"接近完成"}</span>`;if(status==="developing")return `<span class="ind-structure-badge developing">${LANG==="en"?"Developing":"發展中"}</span>`;return "";}
+function industryReason(stock){if(IND_KIND==="official")return "";const reason=LANG==="en"?(stock.reason_en||stock.reason_zh):(stock.reason_zh||stock.reason_en);return reason?`<small class="ind-stock-reason"><b>${LANG==="en"?"Why:":"分類理由："}</b> ${cmpEsc(reason)}</small>`:"";}
+function industryInsight(row){const concentration=Number(row.leader_concentration_pct||0),concentrated=concentration>=60;if(row.quadrant==="recovery")return {cls:"early",label:LANG==="en"?"Short-term recovery":"短線轉強、長線仍弱",reading:LANG==="en"?"The 60-day trend is still weak, but the latest 20 days have turned positive: an early recovery, not a confirmed uptrend.":"60 日仍弱、最近 20 日已轉正，屬於復甦初期，還不是已確認的上升趨勢。"};if(row.quadrant==="weak")return {cls:"weak",label:LANG==="en"?"Broad weakness":"全面偏弱",reading:LANG==="en"?"Both short- and medium-term median returns remain negative; wait for participation to improve.":"短中期中位報酬皆為負，需等待上漲家數與趨勢改善。"};if(row.quadrant==="cooling")return {cls:"early",label:LANG==="en"?"Cooling from strength":"高檔降溫",reading:LANG==="en"?"The 60-day trend remains positive, but the latest 20 days have cooled.":"60 日趨勢仍為正，但近 20 日已降溫。"};if(concentrated)return {cls:"concentrated",label:LANG==="en"?"Few leaders":"少數領先",reading:LANG==="en"?"Most positive performance is concentrated in the top three stocks; the group has not strengthened broadly.":"正報酬多集中在前三檔，群組尚未全面轉強。"};if(Number(row.win20_pct)>=60)return {cls:"broad",label:LANG==="en"?"Broad advance":"全面轉強",reading:LANG==="en"?"Strength is supported by broad participation rather than only a few leaders.":"上漲家數過半且領先股不過度集中，整體轉強的可信度較高。"};return {cls:"early",label:LANG==="en"?"Mixed participation":"動能分歧",reading:LANG==="en"?"Momentum is positive, but participation is not yet broad; read returns together with breadth.":"動能為正但參與度仍不足，需搭配上漲家數判讀。"};}
 function renderIndustries(){
   if(!IND_DATA||!$("#indRank"))return;
-  const rows=[...(IND_DATA.industries||[])].sort((a,b)=>Number(b[IND_SORT])-Number(a[IND_SORT]));
+  const kindButtons=document.querySelectorAll("#indKindTabs button");const kindLabels=LANG==="en"?["Sub-industries","Investment Themes","Nasdaq Sectors"]:["細產業","概念題材","Nasdaq Sector"];kindButtons.forEach((button,i)=>button.textContent=kindLabels[i]);
+  if($("#indStructureLabel"))$("#indStructureLabel").textContent=LANG==="en"?"Structure":"結構";if($("#indRelevanceLabel"))$("#indRelevanceLabel").textContent=LANG==="en"?"Relevance":"關聯程度";
+  const structureSelect=$("#indStructureFilter");if(structureSelect){structureSelect.innerHTML=LANG==="en"?'<option value="">Any structure</option><option value="developing">Developing</option><option value="near">Nearly complete</option><option value="matched">Structure match</option><option value="all_stages">All candidates</option><option value="qualified">Match or nearly complete</option>':'<option value="">不限結構</option><option value="developing">結構發展中</option><option value="near">接近完成</option><option value="matched">結構符合</option><option value="all_stages">全部結構候選</option><option value="qualified">符合或接近完成</option>';structureSelect.value=IND_STRUCTURE;}
+  const relevanceSelect=$("#indRelevanceFilter");if(relevanceSelect){relevanceSelect.innerHTML=LANG==="en"?'<option value="">All relevance</option><option value="important">Core + important</option><option value="core">Core only</option>':'<option value="">全部關聯</option><option value="important">核心＋重要</option><option value="core">只看核心</option>';relevanceSelect.value=IND_RELEVANCE;relevanceSelect.disabled=IND_KIND==="official";}
+  const sourceRows=IND_KIND==="theme"?(IND_DATA.themes||[]):IND_KIND==="official"?(IND_DATA.industries||[]):(IND_DATA.subindustries||[]),query=IND_QUERY.trim().toLocaleLowerCase();
+  const rows=[...sourceRows].map(row=>{const groupText=`${row.name||""} ${row.name_zh||""}`.toLocaleLowerCase(),groupHit=!query||groupText.includes(query);let visible=(row.stocks||row.leaders||[]).filter(stock=>industryStructurePass(stock.structure_status)&&industryRelevancePass(stock.relevance));if(query&&!groupHit)visible=visible.filter(stock=>(`${stock.symbol} ${stock.name||""} ${stock.name_zh||""}`).toLocaleLowerCase().includes(query));return Object.assign({},row,{_visibleStocks:visible});}).filter(row=>row._visibleStocks.length).sort((a,b)=>Number(b[IND_SORT])-Number(a[IND_SORT]));
   const labels=LANG==="en"
     ?{median20:"20D median",median60:"60D median",win20_pct:"20D advancers",above50_pct:"Above 50MA",newhigh_pct:"60D highs"}
     :{median20:"20日中位",median60:"60日中位",win20_pct:"20日上漲",above50_pct:"站上50日線",newhigh_pct:"創60日新高"};
+  const kindLabel=LANG==="en"?(IND_KIND==="theme"?"themes":IND_KIND==="official"?"Nasdaq sectors":"sub-industries"):(IND_KIND==="theme"?"概念題材":IND_KIND==="official"?"Nasdaq Sector":"細產業");
   $("#indStatus").textContent=LANG==="en"
-    ?`As of ${IND_DATA.as_of} · ${IND_DATA.sample} calculable stocks in the top ${IND_DATA.universe}${staleNote(IND_DATA.as_of)}`
-    :`資料截至 ${IND_DATA.as_of} · 前 ${IND_DATA.universe} 大中 ${IND_DATA.sample} 檔可計算${staleNote(IND_DATA.as_of)}`;
-  $("#indRank").innerHTML=rows.map((r,i)=>{const concentration=Number(r.leader_concentration_pct||0);const concentrated=concentration>=60;const allStocks=(r.stocks||r.leaders||[]);const reading=r.quadrant==="recovery"?(LANG==="en"?"The 60-day trend is still weak, but the latest 20 days have turned positive: an early recovery, not a confirmed uptrend.":"60 日仍弱、最近 20 日已轉正，屬於復甦初期，還不是已確認的上升趨勢。"):r.win20_pct>=60&&!concentrated?(LANG==="en"?"Strength is supported by broad participation rather than only a few leaders.":"上漲家數過半且領先股不過度集中，產業整體轉強的可信度較高。"):concentrated?(LANG==="en"?"Most positive performance is concentrated in the top three stocks; the sector has not strengthened broadly.":"正報酬多集中在前三檔，產業尚未全面轉強。"):LANG==="en"?"Read returns together with participation; a positive median alone is not enough.":"報酬需搭配上漲家數判讀；只有中位數為正，仍不足以代表全面轉強。";return `<details class="ind-row"><summary>
-    <span class="ind-name">${i+1}. ${cmpEsc(indName(r))}<small style="display:block;color:var(--mocha);font-weight:400">${r.count} ${LANG==="en"?"stocks · click for full list":"檔・點擊查看完整清單"}</small></span>
+    ?`As of ${IND_DATA.as_of} · ${rows.length} ranked ${kindLabel} · ${IND_DATA.sample} calculable stocks in the top ${IND_DATA.universe}${staleNote(IND_DATA.as_of)}`
+    :`資料截至 ${IND_DATA.as_of} · ${rows.length} 組${kindLabel}參與排名 · 前 ${IND_DATA.universe} 大中 ${IND_DATA.sample} 檔可計算${staleNote(IND_DATA.as_of)}`;
+  const meta=$("#indTaxonomyMeta");if(meta)meta.textContent=IND_KIND==="official"?(LANG==="en"?"Official Nasdaq Sector classifications; groups need at least five calculable stocks.":"Nasdaq 官方 Sector；可計算樣本少於 5 檔不排名。"):(LANG==="en"?`Labels reviewed as of ${IND_DATA.taxonomy_as_of||"—"} · ${IND_KIND==="theme"?(IND_DATA.theme_coverage||0)+" stocks carry a reviewed theme":"Nasdaq Industry provides sub-industry coverage for "+(IND_DATA.subindustry_coverage||0)+" stocks"} · minimum 3 stocks per group.`:`標籤截至 ${IND_DATA.taxonomy_as_of||"—"} · ${IND_KIND==="theme"?(IND_DATA.theme_coverage||0)+" 檔已有人工核准題材":"Nasdaq Industry 已涵蓋 "+(IND_DATA.subindustry_coverage||0)+" 檔"} · 每組至少 3 檔才排名。`);
+  const search=$("#indSearch");if(search){const p=LANG==="en"?"Search industry, theme, company or ticker":"搜尋產業、題材、公司或代號";search.placeholder=p;search.setAttribute("aria-label",p);}const searchCount=$("#indSearchCount");if(searchCount)searchCount.textContent=query?(LANG==="en"?`${rows.length} groups`:`${rows.length} 組`):"";
+  const activeFilters=Number(Boolean(IND_QUERY))+Number(Boolean(IND_STRUCTURE))+Number(Boolean(IND_RELEVANCE));if($("#indFilterSummary"))$("#indFilterSummary").textContent=LANG==="en"?`Filters ${activeFilters}`:`篩選 ${activeFilters} 項`;if($("#indFilterSort"))$("#indFilterSort").textContent=`${labels[IND_SORT]} ↓`;
+  $("#indRank").innerHTML=rows.length?rows.map((r,i)=>{const concentration=Number(r.leader_concentration_pct||0),concentrated=concentration>=60,allStocks=r._visibleStocks,insight=industryInsight(r),overlaps=IND_KIND==="theme"?(r.overlaps||[]):[];const overlapHtml=overlaps.length?`<div class="ind-overlaps"><b>${LANG==="en"?"Frequently overlaps":"常一起出現的題材"}</b><div class="ind-overlap-list">${overlaps.map(x=>`<button type="button" class="ind-overlap-chip" data-overlap="${encodeURIComponent(indName(x))}">${cmpEsc(indName(x))} <small>· ${x.count} ${LANG==="en"?"shared":"檔重疊"} · ${Number(x.pct).toFixed(1)}%</small></button>`).join("")}</div></div>`:"";return `<details class="ind-row"><summary>
+    <span class="ind-name">${i+1}. ${cmpEsc(indName(r))}<span class="ind-reading-badge ${insight.cls}">${insight.label}</span><small style="display:block;color:var(--mocha);font-weight:400">${IND_STRUCTURE||IND_RELEVANCE||IND_QUERY?allStocks.length+" / ":""}${r.count} ${LANG==="en"?"stocks · click for full list":"檔・點擊查看完整清單"}</small></span>
     <span class="ind-num"><small>${labels[IND_SORT]}</small><br><b>${IND_SORT.startsWith("median")?indPct(r[IND_SORT]):Number(r[IND_SORT]).toFixed(1)+"%"}</b></span>
     <span class="ind-num"><small>${LANG==="en"?"20D":"20日"}</small><br>${indPct(r.median20)}</span>
     <span class="ind-num"><small>${LANG==="en"?"60D":"60日"}</small><br>${indPct(r.median60)}</span>
     <span class="ind-num"><small>50MA</small><br>${r.above50_pct}%</span></summary>
-    <div class="ind-change-grid"><div class="ind-change">${LANG==="en"?"20D vs prior 20D":"20 日較前 20 日"}<b>${indDelta(r.change20)}</b></div><div class="ind-change">${LANG==="en"?"60D vs prior 60D":"60 日較前 60 日"}<b>${indDelta(r.change60)}</b></div><div class="ind-change">${LANG==="en"?"Top-3 concentration":"前三檔正報酬集中度"}<b>${concentration.toFixed(1)}% · ${concentrated?(LANG==="en"?"concentrated":"偏集中"):(LANG==="en"?"broad":"較分散")}</b></div></div>
-    <div class="reading-card"><div class="reading-row"><b>${LANG==="en"?"Data":"數據"}</b><span>${LANG==="en"?`20D median ${r.median20}%, 60D median ${r.median60}%, ${r.win20_pct}% advanced.`:`20 日中位報酬 ${r.median20}%，60 日中位報酬 ${r.median60}%，上漲家數比例 ${r.win20_pct}%。`}</span></div><div class="reading-row"><b>${LANG==="en"?"Reading":"解讀"}</b><span>${reading}</span></div><div class="reading-row"><b>${LANG==="en"?"Limit":"限制"}</b><span>${LANG==="en"?"This is a current top-300, backward-looking sample and cannot predict whether sector strength will continue.":"這是目前前 300 大的回顧樣本，不能據此預測產業強勢是否延續。"}</span></div></div>
-    <div class="ind-leaders"><b>${LANG==="en"?"Sector stock list":"產業股票清單"}</b><div class="ind-stock-list">${allStocks.map(s=>`<div class="ind-stock"><span><b>${cmpEsc(s.symbol)}</b> ${cmpEsc(LANG==="zh"?(s.name_zh||s.name):s.name)}</span><span>${indPct(s.ret20)}</span></div>`).join("")}</div></div></details>`}).join("");
+    <div class="ind-change-grid"><div class="ind-change">${LANG==="en"?"20D vs prior 20D":"20 日較前 20 日"}<b>${indDelta(r.change20)}</b></div><div class="ind-change">${LANG==="en"?"60D vs prior 60D":"60 日較前 60 日"}<b>${indDelta(r.change60)}</b></div><div class="ind-change">${LANG==="en"?"Advance distribution":"漲勢分布"}<b>${concentrated?(LANG==="en"?"Concentrated":"偏集中"):(LANG==="en"?"Broad":"較分散")}</b><div class="ind-concentration"><div class="ind-concentration-track"><div class="ind-concentration-fill ${concentrated?"high":""}" style="width:${Math.min(100,concentration)}%"></div></div><small><span>${LANG==="en"?"Top 3":"前三檔"}</span><span>${concentration.toFixed(1)}%</span></small></div></div></div>
+    <div class="reading-card"><div class="reading-row"><b>${LANG==="en"?"Data":"數據"}</b><span>${LANG==="en"?`20D median ${r.median20}%, 60D median ${r.median60}%, ${r.win20_pct}% advanced.`:`20 日中位報酬 ${r.median20}%，60 日中位報酬 ${r.median60}%，上漲家數比例 ${r.win20_pct}%。`}</span></div><div class="reading-row"><b>${LANG==="en"?"Reading":"解讀"}</b><span>${insight.reading}</span></div><div class="reading-row"><b>${LANG==="en"?"Limit":"限制"}</b><span>${LANG==="en"?"This is a current top-300, backward-looking sample and cannot predict whether group strength will continue.":"這是目前前 300 大的回顧樣本，不能據此預測群組強勢是否延續。"}</span></div></div>${overlapHtml}
+    <div class="ind-leaders"><b>${LANG==="en"?"Group stock list":"群組股票清單"}</b><div class="ind-stock-list">${allStocks.map(stock=>`<div class="ind-stock"><span class="ind-stock-main"><b>${cmpEsc(stock.symbol)}</b> ${cmpEsc(LANG==="zh"?(stock.name_zh||stock.name):stock.name)}${industryRelevanceBadge(stock.relevance)}${industryStructureBadge(stock.structure_status)}</span><span>${indPct(stock.ret20)}</span>${industryReason(stock)}</div>`).join("")}</div></div></details>`}).join(""):`<div class="ind-structure-empty">${LANG==="en"?"No group contains stocks matching these filters.":"目前沒有群組含有符合篩選條件的個股。"}</div>`;
   const qs=LANG==="en"
     ?{strong:["Persistently Strong","Both 20D and 60D median returns are positive"],recovery:["Early Recovery","60D remains weak; 20D has turned positive"],cooling:["Cooling From Strength","60D remains positive; 20D has turned negative"],weak:["Persistently Weak","Both 20D and 60D median returns are negative"]}
     :{strong:["持續強勢","20日、60日中位報酬皆為正"],recovery:["低檔轉強","60日仍弱，20日已轉正"],cooling:["高檔降溫","60日仍強，20日轉負"],weak:["持續偏弱","20日、60日中位報酬皆為負"]};
-  $("#indQuad").innerHTML=Object.entries(qs).map(([key,value])=>`<div class="ind-q"><b>${value[0]}</b><small style="color:var(--mocha)">${value[1]}</small><div>${rows.filter(r=>r.quadrant===key).map(r=>`<span class="ind-chip">${cmpEsc(indName(r))} ${r.median20>=0?"+":""}${r.median20}%</span>`).join("")||`<span class="ind-chip">${LANG==="en"?"None":"目前無"}</span>`}</div></div>`).join("");
+  $("#indQuad").innerHTML=Object.entries(qs).map(([key,value])=>{const groupRows=rows.filter(r=>r.quadrant===key),expanded=Boolean(IND_QUAD_EXPANDED[IND_KIND+":"+key]),shown=expanded?groupRows:groupRows.slice(0,5),remaining=Math.max(0,groupRows.length-shown.length);return `<div class="ind-q"><b>${value[0]}</b><small style="color:var(--mocha)">${value[1]}</small><div>${shown.map(r=>`<span class="ind-chip">${cmpEsc(indName(r))} ${r.median20>=0?"+":""}${r.median20}%</span>`).join("")||`<span class="ind-chip">${LANG==="en"?"None":"目前無"}</span>`}</div>${groupRows.length>5?`<button class="ind-q-more" data-quad="${key}">${expanded?(LANG==="en"?"Show less":"收合"):(LANG==="en"?`Show all ${groupRows.length}`:`查看全部 ${groupRows.length} 組`)}${remaining?` · +${remaining}`:""}</button>`:""}</div>`;}).join("");
+  document.querySelectorAll(".ind-q-more").forEach(button=>button.onclick=()=>{const key=IND_KIND+":"+button.dataset.quad;IND_QUAD_EXPANDED[key]=!IND_QUAD_EXPANDED[key];renderIndustries();});
+  document.querySelectorAll(".ind-overlap-chip").forEach(button=>button.onclick=()=>{IND_QUERY=decodeURIComponent(button.dataset.overlap||"");const search=$("#indSearch");if(search)search.value=IND_QUERY;renderIndustries();$("#indRank")?.scrollIntoView({behavior:"smooth",block:"start"});});
 }
 async function loadIndustries(){
   if(IND_DATA||!$("#indRank"))return;
@@ -8873,8 +9022,13 @@ async function loadHomeIndustryBrief(){
 document.querySelectorAll("#indTabs button").forEach(button=>button.onclick=()=>{
   IND_SORT=button.dataset.sort;
   document.querySelectorAll("#indTabs button").forEach(x=>x.classList.toggle("on",x===button));
-  renderIndustries();
+  renderIndustries();if(window.matchMedia&&window.matchMedia("(max-width:560px)").matches&&$("#indFilterTools"))$("#indFilterTools").open=false;
 });
+document.querySelectorAll("#indKindTabs button").forEach(button=>button.onclick=()=>{IND_KIND=button.dataset.kind;IND_RELEVANCE="";document.querySelectorAll("#indKindTabs button").forEach(x=>x.classList.toggle("on",x===button));renderIndustries();});
+if($("#indStructureFilter"))$("#indStructureFilter").onchange=event=>{IND_STRUCTURE=event.target.value;renderIndustries();};
+if($("#indRelevanceFilter"))$("#indRelevanceFilter").onchange=event=>{IND_RELEVANCE=event.target.value;renderIndustries();};
+if($("#indSearch"))$("#indSearch").oninput=event=>{IND_QUERY=event.target.value;renderIndustries();};
+if($("#indFilterTools")&&window.matchMedia&&window.matchMedia("(max-width:560px)").matches)$("#indFilterTools").open=false;
 
 
 /* ---- 長期成長股列表 ---- */

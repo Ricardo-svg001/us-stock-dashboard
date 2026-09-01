@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.09.01.6"
+APP_VERSION = "2026.09.01.7"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1405,7 +1405,7 @@ def _deduction_index_backtest(rows, short_ma=50, mid_ma=100, long_ma=150, years=
     mid_values = rolling_ma(mid_ma)
     long_values = rolling_ma(long_ma)
     cutoff = dates[-1] - timedelta(days=round(years * 365.25))
-    horizon_sessions = 189
+    horizon_sessions = 252
     events, index, bull_streak, armed = [], long_ma, 0, False
     while index < len(closes):
         bull = (closes[index] > short_values[index] > long_values[index]
@@ -1455,7 +1455,7 @@ def _deduction_index_backtest(rows, short_ma=50, mid_ma=100, long_ma=150, years=
                      (ordered[size // 2 - 1] + ordered[size // 2]) / 2, 1)
 
     horizons = {}
-    for months in range(3, 10):
+    for months in range(3, 13):
         sessions = months * 21
         mid_eligible = [event for event in events
                         if event["followup_sessions"] >= sessions
@@ -6542,7 +6542,7 @@ __QUOTES_HTML__
       所以這個天數可以當成「<b>還有多少時間可以慢慢整理</b>」的粗估。</p>
       <p>現在只保留<b>盤整假設</b>：價格停在指定價位，估算均線還要多久才會追上。
       另外提供近十年 Nasdaq 大盤歷史事件回測：多頭行情首次回到 150MA ±4% 範圍後，
-      統計第 3 至第 9 個月內跌破 100MA 與 150MA 的累積機率；跌破定義都是連續 3 天收盤低於各日均線 5% 以上。</p>
+      統計第 3 至第 12 個月內跌破 100MA 與 150MA 的累積機率；跌破定義都是連續 3 天收盤低於各日均線 5% 以上。</p>
       <p>⚠️ <b>這是算術外推與歷史統計，不是預測。</b>天數與歷史比例都不是未來保證。</p>
     </div>
   </details>
@@ -6814,7 +6814,7 @@ const I18N = { en: {
   "nav.deduct": "MA Deduction", "nav.deduct.sub": "When the 50/100/150MA catches up",
   "p10.title": "Moving-Average Deduction",
   "ded.introT": "How much time is left to consolidate?",
-  "ded.intro": "<p><b>Deduction is arithmetic, not prediction.</b> The 50-day average drops the close from 50 sessions ago and adds the next close; the value being dropped is the <b>deduction value</b>.</p><p>This page keeps only the <b>flat-price assumption</b>: price stays at the selected level while we estimate when the 50MA, 100MA and 150MA catch up. Its ten-year Nasdaq Composite backtest measures the cumulative chances of 100MA and 150MA breakdowns in months 3 through 9 after an established uptrend first pulls back into the 150MA ±4% zone. Either breakdown requires three consecutive closes at least 5% below that day's moving average.</p><p>⚠️ Arithmetic estimates and historical frequencies are not forecasts or guarantees.</p>",
+  "ded.intro": "<p><b>Deduction is arithmetic, not prediction.</b> The 50-day average drops the close from 50 sessions ago and adds the next close; the value being dropped is the <b>deduction value</b>.</p><p>This page keeps only the <b>flat-price assumption</b>: price stays at the selected level while we estimate when the 50MA, 100MA and 150MA catch up. Its ten-year Nasdaq Composite backtest measures the cumulative chances of 100MA and 150MA breakdowns in months 3 through 12 after an established uptrend first pulls back into the 150MA ±4% zone. Either breakdown requires three consecutive closes at least 5% below that day's moving average.</p><p>⚠️ Arithmetic estimates and historical frequencies are not forecasts or guarantees.</p>",
   "ded.pick": "Choose a symbol", "ded.index": "Nasdaq Composite", "ded.stock": "Stock (top 300)",
   "ded.ph": "Ticker or company name, e.g. AAPL",
   "ded.price": "Price to reach",
@@ -8784,10 +8784,10 @@ function dedBacktestHtml(b){
     if (event && event.date) return event.date + '<br><b>' + event.months
       + (LANG === 'en' ? ' mo.' : ' 個月') + '</b>';
     return followup >= b.horizon_sessions
-      ? (LANG === 'en' ? 'Not observed in 9 months' : '9 個月內未發生')
+      ? (LANG === 'en' ? 'Not observed in 12 months' : '12 個月內未發生')
       : (LANG === 'en' ? 'Still being observed' : '持續觀察中');
   };
-  const horizons = ['3','4','5','6','7','8','9'].map(m => {
+  const horizons = ['3','4','5','6','7','8','9','10','11','12'].map(m => {
     const x = b.horizons[m] || {};
     return '<div><b>' + m + (LANG === 'en' ? ' months' : ' 個月') + '</b>'
       + '<span>' + (LANG === 'en' ? '100MA: ' : '跌破 100MA：')
@@ -8815,8 +8815,8 @@ function dedBacktestHtml(b){
     + (LANG === 'en' ? '150MA break' : '跌破 150MA')
     + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
     + '<div class="ded-backtest-method">' + (LANG === 'en'
-      ? 'Definition: after 20 straight sessions with Nasdaq above the 50MA above the 150MA and at least 4% above the 150MA, take the first close entering the 150MA ±4% zone. A 100MA or 150MA breakdown requires three consecutive closes at least 5% below that moving average. A renewed 20-session bull confirmation can start a new event while an older event remains under observation. Month 3 through month 9 are cumulative rates with separate eligible counts for each moving average. Median observed time — 100MA: ' + med(b.mid_median_months) + '; 150MA: ' + med(b.half_median_months) + '.'
-      : '口徑：Nasdaq 指數連續 20 個交易日維持「指數 > 50MA > 150MA」，且至少高於 150MA 4% 後，取首次收盤進入 150MA ±4% 範圍的事件。跌破 100MA 或 150MA 都定義為連續 3 天收盤低於該日均線 5% 以上；重新連續 20 日確認多頭後，可以在舊事件仍追蹤時開始新事件。第 3 至第 9 個月分別使用兩條均線各自完整的樣本數。已發生跌破的中位時間：100MA ' + med(b.mid_median_months) + '；150MA ' + med(b.half_median_months) + '。')
+      ? 'Definition: after 20 straight sessions with Nasdaq above the 50MA above the 150MA and at least 4% above the 150MA, take the first close entering the 150MA ±4% zone. A 100MA or 150MA breakdown requires three consecutive closes at least 5% below that moving average. A renewed 20-session bull confirmation can start a new event while an older event remains under observation. Months 3 through 12 are cumulative rates with separate eligible counts for each moving average. Median observed time — 100MA: ' + med(b.mid_median_months) + '; 150MA: ' + med(b.half_median_months) + '.'
+      : '口徑：Nasdaq 指數連續 20 個交易日維持「指數 > 50MA > 150MA」，且至少高於 150MA 4% 後，取首次收盤進入 150MA ±4% 範圍的事件。跌破 100MA 或 150MA 都定義為連續 3 天收盤低於該日均線 5% 以上；重新連續 20 日確認多頭後，可以在舊事件仍追蹤時開始新事件。第 3 至第 12 個月分別使用兩條均線各自完整的樣本數。已發生跌破的中位時間：100MA ' + med(b.mid_median_months) + '；150MA ' + med(b.half_median_months) + '。')
     + '<br>' + (LANG === 'en' ? 'Data through ' : '資料截至 ') + b.as_of + '</div></div>';
 }
 async function runDeduct(){
@@ -9634,7 +9634,7 @@ PAGE_ROUTES = {
         "page": "p10", "index": True,
         "zh": ("均線扣抵法｜盤整推估與近十年 Nasdaq 回測",
                "用扣抵值推算納斯達克綜合指數或個股的 50、100、150 日線，"
-               "估計盤整時還要幾個交易日才會追上指定價位，並查看近十年多頭首次回到 150MA ±4% 後，第 3 至第 9 個月跌破半年線的累積機率。"),
+               "估計盤整時還要幾個交易日才會追上指定價位，並查看近十年多頭首次回到 150MA ±4% 後，第 3 至第 12 個月跌破 100MA／150MA 的累積機率。"),
         "en": ("Moving-Average Deduction｜Flat Estimate and 10-Year Nasdaq Backtest",
                "Project the 50-, 100- and 150-day moving averages for the Nasdaq Composite or any "
                "top-300 US stock under a flat-price assumption, plus month-3 through month-9 cumulative "

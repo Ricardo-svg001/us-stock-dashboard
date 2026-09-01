@@ -30,8 +30,8 @@ class DeductionBacktestTest(unittest.TestCase):
     def test_seed_backtest_is_stable_and_has_complete_horizon_denominators(self):
         self.assertEqual(self.result["event_count"], 19)
         self.assertEqual(set(self.result["horizons"]),
-                         {str(month) for month in range(3, 10)})
-        for month in range(3, 10):
+                         {str(month) for month in range(3, 13)})
+        for month in range(3, 13):
             months = str(month)
             sessions = month * 21
             expected = sum(
@@ -79,6 +79,14 @@ class DeductionBacktestTest(unittest.TestCase):
         signals = {event["signal_date"] for event in self.result["events"]}
         self.assertIn("2021-05-11", signals)
         self.assertIn("2021-09-28", signals)
+
+    def test_ten_to_twelve_month_breaks_are_included(self):
+        event = next(row for row in self.result["events"]
+                     if row["signal_date"] == "2021-03-08")
+        self.assertEqual(event["mid_break"]["date"], "2022-01-20")
+        self.assertEqual(event["half_break"]["date"], "2022-01-24")
+        self.assertEqual(self.result["horizons"]["12"]["mid_pct"], 88.9)
+        self.assertEqual(self.result["horizons"]["12"]["half_pct"], 83.3)
 
 
 if __name__ == "__main__":

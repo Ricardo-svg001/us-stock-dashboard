@@ -2904,7 +2904,7 @@ MACRO_CACHE_FILE = "us_rate_inflation_v6.json"   # v6: 日債改用每日檔，�
 TREASURY_XML = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
 JGB_DAILY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv"
 JGB_HISTORY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
-FED_POLICY_CACHE_FILE = "fed_treasury_policy_v2.json"
+FED_POLICY_CACHE_FILE = "fed_treasury_policy_v3.json"  # v3: 5 指標＋近三年淨流動性序列
 FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 NYFED_EFFR_API = "https://markets.newyorkfed.org/api/rates/unsecured/effr/last/30.json"
 FISCAL_DATA_API = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service"
@@ -3059,10 +3059,11 @@ def _fred_series_raw(series_id, years=3):
 
 
 def _fred_policy_series_raw():
-    """一次下載政策序列 ZIP，避免同時對 FRED 發出九個請求而被節流。"""
+    """一次下載政策序列 ZIP，避免同時對 FRED 發出多個請求而被節流。"""
     import zipfile
     ids = ("DFF", "DFEDTARL", "DFEDTARU", "IORB", "RRPONTSYD", "RPONTSYD",
-           "WALCL", "TREAST", "WSHOMCB", "GFDEGDQ188S")
+           "WALCL", "WSHOSHO", "TREAST", "WSHOMCB", "WDTGAL", "WRESBAL",
+           "GFDEGDQ188S")
     start = (_utcnow() - timedelta(days=366 * 3 + 14)).strftime("%Y-%m-%d")
     # FRED 的批次 ZIP 對瀏覽器型 User-Agent 偶爾長時間掛住；官方下載端點用
     # 簡單的資料客戶端標頭反而穩定，且只需一個請求。
@@ -3264,6 +3265,44 @@ def _series_change(rows, periods):
     return round(rows[-1][1] - rows[-1 - periods][1], 3)
 
 
+def _liquidity_history(series):
+    """用 H.4.1 的每週日期建立可比的三年流動性序列。
+
+    WALCL、WSHOSHO、WDTGAL、WRESBAL 原單位為百萬美元；
+    RRPONTSYD 原單位為十億美元，先乘 1,000 統一成百萬美元。
+    淨流動性以 WALCL 每週觀察日為主，TGA 與 RRP 取當日或當日以前
+    最近一筆，避免把未來數值倒填到過去。
+    """
+    def normalized(key, multiplier=1):
+        return [(str(d)[:10], round(float(v) * multiplier, 3))
+                for d, v in (series.get(key) or []) if d and v is not None]
+
+    raw = {
+        "securities": normalized("WSHOSHO"),
+        "total_assets": normalized("WALCL"),
+        "tga": normalized("WDTGAL"),
+        "on_rrp": normalized("RRPONTSYD", 1000),
+        "bank_reserves": normalized("WRESBAL"),
+    }
+
+    def last_at_or_before(rows, date_text):
+        found = None
+        for date, value in rows:
+            if date > date_text:
+                break
+            found = value
+        return found
+
+    net = []
+    for date, assets in raw["total_assets"]:
+        tga = last_at_or_before(raw["tga"], date)
+        rrp = last_at_or_before(raw["on_rrp"], date)
+        if tga is not None and rrp is not None:
+            net.append((date, round(assets - tga - rrp, 3)))
+    raw["net_liquidity"] = net
+    return {key: rows[-160:] for key, rows in raw.items()}
+
+
 def _fed_policy_refresh_due(data):
     if not data:
         return True
@@ -3282,10 +3321,9 @@ def _fed_treasury_policy_data(force=False):
     started = time.perf_counter()
     series = {}
     errors = []
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=5) as ex:
         fred_future = ex.submit(_fred_policy_series_raw)
         effr_future = ex.submit(_nyfed_effr_raw)
-        tga_future = ex.submit(_fiscal_tga_raw)
         auction_future = ex.submit(_fiscal_auctions_raw)
         fiscal_future = ex.submit(_fiscal_debt_burden_raw)
         fomc_future = ex.submit(_fomc_calendar_raw)
@@ -3299,10 +3337,6 @@ def _fed_treasury_policy_data(force=False):
                 series["DFF"] = effr
         except Exception:
             pass  # FRED DFF 是備援；NY Fed 暫時失敗不讓整張政策卡變成失敗。
-        try:
-            tga = tga_future.result(timeout=35)
-        except Exception as exc:
-            tga, errors = [], errors + ["TGA:%s" % type(exc).__name__]
         try:
             auctions = auction_future.result(timeout=35)
         except Exception as exc:
@@ -3326,10 +3360,17 @@ def _fed_treasury_policy_data(force=False):
         "repo": {**latest("RPONTSYD"), "change_20": _series_change(series.get("RPONTSYD", []), 20)},
     }
     balance = {}
-    for key, name in (("WALCL", "total_assets"), ("TREAST", "treasury_holdings"),
-                      ("WSHOMCB", "mbs_holdings")):
+    for key, name in (("WALCL", "total_assets"), ("WSHOSHO", "securities"),
+                      ("TREAST", "treasury_holdings"), ("WSHOMCB", "mbs_holdings"),
+                      ("WRESBAL", "bank_reserves")):
         balance[name] = {**latest(key), "change_4w": _series_change(series.get(key, []), 4),
                          "change_13w": _series_change(series.get(key, []), 13)}
+    history = _liquidity_history(series)
+    net_rows = history.get("net_liquidity") or []
+    net_liquidity = ({"date": net_rows[-1][0], "value": net_rows[-1][1],
+                      "change_4w": _series_change(net_rows, 4),
+                      "change_13w": _series_change(net_rows, 13)} if net_rows else {})
+    liquidity["net_liquidity"] = net_liquidity
     debt_to_gdp = {**latest("GFDEGDQ188S"),
                    "change_4q": _series_change(series.get("GFDEGDQ188S", []), 4)}
     fiscal_health["debt_to_gdp"] = debt_to_gdp
@@ -3341,8 +3382,9 @@ def _fed_treasury_policy_data(force=False):
                        "some-illustrations-and-a-discussion-20220603.html"),
     }
     treasury = {
-        "tga": ({"date": tga[-1][0], "value": tga[-1][1],
-                 "change_20": _series_change(tga, min(20, max(1, len(tga) - 1)))} if tga else {}),
+        "tga": {**latest("WDTGAL"),
+                "change_4w": _series_change(series.get("WDTGAL", []), 4),
+                "change_13w": _series_change(series.get("WDTGAL", []), 13)},
         "auctions": auctions,
         "next_7d_offering_bn": round(sum(row["offering_bn"] for row in auctions
             if row.get("auction_date") <= str(((_utcnow() - timedelta(hours=_et_offset_hours(_utcnow()))).date()
@@ -3352,6 +3394,7 @@ def _fed_treasury_policy_data(force=False):
                    if x and x.get("date")]
     data = {"policy": policy, "liquidity": liquidity, "balance_sheet": balance,
             "treasury": treasury, "fiscal_health": fiscal_health, "next_fomc": fomc,
+            "liquidity_history": history,
             "as_of": max(fresh_dates) if fresh_dates else "",
             "fetched_at": _utcnow().strftime("%Y-%m-%d %H:%M UTC"), "errors": errors}
     # 部分來源失敗時保留前次完整子區塊；不能把正常畫面倒退成空白。
@@ -3367,7 +3410,7 @@ def _fed_treasury_policy_data(force=False):
         if not has_observation((data.get("fiscal_health") or {}).get(subkey)) and old_fiscal.get(subkey):
             data["fiscal_health"][subkey] = old_fiscal[subkey]
     for key in ("policy", "liquidity", "balance_sheet", "treasury", "fiscal_health",
-                "next_fomc"):
+                "next_fomc", "liquidity_history"):
         if not has_observation(data.get(key)) and old.get(key):
             data[key] = old[key]
     if any((data.get("policy"), data.get("liquidity"), data.get("balance_sheet"), data.get("treasury"))):
@@ -5795,9 +5838,11 @@ __SEO_HEAD__
   html[data-theme="c"] .home-industry{background:#21343A;border-color:#466068}
   html[data-theme="c"] .home-industry-list>span{background:#17252B;color:#F5EAD7}
   .fed-policy-panel{max-width:none;margin:0;padding:20px 22px}.fed-policy-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}.fed-policy-head h2{margin:0 0 4px;font-size:20px}.fed-policy-head p{margin:0;color:var(--mocha);font-size:12px;line-height:1.55}.fed-policy-status{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.policy-status{white-space:nowrap;border:1px solid var(--grounds);border-radius:999px;padding:4px 8px;font-size:11px;color:var(--mocha);background:var(--foam)}.policy-status.ok{color:var(--up);border-color:color-mix(in srgb,var(--up) 45%,var(--grounds))}.policy-status.warn{color:var(--caramel-2)}.policy-status.danger{color:var(--down)}
+  .fed-policy-fold{border:1px solid var(--grounds);border-radius:14px;background:color-mix(in srgb,var(--foam) 92%,var(--grounds));overflow:hidden}.fed-policy-fold+.fed-policy-fold{margin-top:10px}.fed-policy-fold>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;cursor:pointer;list-style:none;font-family:var(--font-head);font-weight:850;color:var(--espresso)}.fed-policy-fold>summary::-webkit-details-marker{display:none}.fed-policy-fold>summary:after{content:'›';font:700 24px/1 var(--font-num);color:var(--caramel-2);transform:rotate(90deg);transition:transform .18s}.fed-policy-fold[open]>summary:after{transform:rotate(-90deg)}.fed-policy-fold>summary small{margin-left:8px;font:500 11px var(--font-num);color:var(--mocha)}.policy-detail-fold>.policy-board{padding:0 16px 4px}.liquidity-dashboard{padding:0 16px 16px}.liquidity-hero{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 18px;border-radius:13px;background:linear-gradient(135deg,color-mix(in srgb,var(--caramel) 22%,var(--foam)),color-mix(in srgb,var(--up) 10%,var(--foam)));border:1px solid color-mix(in srgb,var(--caramel) 45%,var(--grounds))}.liquidity-hero small{color:var(--mocha)}.liquidity-hero h3{margin:3px 0 2px;font:850 27px var(--font-num)}.liquidity-hero p{margin:0;color:var(--caramel-2);font:700 12px var(--font-num)}.liquidity-delta{white-space:nowrap;padding:6px 9px;border-radius:999px;background:var(--foam);color:var(--up);font:700 12px var(--font-num)}.liquidity-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0 16px}.liquidity-metric{min-width:0;padding:12px;border:1px solid var(--grounds);border-radius:12px;background:var(--foam)}.liquidity-metric-top{display:flex;align-items:flex-start;justify-content:space-between;gap:4px;font-size:11px;font-weight:800;color:var(--espresso)}.liquidity-metric code{font-size:9px;color:var(--mocha)}.liquidity-metric>b{display:block;margin:8px 0 1px;font:800 17px var(--font-num);overflow-wrap:anywhere}.liquidity-metric>small{display:block;color:var(--caramel-2);font:700 10px var(--font-num)}.liquidity-metric>p{margin:8px 0 0;color:var(--mocha);font-size:10.5px;line-height:1.45}.liquidity-chart-head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:8px}.liquidity-chart-head h3{margin:0;font-size:16px}.liquidity-chart-head p{margin:2px 0 0;color:var(--mocha);font-size:10px}.liquidity-tabs{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.liquidity-tabs button{border:1px solid var(--grounds);border-radius:999px;background:var(--foam);color:var(--mocha);padding:5px 9px;font:700 10px var(--font-num);cursor:pointer}.liquidity-tabs button.on{background:var(--espresso);border-color:var(--espresso);color:var(--foam)}#liquidityChart{position:relative;min-height:220px;border:1px solid var(--grounds);border-radius:12px;padding:7px;background:var(--foam)}#liquidityChart svg{display:block;width:100%;height:auto;touch-action:none}.liquidity-chart-read{min-height:18px;padding:2px 5px;color:var(--espresso);font:700 11px var(--font-num)}.liquidity-formula-note{margin:8px 2px 0;color:var(--mocha);font-size:10px;line-height:1.5}
   .fed-policy-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.fed-policy-block{border:1px solid var(--grounds);border-radius:12px;padding:13px 14px;background:color-mix(in srgb,var(--foam) 88%,var(--grounds))}.fed-policy-block h3{font-size:15px;margin:0 0 9px}.policy-kpis{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.policy-kpi{min-width:0}.policy-kpi small{display:block;color:var(--mocha);font-size:11px;line-height:1.35}.policy-kpi b{display:block;margin-top:2px;font:700 17px var(--font-num);overflow-wrap:anywhere}.policy-note{margin:9px 0 0;color:var(--mocha);font-size:11px;line-height:1.55}.auction-list{margin:8px 0 0;padding:0;list-style:none;color:var(--mocha);font-size:11px;line-height:1.55}.auction-list b{color:var(--espresso)}.fomc-line{margin-top:10px;padding:10px 13px;border-left:4px solid var(--caramel);background:color-mix(in srgb,var(--foam) 82%,var(--caramel) 18%);font-size:12px}.fed-reading{margin-top:12px}.fed-source{margin-top:10px;color:var(--mocha);font-size:10.5px;line-height:1.5}.fed-source a{color:var(--caramel-2)}
   .policy-board{margin:0;padding:0;list-style:none;border-top:1px solid var(--grounds)}.policy-board li{display:grid;grid-template-columns:130px minmax(0,.9fr) minmax(0,1.3fr);align-items:center;gap:14px;padding:12px 2px;border-bottom:1px dashed var(--grounds)}.policy-board li.policy-board-section{display:block;padding:15px 2px 7px;border-bottom:1px solid var(--grounds);font-family:var(--font-head);font-weight:800;color:var(--caramel-2)}.policy-board-section small{margin-left:8px;font-family:var(--font-num);font-weight:500;color:var(--mocha)}.policy-board-label{font-weight:800;color:var(--espresso)}.policy-board-label small{display:block;margin-top:2px;font-size:10px;font-weight:500;color:var(--mocha)}.policy-board-data{font:700 13px/1.55 var(--font-num);color:var(--espresso)}.policy-board-read{font-size:12px;line-height:1.6;color:var(--mocha)}.policy-board-read b{color:var(--caramel-2)}.policy-board-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:11px}.policy-board-limit{margin:0;max-width:650px;color:var(--mocha);font-size:10.5px;line-height:1.55}
-  @media(max-width:560px){.fed-policy-panel{padding:17px 16px}.fed-policy-head{display:block}.fed-policy-status{justify-content:flex-start;margin-top:10px}.fed-policy-grid{grid-template-columns:1fr}.policy-kpis{grid-template-columns:1fr 1fr}.policy-board li{grid-template-columns:1fr;gap:3px;padding:12px 0}.policy-board-label{color:var(--caramel-2)}.policy-board-data{font-size:13px}.policy-board-read{font-size:11.5px}}
+  @media(max-width:900px){.liquidity-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.liquidity-metric:last-child{grid-column:1/-1}.liquidity-chart-head{align-items:flex-start;flex-direction:column}.liquidity-tabs{justify-content:flex-start}}
+  @media(max-width:560px){.fed-policy-panel{padding:17px 16px}.fed-policy-head{display:block}.fed-policy-status{justify-content:flex-start;margin-top:10px}.fed-policy-grid{grid-template-columns:1fr}.policy-kpis{grid-template-columns:1fr 1fr}.fed-policy-fold>summary{padding:13px 12px}.fed-policy-fold>summary small{display:block;margin:3px 0 0}.liquidity-dashboard{padding:0 10px 11px}.liquidity-hero{align-items:flex-start;flex-direction:column;padding:14px}.liquidity-hero h3{font-size:24px}.liquidity-metrics{grid-template-columns:1fr 1fr}.liquidity-metric{padding:10px}.liquidity-metric:last-child{grid-column:1/-1}.liquidity-tabs{display:grid;grid-template-columns:repeat(3,1fr);width:100%}.liquidity-tabs button{padding:7px 4px}.policy-detail-fold>.policy-board{padding:0 12px 3px}.policy-board li{grid-template-columns:1fr;gap:3px;padding:12px 0}.policy-board-label{color:var(--caramel-2)}.policy-board-data{font-size:13px}.policy-board-read{font-size:11.5px}}
   @media(max-width:560px){.home-actions,.home-action-panel .home-actions{grid-template-columns:1fr}.updnote{font-size:14px}.updnote small{font-size:12.5px}}
   @media(max-width:560px){.reading-row{grid-template-columns:54px 1fr}.ind-change-grid,.ind-stock-list{grid-template-columns:1fr}}
   @media(max-width:560px){.market-now-grid{grid-template-columns:1fr}.market-now-hero{padding:17px 18px}.market-now-title h1{font-size:27px}.market-now-badge{padding:6px 13px}.market-return-row{grid-template-columns:105px 1fr 88px}.market-return-row>span{padding:10px 8px}.market-return-main b,.market-return-med b{font-size:16px}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods{width:100%}.market-periods button{flex:1;padding:7px 5px}}
@@ -7831,6 +7876,23 @@ function drawHomeIndex(days=756){
   svg.addEventListener('pointerdown',e=>{e.preventDefault();svg.classList.add('dragging');svg.setPointerCapture(e.pointerId);show(e.clientX)});svg.addEventListener('pointermove',e=>{if(e.pointerType==='mouse'||svg.hasPointerCapture(e.pointerId)){e.preventDefault();show(e.clientX)}});const release=e=>{svg.classList.remove('dragging');if(svg.hasPointerCapture(e.pointerId))svg.releasePointerCapture(e.pointerId)};svg.addEventListener('pointerup',release);svg.addEventListener('pointercancel',release);show(svg.getBoundingClientRect().right-(R/W)*svg.getBoundingClientRect().width);
 }
 document.querySelectorAll('.market-periods button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.market-periods button').forEach(x=>x.classList.toggle('on',x===b));drawHomeIndex(Number(b.dataset.days))});drawHomeIndex();
+
+function drawLiquidityChart(key='net_liquidity'){
+  const box=$("#liquidityChart");if(!box)return;let all={};try{all=JSON.parse(box.dataset.series||"{}")}catch(e){}
+  const rows=all[key]||[], names={net_liquidity:['淨流動性','Net liquidity'],securities:['Fed 持有證券','Fed securities'],total_assets:['Fed 總資產','Fed total assets'],tga:['財政部現金 TGA','Treasury cash TGA'],on_rrp:['隔夜逆回購 RRP','Overnight RRP'],bank_reserves:['銀行準備金','Bank reserves']};
+  if(rows.length<2){box.innerHTML=`<div class="status">${LANG==='en'?'History is being prepared':'歷史資料正在整理'}</div>`;return}
+  const vals=rows.map(r=>Number(r[1])),W=900,H=220,L=72,R=22,T=12,B=27,lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.08,1),ylo=lo-pad,yhi=hi+pad,span=yhi-ylo;
+  const x=i=>L+i/(rows.length-1)*(W-L-R),y=v=>T+(yhi-v)/span*(H-T-B);
+  const zhMoney=v=>{const neg=v<0?'−':'';v=Math.abs(v);if(v>=1e6)return neg+(v/1e6).toFixed(2).replace(/\.?0+$/,'')+'兆美元';return neg+(v/100).toFixed(1).replace(/\.0$/,'')+'億美元'};
+  const enMoney=v=>'$'+(v/1e6).toFixed(2).replace(/\.?0+$/,'')+'T', money=v=>LANG==='en'?enMoney(v):zhMoney(v);
+  const ticks=[yhi,(yhi+ylo)/2,ylo],grid=ticks.map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grounds)" stroke-dasharray="4 3"/><text x="${L-7}" y="${y(v)+3}" text-anchor="end" font-size="10" fill="var(--mocha)">${money(v)}</text>`).join('');
+  const pts=vals.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' '),label=(names[key]||[key,key])[LANG==='en'?1:0];
+  box.innerHTML=`<div class="liquidity-chart-read"></div><svg viewBox="0 0 ${W} ${H}" aria-label="${label}">${grid}<polyline points="${pts}" fill="none" stroke="var(--caramel-2)" stroke-width="2.5" stroke-linejoin="round"/><line class="liquidity-guide" y1="${T}" y2="${H-B}" stroke="var(--mocha)" opacity="0"/><circle class="liquidity-dot" r="4.5" fill="var(--caramel-2)" stroke="var(--foam)" stroke-width="2" opacity="0"/><text x="${L}" y="${H-6}" font-size="10" fill="var(--mocha)">${rows[0][0].slice(0,7)}</text><text x="${W-R}" y="${H-6}" text-anchor="end" font-size="10" fill="var(--mocha)">${rows.at(-1)[0].slice(0,7)}</text></svg>`;
+  const svg=box.querySelector('svg'),read=box.querySelector('.liquidity-chart-read'),guide=box.querySelector('.liquidity-guide'),dot=box.querySelector('.liquidity-dot');
+  const show=clientX=>{const r=svg.getBoundingClientRect();let i=Math.round((((clientX-r.left)/r.width*W)-L)/(W-L-R)*(rows.length-1));i=Math.max(0,Math.min(rows.length-1,i));const gx=x(i),v=vals[i];read.textContent=`${rows[i][0]}　${label}　${money(v)}`;guide.setAttribute('x1',gx);guide.setAttribute('x2',gx);guide.setAttribute('opacity','.45');dot.setAttribute('cx',gx);dot.setAttribute('cy',y(v));dot.setAttribute('opacity','1')};
+  svg.addEventListener('pointerdown',e=>{e.preventDefault();svg.setPointerCapture(e.pointerId);show(e.clientX)});svg.addEventListener('pointermove',e=>{if(e.pointerType==='mouse'||svg.hasPointerCapture(e.pointerId))show(e.clientX)});svg.addEventListener('pointerup',e=>{if(svg.hasPointerCapture(e.pointerId))svg.releasePointerCapture(e.pointerId)});show(svg.getBoundingClientRect().right-(R/W)*svg.getBoundingClientRect().width);
+}
+document.querySelectorAll('[data-liquidity-key]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-liquidity-key]').forEach(x=>x.classList.toggle('on',x===b));drawLiquidityChart(b.dataset.liquidityKey)});drawLiquidityChart();
 
 /* ---- 大盤詳細數據：市場寬度的歷史折線圖 ----
    ⚠️ **展開才抓**，收合再展開不重複請求（照台股版 baro-box 的做法）。
@@ -10119,7 +10181,10 @@ def _fed_policy_panel_html():
     dff, lower, upper, iorb = (policy.get(k) or {} for k in ("dff", "dfedtarl", "dfedtaru", "iorb"))
     rrp, repo = liquid.get("on_rrp") or {}, liquid.get("repo") or {}
     assets = balance.get("total_assets") or {}; treas = balance.get("treasury_holdings") or {}
-    mbs = balance.get("mbs_holdings") or {}; tga = treasury.get("tga") or {}
+    securities = balance.get("securities") or {}; mbs = balance.get("mbs_holdings") or {}
+    reserves = balance.get("bank_reserves") or {}; tga = treasury.get("tga") or {}
+    net_liquidity = liquid.get("net_liquidity") or {}
+    history = data.get("liquidity_history") or {}
 
     def number(item, scale=1, suffix=""):
         try:
@@ -10138,6 +10203,34 @@ def _fed_policy_panel_html():
             return ("{:,.2f}".format(float(value) / scale).rstrip("0").rstrip(".") + suffix)
         except (TypeError, ValueError):
             return "—"
+
+    def zh_usd_millions(value, signed_value=False):
+        """輸入百萬美元，以中文「兆／億美元」顯示。"""
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return "—"
+        sign = ("+" if value > 0 else "−" if value < 0 else "") if signed_value else ("−" if value < 0 else "")
+        value = abs(value)
+        if value >= 1e6:
+            text, unit = "%.2f" % (value / 1e6), "兆美元"
+        else:
+            text, unit = "%.1f" % (value / 100), "億美元"
+        return sign + text.rstrip("0").rstrip(".") + unit
+
+    def zh_usd(value, signed_value=False):
+        """輸入美元，以中文大數單位顯示。"""
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return "—"
+        sign = ("+" if value > 0 else "−" if value < 0 else "") if signed_value else ("−" if value < 0 else "")
+        value = abs(value)
+        if value >= 1e12:
+            text, unit = "%.2f" % (value / 1e12), "兆美元"
+        else:
+            text, unit = "%.1f" % (value / 1e8), "億美元"
+        return sign + text.rstrip("0").rstrip(".") + unit
 
     def percent(value):
         try:
@@ -10181,20 +10274,22 @@ def _fed_policy_panel_html():
     liquid_en = ("ON RRP has declined over 20 observations, so less overnight cash is being absorbed." if isinstance(rrp_change, (int, float)) and rrp_change < 0 else
                  "ON RRP has risen over 20 observations, so more overnight cash is parked at the Fed." if isinstance(rrp_change, (int, float)) and rrp_change > 0 else
                  "ON RRP has changed little over 20 observations.")
-    holdings_4w = sum(x for x in (treas.get("change_4w"), mbs.get("change_4w")) if isinstance(x, (int, float)))
+    holdings_4w = securities.get("change_4w")
+    if not isinstance(holdings_4w, (int, float)):
+        holdings_4w = sum(x for x in (treas.get("change_4w"), mbs.get("change_4w")) if isinstance(x, (int, float)))
     if holdings_4w < -5000:
         balance_zh, balance_en = "公債與MBS持有量近4週縮減，資產負債表仍在收縮。", "Treasury and MBS holdings fell over four weeks; the balance sheet is still contracting."
     elif holdings_4w > 5000:
         balance_zh, balance_en = "公債與MBS持有量近4週增加；這不自動等同QE。", "Treasury and MBS holdings rose over four weeks; this alone is not QE."
     else:
         balance_zh, balance_en = "公債與MBS持有量近4週大致持平。", "Treasury and MBS holdings were broadly stable over four weeks."
-    tga_change = tga.get("change_20")
-    tga_zh = ("TGA近20期回補，通常會暫時吸收金融體系現金。" if isinstance(tga_change, (int, float)) and tga_change > 0 else
-              "TGA近20期下降，財政支出通常會把現金釋回金融體系。" if isinstance(tga_change, (int, float)) and tga_change < 0 else
-              "TGA近20期變化有限。")
-    tga_en = ("TGA rose over 20 observations, which usually absorbs cash from the financial system." if isinstance(tga_change, (int, float)) and tga_change > 0 else
-              "TGA fell over 20 observations; Treasury outlays usually return cash to the financial system." if isinstance(tga_change, (int, float)) and tga_change < 0 else
-              "TGA changed little over 20 observations.")
+    tga_change = tga.get("change_4w")
+    tga_zh = ("TGA近4週回補，通常會暫時從市場吸收現金。" if isinstance(tga_change, (int, float)) and tga_change > 0 else
+              "TGA近4週下降，財政支出通常會把現金釋回市場。" if isinstance(tga_change, (int, float)) and tga_change < 0 else
+              "TGA近4週變化有限。")
+    tga_en = ("TGA rose over four weeks, which usually absorbs cash from markets." if isinstance(tga_change, (int, float)) and tga_change > 0 else
+              "TGA fell over four weeks; Treasury outlays usually return cash to markets." if isinstance(tga_change, (int, float)) and tga_change < 0 else
+              "TGA changed little over four weeks.")
     debt_gdp_change = debt_gdp.get("change_4q")
     debt_gdp_zh = ("比率一年上升，債務增速快於名目經濟規模。" if isinstance(debt_gdp_change, (int, float)) and debt_gdp_change > .2 else
                    "比率一年下降，名目經濟規模增速高於債務。" if isinstance(debt_gdp_change, (int, float)) and debt_gdp_change < -.2 else
@@ -10209,10 +10304,10 @@ def _fed_policy_panel_html():
                  "A rising interest share leaves less room for other spending and can increase borrowing pressure.")
 
     auctions = treasury.get("auctions") or []
-    auction_zh = "、".join('%s %s $%.1fB' %
+    auction_zh = "、".join('%s %s %s' %
                           (_h.escape(str(x.get("auction_date") or "—")),
                            _h.escape(str(x.get("term") or x.get("type") or "")),
-                           float(x.get("offering_bn") or 0)) for x in auctions[:3]) or "尚無已公告標售"
+                           zh_usd_millions(float(x.get("offering_bn") or 0) * 1000)) for x in auctions[:3]) or "尚無已公告標售"
     auction_en = " · ".join('%s %s $%.1fB' %
                             (_h.escape(str(x.get("auction_date") or "—")),
                              _h.escape(str(x.get("term") or x.get("type") or "")),
@@ -10244,42 +10339,106 @@ def _fed_policy_panel_html():
     interest_date = _h.escape(str(interest.get("date") or "—"))
     gdp_date = _h.escape(str(debt_gdp.get("date") or "—"))
     qt_bp = amount(qt_model.get("ten_year_term_premium_bp"), 1, "bp")
+    chart_data = _h.escape(json.dumps(history, ensure_ascii=False, separators=(",", ":")), quote=True)
+
+    def metric_card(key, n, zh, en, code, item, change, read_zh, read_en, source_unit="million"):
+        raw_value = item.get("value")
+        zh_value = zh_usd_millions((float(raw_value) * 1000 if source_unit == "billion" else raw_value))
+        # 英文卡用傳統 B/T；中文卡固定只用兆／億美元。
+        try:
+            en_number = ("%.2f" % (float(raw_value) / (1e6 if source_unit == "million" else 1000))).rstrip("0").rstrip(".")
+            en_value = "$" + en_number + "T"
+        except (TypeError, ValueError):
+            en_value = "—"
+        change_million = (float(change) * 1000 if source_unit == "billion" and isinstance(change, (int, float)) else change)
+        return ('<article class="liquidity-metric" data-metric="%s"><div class="liquidity-metric-top"><span>%s</span><code>%s</code></div>'
+                '<b>%s</b><small>%s</small><p>%s</p></article>' % (
+                    key, bi(str(n) + "　" + zh, str(n) + "  " + en), code,
+                    bi(zh_value, en_value),
+                    bi("近4週 " + zh_usd_millions(change_million, True),
+                       "4w " + signed(change, 1000 if source_unit == "million" else 1, "B")),
+                    bi(read_zh, read_en)))
+
+    liquidity_dashboard = (
+        '<div class="liquidity-dashboard"><div class="liquidity-hero"><div><small>'
+        + bi("股市實際面對的美元流動性", "Dollar liquidity facing risk assets")
+        + '</small><h3>' + bi(zh_usd_millions(net_liquidity.get("value")),
+                              "$" + amount(net_liquidity.get("value"), 1e6, "T"))
+        + '</h3><p>WALCL − WDTGAL − RRPONTSYD</p></div><span class="liquidity-delta">'
+        + bi("近4週 " + zh_usd_millions(net_liquidity.get("change_4w"), True),
+             "4w " + signed(net_liquidity.get("change_4w"), 1000, "B"))
+        + '</span></div><div class="liquidity-metrics">'
+        + metric_card("securities", 1, "Fed 持有證券", "Fed securities", "WSHOSHO", securities,
+                      securities.get("change_4w"), "國債、MBS 與 Agency securities 合計；直接判斷 QT 本身。",
+                      "Treasuries, MBS and agency securities combined; the direct QT gauge.")
+        + metric_card("total_assets", 2, "Fed 總資產", "Fed total assets", "WALCL", assets,
+                      assets.get("change_4w"), "確認整體資產負債表最後是擴大或縮小。",
+                      "Confirms whether the overall balance sheet ultimately expanded or contracted.")
+        + metric_card("tga", 3, "財政部現金 TGA", "Treasury cash TGA", "WDTGAL", tga,
+                      tga.get("change_4w"), "TGA 上升通常從市場吸錢；下降通常向市場放錢。",
+                      "A rising TGA usually drains cash; a falling TGA usually releases it.")
+        + metric_card("on_rrp", 4, "隔夜逆回購 RRP", "Overnight RRP", "RRPONTSYD", rrp,
+                      rrp.get("change_20"), "RRP 下降通常釋放緩衝；上升代表更多現金停放 Fed。",
+                      "A falling RRP usually releases a buffer; a rise parks more cash at the Fed.", "billion")
+        + metric_card("bank_reserves", 5, "銀行準備金", "Bank reserves", "WRESBAL", reserves,
+                      reserves.get("change_4w"), "最後確認銀行體系真正還剩多少流動性。",
+                      "The final check on liquidity actually left in the banking system.")
+        + '</div><div class="liquidity-chart-head"><div><h3>'
+        + bi("近三年流動性走勢", "Three-year liquidity trend")
+        + '</h3><p>' + bi("點選指標切換；縱軸為兆／億美元", "Select a metric; y-axis uses USD")
+        + '</p></div><div class="liquidity-tabs">'
+        + ''.join('<button data-liquidity-key="%s"%s>%s</button>' % (key, ' class="on"' if key == "net_liquidity" else '', bi(zh, en))
+                  for key, zh, en in (("net_liquidity", "淨流動性", "Net liquidity"),
+                                      ("securities", "持有證券", "Securities"),
+                                      ("total_assets", "總資產", "Assets"), ("tga", "TGA", "TGA"),
+                                      ("on_rrp", "RRP", "RRP"), ("bank_reserves", "準備金", "Reserves")))
+        + '</div></div><div id="liquidityChart" data-series="' + chart_data + '"></div><p class="liquidity-formula-note">'
+        + bi("淨流動性是常用市場代理值，不是聯準會官方會計項目；不含其他 Fed 負債，不應單獨當作買賣訊號。",
+             "Net liquidity is a market proxy, not an official Fed accounting line; it excludes other Fed liabilities and is not a standalone trading signal.")
+        + '</p></div>')
     return (
         '<section class="card fed-policy-panel"><div class="fed-policy-head"><div><h2><span class="q-zh">聯準會與財政部動向</span><span class="q-en" style="display:none">Fed &amp; Treasury watch</span></h2>'
         '<p><span class="q-zh">從資金價格、美元流動性、國債供給到財政承受力；只描述已發生的變化</span><span class="q-en" style="display:none">From the price of money and dollar liquidity to Treasury supply and fiscal capacity; observed changes only</span></p></div><div class="fed-policy-status">'
         + status("利率", "Rates", str(dff.get("date") or ""), expected_lag=1, publish_hour=10)
         + status("資產負債表", "Balance sheet", str(assets.get("date") or ""), True)
         + status("財政部", "Treasury", str(tga.get("date") or ""), expected_lag=1, publish_hour=16) + '</div></div>'
-        '<ul class="policy-board">'
-        + section("一、資金價格", "1. Price of money", "數天至數月", "days to months")
+        + '<details class="fed-policy-fold liquidity-fold" open><summary>'
+        + bi("一、流動性數據<small>5 指標・近三年</small>",
+             "1. Liquidity data<small>5 gauges · three years</small>")
+        + '</summary>' + liquidity_dashboard + '</details>'
+        + '<details class="fed-policy-fold policy-detail-fold"><summary>'
+        + bi("二至五、政策與財政詳細數據<small>點擊展開</small>",
+             "2–5. Policy and fiscal detail<small>Tap to expand</small>")
+        + '</summary><ul class="policy-board">'
+        + section("二、資金價格", "2. Price of money", "數天至數月", "days to months")
         + row("政策利率", "Policy rate", "短期資金成本", "short-term funding cost",
               "目標 " + number(lower, 1, "%") + "–" + number(upper, 1, "%") + "　EFFR " + number(dff, 1, "%") + "　IORB " + number(iorb, 1, "%"),
               "Target " + number(lower, 1, "%") + "–" + number(upper, 1, "%") + " · EFFR " + number(dff, 1, "%") + " · IORB " + number(iorb, 1, "%"),
               policy_read_zh + " 這是資金價格與估值折現率的起點；降息若來自衰退，不一定立即利多。下次FOMC <b>" + fomc_date + "</b>。",
               policy_read_en + " This is the starting point for funding costs and discount rates; recession-driven cuts are not automatically bullish. Next FOMC: <b>" + fomc_date + "</b>.")
-        + section("二、短期美元流動性", "2. Short-term dollar liquidity", "數天至數週", "days to weeks")
+        + section("三、短期美元流動性", "3. Short-term dollar liquidity", "數天至數週", "days to weeks")
         + row("隔夜流動性", "Overnight liquidity", "貨幣基金緩衝", "money-fund buffer",
-              "ON RRP $" + number(rrp, 1, "B") + "　20期 " + signed(rrp_change, 1, "B") + "　Repo $" + number(repo, 1, "B"),
+              "ON RRP " + zh_usd_millions(float(rrp.get("value") or 0) * 1000) + "　20期 " + zh_usd_millions(float(rrp_change or 0) * 1000, True) + "　Repo " + zh_usd_millions(float(repo.get("value") or 0) * 1000),
               "ON RRP $" + number(rrp, 1, "B") + " · 20 obs " + signed(rrp_change, 1, "B") + " · Repo $" + number(repo, 1, "B"),
               liquid_zh + " ON RRP下降可能緩衝發債與縮表，但不代表資金一定流入股票。",
               liquid_en + " Falling ON RRP can cushion issuance and QT, but does not mean cash must flow into stocks.")
         + row("財政部現金", "Treasury cash", "銀行準備金流向", "bank-reserve flow",
-              "TGA $" + number(tga, 1000, "B") + "　20期 " + signed(tga_change, 1000, "B"),
-              "TGA $" + number(tga, 1000, "B") + " · 20 obs " + signed(tga_change, 1000, "B"),
-              tga_zh + " 只看一日容易誤判，應搭配20期方向。",
-              tga_en + " One day is noisy; read the 20-observation direction.")
-        + section("三、國債供給與聯準會資產負債表", "3. Treasury supply & Fed balance sheet", "數週至數年", "weeks to years")
+              "TGA " + zh_usd_millions(tga.get("value")) + "　4週 " + zh_usd_millions(tga_change, True),
+              "TGA $" + number(tga, 1000000, "T") + " · 4w " + signed(tga_change, 1000, "B"),
+              tga_zh + " 只看一週容易誤判，應搭配4週方向。",
+              tga_en + " One week is noisy; read the four-week direction.")
+        + section("四、國債供給與聯準會資產負債表", "4. Treasury supply & Fed balance sheet", "數週至數年", "weeks to years")
         + row("聯準會持有", "Fed holdings", "市場承接久期", "duration absorbed by markets",
-              "總資產 $" + number(assets, 1000000, "T") + "　美債 $" + number(treas, 1000000, "T") + "　MBS $" + number(mbs, 1000000, "T") + "　4週 " + signed(holdings_4w, 1000, "B"),
+              "總資產 " + zh_usd_millions(assets.get("value")) + "　持有證券 " + zh_usd_millions(securities.get("value")) + "　4週 " + zh_usd_millions(holdings_4w, True),
               "Assets $" + number(assets, 1000000, "T") + " · Treasuries $" + number(treas, 1000000, "T") + " · MBS $" + number(mbs, 1000000, "T") + " · 4w " + signed(holdings_4w, 1000, "B"),
               balance_zh + " 持有量增加不自動等於QE。",
               balance_en + " An increase in holdings is not automatically QE.")
         + row("國債標售", "Treasury auctions", "近期新增供給", "near-term new supply",
-              "未來7日合計 $%.1fB" % auction_total, "Next 7 days $%.1fB" % auction_total,
+              "未來7日合計 " + zh_usd_millions(auction_total * 1000), "Next 7 days $%.1fB" % auction_total,
               auction_zh + "。標售量大且需求弱時，殖利率壓力通常較高。",
               auction_en + ". Large supply combined with weak demand tends to pressure yields higher.")
         + row("美債總額", "Total federal debt", "長期債務存量", "long-term debt stock",
-              "總額 $" + amount(debt.get("total"), 1e12, "T") + "　公眾持有 $" + amount(debt.get("held_public"), 1e12, "T") + "　政府內部 $" + amount(debt.get("intragov"), 1e12, "T"),
+              "總額 " + zh_usd(debt.get("total")) + "　公眾持有 " + zh_usd(debt.get("held_public")) + "　政府內部 " + zh_usd(debt.get("intragov")),
               "Total $" + amount(debt.get("total"), 1e12, "T") + " · held by public $" + amount(debt.get("held_public"), 1e12, "T") + " · intragovernmental $" + amount(debt.get("intragov"), 1e12, "T"),
               "截至 " + debt_date + "。總額是存量，不是明日到期額；對市場較直接的是公眾需要承接的部分。",
               "As of " + debt_date + ". This is a stock, not debt due tomorrow; the publicly held share is more directly relevant to markets.")
@@ -10292,18 +10451,18 @@ def _fed_policy_panel_html():
               "SOMA減少 GDP 1%　約 +" + qt_bp, "SOMA down 1% of GDP · about +" + qt_bp,
               "聯準會模型參考值，不是固定換算；期限、速度與市場預期都會改變結果。",
               "A Federal Reserve model reference, not a fixed conversion; maturity, pace and expectations all change the result.")
-        + section("四、財政承受力", "4. Fiscal capacity", "數月至數年", "months to years")
+        + section("五、財政承受力", "5. Fiscal capacity", "數月至數年", "months to years")
         + row("利息支出", "Interest expense", "再融資成本", "refinancing cost",
-              "FY" + fiscal_year + "累計毛利息 $" + amount(interest.get("gross_fytd"), 1e12, "T") + "　平均利率 " + percent(interest.get("avg_rate_pct")) + "　年化粗估 $" + amount(interest.get("annualized_cost_estimate"), 1e12, "T"),
+              "FY" + fiscal_year + "累計毛利息 " + zh_usd(interest.get("gross_fytd")) + "　平均利率 " + percent(interest.get("avg_rate_pct")) + "　年化粗估 " + zh_usd(interest.get("annualized_cost_estimate")),
               "FY" + fiscal_year + " gross interest $" + amount(interest.get("gross_fytd"), 1e12, "T") + " · average rate " + percent(interest.get("avg_rate_pct")) + " · annualized estimate $" + amount(interest.get("annualized_cost_estimate"), 1e12, "T"),
               "截至 " + interest_date + "。利率上升會隨舊債到期再融資逐步傳導，不能用Fed利率直接乘總債務。",
               "As of " + interest_date + ". Higher rates feed through gradually as old debt matures; do not multiply total debt by the Fed rate.")
         + row("國債利息／國庫收入", "Debt interest / Treasury receipts", "財政空間", "fiscal room",
-              "毛利息 $" + amount(interest.get("gross_fytd"), 1e12, "T") + " ÷ 收入 $" + amount(interest.get("revenue_fytd"), 1e12, "T") + " ＝ " + percent(interest_share),
+              "毛利息 " + zh_usd(interest.get("gross_fytd")) + " ÷ 收入 " + zh_usd(interest.get("revenue_fytd")) + " ＝ " + percent(interest_share),
               "Gross interest $" + amount(interest.get("gross_fytd"), 1e12, "T") + " / receipts $" + amount(interest.get("revenue_fytd"), 1e12, "T") + " = " + percent(interest_share),
               burden_zh + " 此處是同期毛利息口徑，不是扣除政府利息收入後的淨利息。",
               burden_en + " This is same-period gross interest, not net interest after government interest income.")
-        + '</ul><div class="policy-board-meta"><p class="policy-board-limit">'
+        + '</ul></details><div class="policy-board-meta"><p class="policy-board-limit">'
         + bi("資料截至 " + as_of + "。不同指標的時間尺度不同，任何單一數字都不能預測股市；只有官方明確啟動淨資產購買計畫才標示為QE。",
              "Data as of " + as_of + ". These indicators operate on different horizons and none can forecast stocks alone. QE is shown only for an officially announced net asset-purchase programme.")
         + '</p><div class="fed-source"><a class="q-zh" href="/article/how-fed-liquidity-debt-and-rates-affect-us-stocks">完整解讀</a><a class="q-en" style="display:none" href="/en/article/how-fed-liquidity-debt-and-rates-affect-us-stocks">Full guide</a> · <a href="https://fred.stlouisfed.org/" target="_blank" rel="noopener">Fed / FRED</a> · <a href="https://fiscaldata.treasury.gov/" target="_blank" rel="noopener">Treasury</a> · <a href="https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" target="_blank" rel="noopener">FOMC</a></div></div></section>')

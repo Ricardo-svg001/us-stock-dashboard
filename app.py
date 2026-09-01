@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.09.01.3"
+APP_VERSION = "2026.09.01.4"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1416,15 +1416,8 @@ def _deduction_index_backtest(rows, short_ma=50, long_ma=150, years=10):
         if (armed and dates[index] >= cutoff and 0.96 <= ratio <= 1.04
                 and prior_ratio > 1.04):
             end = min(len(closes) - 1, index + horizon_sessions)
-            short_break = half_break = None
-            recovered_short = False
+            half_break = None
             for future in range(index + 1, end + 1):
-                if closes[future] > short_values[future]:
-                    recovered_short = True
-                if (recovered_short and short_break is None
-                        and closes[future] < short_values[future]
-                        and closes[future - 1] >= short_values[future - 1]):
-                    short_break = future
                 if (future >= index + 3 and all(
                         closes[pos] <= long_values[pos] * 0.95
                         for pos in (future - 2, future - 1, future))):
@@ -1440,7 +1433,6 @@ def _deduction_index_backtest(rows, short_ma=50, long_ma=150, years=10):
 
             events.append({"signal_date": dates[index].isoformat(),
                            "followup_sessions": len(closes) - 1 - index,
-                           "short_break": event_value(short_break),
                            "half_break": event_value(half_break)})
             index = half_break if half_break is not None else end
             bull_streak, armed = 0, False
@@ -1455,23 +1447,21 @@ def _deduction_index_backtest(rows, short_ma=50, long_ma=150, years=10):
                      (ordered[size // 2 - 1] + ordered[size // 2]) / 2, 1)
 
     horizons = {}
-    for months, sessions in ((3, 63), (6, 126), (9, 189)):
-        eligible = [event for event in events if event["followup_sessions"] >= sessions]
-        short_hits = sum(event["short_break"]["sessions"] is not None
-                         and event["short_break"]["sessions"] <= sessions for event in eligible)
+    for months in range(3, 10):
+        sessions = months * 21
+        eligible = [event for event in events
+                    if event["followup_sessions"] >= sessions
+                    or (event["half_break"]["sessions"] is not None
+                        and event["half_break"]["sessions"] <= sessions)]
         half_hits = sum(event["half_break"]["sessions"] is not None
                         and event["half_break"]["sessions"] <= sessions for event in eligible)
         horizons[str(months)] = {
-            "eligible": len(eligible), "short_breaks": short_hits,
-            "short_pct": round(short_hits / len(eligible) * 100, 1) if eligible else None,
-            "half_breaks": half_hits,
+            "eligible": len(eligible), "half_breaks": half_hits,
             "half_pct": round(half_hits / len(eligible) * 100, 1) if eligible else None}
     return {"as_of": dates[-1].isoformat(), "from": cutoff.isoformat(), "years": years,
             "short_ma": short_ma, "long_ma": long_ma, "zone_pct": 4,
             "bull_confirm_sessions": 20, "horizon_sessions": horizon_sessions,
             "event_count": len(events), "events": events, "horizons": horizons,
-            "short_median_months": median([event["short_break"]["months"] for event in events
-                                           if event["short_break"]["months"] is not None]),
             "half_median_months": median([event["half_break"]["months"] for event in events
                                           if event["half_break"]["months"] is not None])}
 
@@ -5325,9 +5315,9 @@ __SEO_HEAD__
   .ded-warn { max-width:560px; margin:14px auto 0; font-size:12.5px; color:var(--mocha);
               line-height:1.8; background:var(--foam); border:1px solid var(--grounds);
               border-radius:10px; padding:10px 13px; }
-  .ded-backtest-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.ded-backtest-kpi{padding:10px;border:1px solid var(--grounds);border-radius:10px;background:var(--milk);font-size:11px;color:var(--mocha)}.ded-backtest-kpi b{display:block;margin-top:4px;font:800 20px var(--font-num);color:var(--espresso)}.ded-backtest-table{width:100%;border-collapse:collapse;font-size:12px}.ded-backtest-table th,.ded-backtest-table td{padding:8px 7px;border-bottom:1px solid var(--grounds);text-align:left;vertical-align:top}.ded-backtest-table th{color:var(--mocha);font-size:11px}.ded-backtest-method{font-size:11.5px;color:var(--mocha);line-height:1.7;margin:10px 0}.ded-backtest-horizons{display:grid;gap:5px;margin:10px 0}.ded-backtest-horizons>div{display:grid;grid-template-columns:70px 1fr 1fr;gap:8px;padding:7px 9px;border-radius:8px;background:var(--foam);font-size:11.5px}.ded-backtest-horizons b{font-family:var(--font-num)}
+  .ded-backtest-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.ded-backtest-kpi{padding:10px;border:1px solid var(--grounds);border-radius:10px;background:var(--milk);font-size:11px;color:var(--mocha)}.ded-backtest-kpi b{display:block;margin-top:4px;font:800 20px var(--font-num);color:var(--espresso)}.ded-backtest-table{width:100%;border-collapse:collapse;font-size:12px}.ded-backtest-table th,.ded-backtest-table td{padding:8px 7px;border-bottom:1px solid var(--grounds);text-align:left;vertical-align:top}.ded-backtest-table th{color:var(--mocha);font-size:11px}.ded-backtest-method{font-size:11.5px;color:var(--mocha);line-height:1.7;margin:10px 0}.ded-backtest-horizons{display:grid;gap:5px;margin:10px 0}.ded-backtest-horizons>div{display:grid;grid-template-columns:70px 1fr;gap:8px;padding:7px 9px;border-radius:8px;background:var(--foam);font-size:11.5px}.ded-backtest-horizons b{font-family:var(--font-num)}
   @media (max-width:640px){ .ded-grid { grid-template-columns:1fr; } }
-  @media (max-width:640px){.ded-backtest-kpis{grid-template-columns:1fr}.ded-backtest-table{font-size:11px}.ded-backtest-horizons>div{grid-template-columns:58px 1fr}.ded-backtest-horizons>div span:last-child{grid-column:2}}
+  @media (max-width:640px){.ded-backtest-kpis{grid-template-columns:1fr}.ded-backtest-table{font-size:11px}.ded-backtest-horizons>div{grid-template-columns:58px 1fr}}
   /* ---- 風控管理 ---- */
   .chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px;
             background:var(--milk); border:1px solid var(--grounds); border-radius:999px;
@@ -6455,7 +6445,8 @@ __QUOTES_HTML__
       均線追上來之後，原本在下方的支撐就貼到價格附近，行情通常得選邊——
       所以這個天數可以當成「<b>還有多少時間可以慢慢整理</b>」的粗估。</p>
       <p>現在只保留<b>盤整假設</b>：價格停在指定價位，估算均線還要多久才會追上。
-      另外提供近十年 Nasdaq 大盤歷史事件回測，檢查多頭首次回到 150MA 附近後的後續風險。</p>
+      另外提供近十年 Nasdaq 大盤歷史事件回測：多頭行情首次回到 150MA ±4% 範圍後，
+      統計第 3 至第 9 個月內跌破 150MA 的累積機率；跌破定義為連續 3 天收盤低於各日 150MA 5% 以上。</p>
       <p>⚠️ <b>這是算術外推與歷史統計，不是預測。</b>天數與歷史比例都不是未來保證。</p>
     </div>
   </details>
@@ -6727,7 +6718,7 @@ const I18N = { en: {
   "nav.deduct": "MA Deduction", "nav.deduct.sub": "When the 50/100/150MA catches up",
   "p10.title": "Moving-Average Deduction",
   "ded.introT": "How much time is left to consolidate?",
-  "ded.intro": "<p><b>Deduction is arithmetic, not prediction.</b> The 50-day average drops the close from 50 sessions ago and adds the next close; the value being dropped is the <b>deduction value</b>.</p><p>This page now keeps only the <b>flat-price assumption</b>: price stays at the selected level while we estimate when the 50MA, 100MA and 150MA catch up. It also adds a ten-year Nasdaq Composite event backtest covering the first pullback toward the 150MA after an established uptrend.</p><p>⚠️ Arithmetic estimates and historical frequencies are not forecasts or guarantees.</p>",
+  "ded.intro": "<p><b>Deduction is arithmetic, not prediction.</b> The 50-day average drops the close from 50 sessions ago and adds the next close; the value being dropped is the <b>deduction value</b>.</p><p>This page keeps only the <b>flat-price assumption</b>: price stays at the selected level while we estimate when the 50MA, 100MA and 150MA catch up. Its ten-year Nasdaq Composite backtest measures the cumulative chance of a 150MA breakdown in months 3 through 9 after an established uptrend first pulls back into the 150MA ±4% zone. A breakdown requires three consecutive closes at least 5% below each day's 150MA.</p><p>⚠️ Arithmetic estimates and historical frequencies are not forecasts or guarantees.</p>",
   "ded.pick": "Choose a symbol", "ded.index": "Nasdaq Composite", "ded.stock": "Stock (top 300)",
   "ded.ph": "Ticker or company name, e.g. AAPL",
   "ded.price": "Price to reach",
@@ -8700,34 +8691,32 @@ function dedBacktestHtml(b){
       ? (LANG === 'en' ? 'Not observed in 9 months' : '9 個月內未發生')
       : (LANG === 'en' ? 'Still being observed' : '持續觀察中');
   };
-  const horizons = ['3','6','9'].map(m => {
+  const horizons = ['3','4','5','6','7','8','9'].map(m => {
     const x = b.horizons[m] || {};
     return '<div><b>' + m + (LANG === 'en' ? ' months' : ' 個月') + '</b>'
-      + '<span>' + (LANG === 'en' ? '50MA re-break: ' : '再跌破 50MA：')
-      + (x.short_breaks || 0) + '/' + (x.eligible || 0) + '（' + pct(x.short_pct) + '）</span>'
       + '<span>' + (LANG === 'en' ? '150MA break: ' : '跌破 150MA：')
       + (x.half_breaks || 0) + '/' + (x.eligible || 0) + '（' + pct(x.half_pct) + '）</span></div>';
   }).join('');
   const rows = (b.events || []).map(e => '<tr><td>' + e.signal_date + '</td><td>'
-    + eventCell(e.short_break, e.followup_sessions) + '</td><td>'
     + eventCell(e.half_break, e.followup_sessions) + '</td></tr>').join('');
+  const observed = (b.events || []).filter(e => e.half_break && e.half_break.date).length;
+  const nine = b.horizons['9'] || {};
   return '<div class="card"><h2>'
     + (LANG === 'en' ? '10-year Nasdaq Composite backtest' : '近十年 Nasdaq 指數歷史回測') + '</h2>'
     + '<div class="ded-backtest-kpis"><div class="ded-backtest-kpi">'
     + (LANG === 'en' ? 'Signals' : '樣本事件') + '<b>' + b.event_count + '</b></div>'
-    + '<div class="ded-backtest-kpi">' + (LANG === 'en' ? 'Median to 50MA re-break' : '再次跌破 50MA 中位時間')
-    + '<b>' + med(b.short_median_months) + '</b></div><div class="ded-backtest-kpi">'
-    + (LANG === 'en' ? 'Median to 150MA break' : '跌破 150MA 中位時間')
-    + '<b>' + med(b.half_median_months) + '</b></div></div>'
+    + '<div class="ded-backtest-kpi">' + (LANG === 'en' ? 'Observed breakdowns' : '已發生跌破')
+    + '<b>' + observed + '</b></div><div class="ded-backtest-kpi">'
+    + (LANG === 'en' ? '9-month cumulative rate' : '9 個月累積機率')
+    + '<b>' + pct(nine.half_pct) + '</b></div></div>'
     + '<div class="ded-backtest-horizons">' + horizons + '</div>'
     + '<div style="overflow-x:auto"><table class="ded-backtest-table"><thead><tr><th>'
-    + (LANG === 'en' ? 'First pullback' : '首次回檔訊號') + '</th><th>'
-    + (LANG === 'en' ? '50MA re-break' : '再次跌破 50MA') + '</th><th>'
+    + (LANG === 'en' ? 'First pullback into 150MA ±4%' : '首次回到 150MA ±4%') + '</th><th>'
     + (LANG === 'en' ? '150MA break' : '跌破 150MA')
     + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
     + '<div class="ded-backtest-method">' + (LANG === 'en'
-      ? 'Definition: after 20 straight sessions with Nasdaq above the 50MA above the 150MA and at least 4% above the 150MA, take the first close entering the 150MA ±4% zone. A 50MA event must first recover above the 50MA and then cross below it. A 150MA break requires three consecutive closes at least 5% below each day’s 150MA. The 3/6/9-month rates include only signals with complete follow-up for that horizon.'
-      : '口徑：Nasdaq 指數連續 20 個交易日維持「指數 > 50MA > 150MA」，且至少高於 150MA 4% 後，首次收盤進入 150MA ±4% 範圍。短期均線事件須先站回 50MA，再由上往下跌破；150MA 跌破則須連續 3 天收盤低於各日 150MA 5% 以上。3／6／9 個月比率只納入該期間追蹤完整的訊號。')
+      ? 'Definition: after 20 straight sessions with Nasdaq above the 50MA above the 150MA and at least 4% above the 150MA, take the first close entering the 150MA ±4% zone. A breakdown requires three consecutive index closes at least 5% below each day’s 150MA. Month 3 through month 9 are cumulative rates and include signals whose breakdown is already known or whose follow-up is complete for that horizon. Median observed breakdown time: ' + med(b.half_median_months) + '.'
+      : '口徑：Nasdaq 指數連續 20 個交易日維持「指數 > 50MA > 150MA」，且至少高於 150MA 4% 後，取首次收盤進入 150MA ±4% 範圍的事件。跌破定義為連續 3 天大盤收盤價低於各日 150MA 5% 以上。第 3 至第 9 個月顯示累積機率，各月份納入已確定跌破，或追蹤期已完整的訊號。已發生跌破的中位時間：' + med(b.half_median_months) + '。')
     + '<br>' + (LANG === 'en' ? 'Data through ' : '資料截至 ') + b.as_of + '</div></div>';
 }
 async function runDeduct(){
@@ -9545,11 +9534,11 @@ PAGE_ROUTES = {
         "page": "p10", "index": True,
         "zh": ("均線扣抵法｜盤整推估與近十年 Nasdaq 回測",
                "用扣抵值推算納斯達克綜合指數或個股的 50、100、150 日線，"
-               "估計盤整時還要幾個交易日才會追上指定價位，並查看近十年多頭首次回檔的 3／6／9 個月歷史統計。"),
+               "估計盤整時還要幾個交易日才會追上指定價位，並查看近十年多頭首次回到 150MA ±4% 後，第 3 至第 9 個月跌破半年線的累積機率。"),
         "en": ("Moving-Average Deduction｜Flat Estimate and 10-Year Nasdaq Backtest",
                "Project the 50-, 100- and 150-day moving averages for the Nasdaq Composite or any "
-               "top-300 US stock under a flat-price assumption, plus 3/6/9-month statistics from "
-               "ten years of first-pullback events in the Nasdaq Composite."),
+               "top-300 US stock under a flat-price assumption, plus month-3 through month-9 cumulative "
+               "150MA-breakdown probabilities from ten years of first-pullback events in the Nasdaq Composite."),
     },
     "alerts": {
         "page": "p4", "index": False,

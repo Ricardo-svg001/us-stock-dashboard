@@ -41,12 +41,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.09.01.1"
+APP_VERSION = "2026.09.01.2"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 BREAKOUT_STRUCTURE_FILE = os.path.join(BASE_DIR, "breakout_structure_seed.json")
 INDUSTRY_TAXONOMY_FILE = os.path.join(BASE_DIR, "industry_taxonomy_seed.json")
+DEDUCTION_INDEX_SEED_FILE = os.path.join(BASE_DIR, "deduction_index_10y_seed.json")
 _INDUSTRY_TAXONOMY_MEMO = {"mtime": None, "data": None}
 STRUCTURE_VERSION = 3
 STRUCTURE_PERIODS = {"6m": 126, "1y": 252, "2y": 504, "5y": 1260}
@@ -1289,7 +1290,7 @@ def home_quotes(lang="zh", phase=None):
 
 # ---------------------------------------------------------------- 均線扣抵法
 #
-# 與台股版**同一套算法、同樣的函式名**（`_ma_deduction` / `_recent_slope`）——
+# 與台股版**同一套算法、同樣的函式名**（`_ma_deduction` / `_deduction_index_backtest`）——
 # 兩邊要改就一起改。差別只有均線組合與資料來源。
 #
 # 「扣抵」是移動平均的算術性質，不是預測：
@@ -1329,11 +1330,7 @@ DEDUCT_MAS = (50, 100, 150)
 #    往後推的天數若小於 N，那條均線的「盤整」那一列就會**永遠顯示「超過 N 個交易日」**，
 #    而正確答案其實是算得出來的。使用者會以為那條線追不上，實際上只是我們沒算完。
 DEDUCT_MAX_DAYS = max(DEDUCT_MAS)
-DEDUCT_SLOPE_LOOKBACK = 20      # 「延續趨勢」用近幾日的實際斜率
-
-
-def _ma_deduction(closes, target, days_ahead=DEDUCT_MAX_DAYS,
-                  daily_change=0.0, periods=DEDUCT_MAS):
+def _ma_deduction(closes, target, days_ahead=DEDUCT_MAX_DAYS, periods=DEDUCT_MAS):
     """均線扣抵試算。回傳每條均線的現值、明日扣抵 K 棒、追上目標所需交易日。
 
     ⚠️ **「追上」要分兩個方向講清楚**：均線在價格下方時是均線往上追；
@@ -1355,7 +1352,6 @@ def _ma_deduction(closes, target, days_ahead=DEDUCT_MAX_DAYS,
         if (below and ma_now >= target) or (not below and ma_now <= target):
             crossed = 0
         for i in range(1, days_ahead + 1 if crossed is None else 1):
-            price = price * (1 + daily_change)
             w = w[1:] + [price]
             ma = sum(w) / n
             days = i
@@ -1378,17 +1374,105 @@ def _ma_deduction(closes, target, days_ahead=DEDUCT_MAX_DAYS,
     return out
 
 
-def _recent_slope(closes, lookback=DEDUCT_SLOPE_LOOKBACK):
-    """近 lookback 個交易日的平均每日變動比例。資料不足或算不出來回 0。
+def _deduction_index_backtest(rows, short_ma=50, long_ma=150, years=10):
+    """多頭首次回到長期均線附近後的逐日事件回測；訊號當下不使用未來資料。"""
+    clean = []
+    for date, close in rows:
+        try:
+            day = datetime.strptime(str(date)[:10], "%Y-%m-%d").date()
+            value = float(close)
+            if value > 0:
+                clean.append((day, value))
+        except (TypeError, ValueError):
+            continue
+    clean.sort(key=lambda row: row[0])
+    if len(clean) < long_ma + 20:
+        return {"error": "not_enough_history", "events": []}
+    dates = [row[0] for row in clean]
+    closes = [row[1] for row in clean]
 
-    ⚠️ 用頭尾的複合成長率，不是線性迴歸：使用者要的是「照最近的速度走下去」。
-    """
-    if len(closes) < lookback + 1:
-        return 0.0
-    a, b = float(closes[-lookback - 1]), float(closes[-1])
-    if a <= 0 or b <= 0:
-        return 0.0
-    return (b / a) ** (1.0 / lookback) - 1.0
+    def rolling_ma(period):
+        out = [None] * len(closes)
+        total = sum(closes[:period])
+        out[period - 1] = total / period
+        for index in range(period, len(closes)):
+            total += closes[index] - closes[index - period]
+            out[index] = total / period
+        return out
+
+    short_values, long_values = rolling_ma(short_ma), rolling_ma(long_ma)
+    cutoff = dates[-1] - timedelta(days=round(years * 365.25))
+    horizon_sessions = 189
+    events, index, bull_streak, armed = [], long_ma, 0, False
+    while index < len(closes):
+        bull = (closes[index] > short_values[index] > long_values[index]
+                and closes[index] > long_values[index] * 1.04)
+        bull_streak = bull_streak + 1 if bull else 0
+        if bull_streak >= 20:
+            armed = True
+        ratio = closes[index] / long_values[index]
+        prior_ratio = closes[index - 1] / long_values[index - 1]
+        if (armed and dates[index] >= cutoff and 0.96 <= ratio <= 1.04
+                and prior_ratio > 1.04):
+            end = min(len(closes) - 1, index + horizon_sessions)
+            short_break = half_break = None
+            recovered_short = False
+            for future in range(index + 1, end + 1):
+                if closes[future] > short_values[future]:
+                    recovered_short = True
+                if (recovered_short and short_break is None
+                        and closes[future] < short_values[future]
+                        and closes[future - 1] >= short_values[future - 1]):
+                    short_break = future
+                if (future >= index + 3 and all(
+                        closes[pos] <= long_values[pos] * 0.95
+                        for pos in (future - 2, future - 1, future))):
+                    half_break = future
+                    break
+
+            def event_value(position):
+                if position is None:
+                    return {"date": None, "sessions": None, "months": None}
+                return {"date": dates[position].isoformat(),
+                        "sessions": position - index,
+                        "months": round((dates[position] - dates[index]).days / 30.44, 1)}
+
+            events.append({"signal_date": dates[index].isoformat(),
+                           "followup_sessions": len(closes) - 1 - index,
+                           "short_break": event_value(short_break),
+                           "half_break": event_value(half_break)})
+            index = half_break if half_break is not None else end
+            bull_streak, armed = 0, False
+        index += 1
+
+    def median(values):
+        ordered = sorted(values)
+        size = len(ordered)
+        if not size:
+            return None
+        return round(ordered[size // 2] if size % 2 else
+                     (ordered[size // 2 - 1] + ordered[size // 2]) / 2, 1)
+
+    horizons = {}
+    for months, sessions in ((3, 63), (6, 126), (9, 189)):
+        eligible = [event for event in events if event["followup_sessions"] >= sessions]
+        short_hits = sum(event["short_break"]["sessions"] is not None
+                         and event["short_break"]["sessions"] <= sessions for event in eligible)
+        half_hits = sum(event["half_break"]["sessions"] is not None
+                        and event["half_break"]["sessions"] <= sessions for event in eligible)
+        horizons[str(months)] = {
+            "eligible": len(eligible), "short_breaks": short_hits,
+            "short_pct": round(short_hits / len(eligible) * 100, 1) if eligible else None,
+            "half_breaks": half_hits,
+            "half_pct": round(half_hits / len(eligible) * 100, 1) if eligible else None}
+    return {"as_of": dates[-1].isoformat(), "from": cutoff.isoformat(), "years": years,
+            "short_ma": short_ma, "long_ma": long_ma, "zone_pct": 4,
+            "bull_confirm_sessions": 20, "horizon_sessions": horizon_sessions,
+            "event_count": len(events), "events": events, "horizons": horizons,
+            "short_median_months": median([event["short_break"]["months"] for event in events
+                                           if event["short_break"]["months"] is not None]),
+            "half_median_months": median([event["half_break"]["months"] for event in events
+                                          if event["half_break"]["months"] is not None])}
 
 
 # ---------------------------------------------------------------- 風控頁
@@ -5138,9 +5222,11 @@ __SEO_HEAD__
   .ded-neg { margin-top:9px; font-size:12px; color:var(--mocha); line-height:1.75;
            background:rgba(203,75,58,.07); border-radius:8px; padding:8px 11px; }
   .ded-warn { max-width:560px; margin:14px auto 0; font-size:12.5px; color:var(--mocha);
-           line-height:1.8; background:var(--foam); border:1px solid var(--grounds);
-           border-radius:10px; padding:10px 13px; }
+              line-height:1.8; background:var(--foam); border:1px solid var(--grounds);
+              border-radius:10px; padding:10px 13px; }
+  .ded-backtest-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.ded-backtest-kpi{padding:10px;border:1px solid var(--grounds);border-radius:10px;background:var(--milk);font-size:11px;color:var(--mocha)}.ded-backtest-kpi b{display:block;margin-top:4px;font:800 20px var(--font-num);color:var(--espresso)}.ded-backtest-table{width:100%;border-collapse:collapse;font-size:12px}.ded-backtest-table th,.ded-backtest-table td{padding:8px 7px;border-bottom:1px solid var(--grounds);text-align:left;vertical-align:top}.ded-backtest-table th{color:var(--mocha);font-size:11px}.ded-backtest-method{font-size:11.5px;color:var(--mocha);line-height:1.7;margin:10px 0}.ded-backtest-horizons{display:grid;gap:5px;margin:10px 0}.ded-backtest-horizons>div{display:grid;grid-template-columns:70px 1fr 1fr;gap:8px;padding:7px 9px;border-radius:8px;background:var(--foam);font-size:11.5px}.ded-backtest-horizons b{font-family:var(--font-num)}
   @media (max-width:640px){ .ded-grid { grid-template-columns:1fr; } }
+  @media (max-width:640px){.ded-backtest-kpis{grid-template-columns:1fr}.ded-backtest-table{font-size:11px}.ded-backtest-horizons>div{grid-template-columns:58px 1fr}.ded-backtest-horizons>div span:last-child{grid-column:2}}
   /* ---- 風控管理 ---- */
   .chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px;
             background:var(--milk); border:1px solid var(--grounds); border-radius:999px;
@@ -6264,10 +6350,9 @@ __QUOTES_HTML__
       <p>這頁回答的是：<b>照這樣走下去，50、100、150 日線要幾個交易日才會追上這個價位？</b>
       均線追上來之後，原本在下方的支撐就貼到價格附近，行情通常得選邊——
       所以這個天數可以當成「<b>還有多少時間可以慢慢整理</b>」的粗估。</p>
-      <p>會同時算兩種假設：<b>盤整</b>（價格停在原地，均線追得最慢，算出來是上限）
-      與<b>依近 20 日的實際斜率繼續走</b>。兩個數字之間就是合理的區間。</p>
-      <p>⚠️ <b>這是算術外推，不是預測。</b>真實市場不會每天照同一個幅度走，
-      天數只是「如果照這個節奏」的估計，不是保證還有幾天。</p>
+      <p>現在只保留<b>盤整假設</b>：價格停在指定價位，估算均線還要多久才會追上。
+      另外提供近十年 Nasdaq 大盤歷史事件回測，檢查多頭首次回到 150MA 附近後的後續風險。</p>
+      <p>⚠️ <b>這是算術外推與歷史統計，不是預測。</b>天數與歷史比例都不是未來保證。</p>
     </div>
   </details>
 
@@ -6538,7 +6623,7 @@ const I18N = { en: {
   "nav.deduct": "MA Deduction", "nav.deduct.sub": "When the 50/100/150MA catches up",
   "p10.title": "Moving-Average Deduction",
   "ded.introT": "How much time is left to consolidate?",
-  "ded.intro": "<p><b>Deduction is arithmetic, not prediction.</b> The 50-day average is the mean of the last 50 closes, so tomorrow's calculation drops the close from 50 days ago and adds tomorrow's. That bar about to be dropped is the <b>deduction value</b>.</p><p>One thing follows directly: <b>if the deduction value is below the current price, the 50-day line must rise</b> — regardless of what happens tomorrow. If it is above, the average must fall.</p><p>This page answers: <b>at this pace, how many sessions until the 50-, 100- and 150-day averages reach this price?</b> Once the average catches up, support sits right at price and the market usually has to pick a side — so the number is a rough gauge of <b>how much room there is to keep consolidating</b>.</p><p>Two assumptions are shown: <b>flat</b> (price stays put — the slowest case, so an upper bound) and <b>continuing the last 20 sessions' slope</b>. The two numbers bracket a reasonable range.</p><p>⚠️ <b>This is arithmetic extrapolation, not a forecast.</b> Real markets do not move by the same amount every day.</p>",
+  "ded.intro": "<p><b>Deduction is arithmetic, not prediction.</b> The 50-day average drops the close from 50 sessions ago and adds the next close; the value being dropped is the <b>deduction value</b>.</p><p>This page now keeps only the <b>flat-price assumption</b>: price stays at the selected level while we estimate when the 50MA, 100MA and 150MA catch up. It also adds a ten-year Nasdaq Composite event backtest covering the first pullback toward the 150MA after an established uptrend.</p><p>⚠️ Arithmetic estimates and historical frequencies are not forecasts or guarantees.</p>",
   "ded.pick": "Choose a symbol", "ded.index": "Nasdaq Composite", "ded.stock": "Stock (top 300)",
   "ded.ph": "Ticker or company name, e.g. AAPL",
   "ded.price": "Price to reach",
@@ -6548,17 +6633,16 @@ const I18N = { en: {
   "ded.needStock": "Pick a stock first",
   "ded.last": "latest close", "ded.target": "target",
   "ded.useLast": " (blank — using latest close)",
-  "ded.slope": "Last ", "ded.slope2": " sessions averaged ", "ded.maUnit": "-day MA",
+  "ded.maUnit": "-day MA",
   "ded.now": "Current MA", "ded.dv": "Tomorrow's deduction bar",
   "ded.rise": "Below target → the MA will rise", "ded.fall": "Above target → the MA will fall",
   "ded.up": "MA is below price, rising toward it",
   "ded.down": "MA is above price, easing toward it",
   "ded.gap": "Price vs MA", "ded.flat": "Flat (price stays at ",
-  "ded.trend": "Continuing the 20-session slope",
-  "ded.sessions": " sessions", "ded.over": "more than ", "ded.perDay": "day",
+  "ded.sessions": " sessions", "ded.over": "more than ",
   "ded.done": "already deducted",
   "ded.noData": "Not enough history to compute this average",
-  "ded.negNote": "\u26a0\ufe0f The recent slope is negative, so the shorter count in the trend row means price would fall to the average \u2014 not that the average is catching up. For \"how long can this keep consolidating\", read the flat row.",
+  "ded.warn": "⚠️ The flat-price calculation is arithmetic and the backtest is historical frequency. Neither is a forecast or guarantee.",
   "grow.title": "Long-Term Growth List",
   "nav.grow.sub": "10-year total & annualised",
   "grow.introT": "Who actually went up over ten years",
@@ -6590,7 +6674,6 @@ const I18N = { en: {
   "industry.loading": "Loading…", "industry.m20": "20D Momentum",
   "industry.m60": "60D Trend", "industry.win": "Advancer Share",
   "industry.above": "Above 50MA", "industry.high": "60D Highs",
-  "ded.warn": "\u26a0\ufe0f This is arithmetic extrapolation, not a forecast. It assumes the same daily move every session, which real markets do not do. Treat the session count as a rough \"if this pace holds\" estimate, not a guarantee.",
   "risk.introT": "Work out what you can lose before what you can make",
   "risk.intro": "<p>This page lays out four things about the stocks you hold: <b>how much it typically moves in a day (ATR)</b>, <b>how choppy it is overall (volatility)</b>, <b>whether the trend is still intact (MA alignment)</b>, and <b>how tightly it tracks the market (Beta)</b>.</p><p>Enter your entry price and it computes an <b>initial stop</b> and a <b>trailing stop</b> from ATR. The value isn't in the precision of that number — it's in <b>forcing you to write down the exit before you buy</b>. Decide a stop after you're underwater and you usually won't take it.</p><p><b>Why ATR instead of a fixed percentage</b>: 5% is a distant stop for a utility that moves 1% a day, and a same-day stop-out for a name that moves 6%. ATR is \"how much this stock normally moves in a day\", so using it as the unit makes the stop distance adapt to the character of the stock.</p><p><b>Everything stays in this browser</b> — nothing is uploaded and there is no account system. Changing device or clearing site data loses it, which is worth saying plainly rather than pretending there is sync.</p>",
   "risk.pick": "Pick your holdings (up to 5)",
@@ -8466,25 +8549,19 @@ function dedDays(o, maxDays){
   if (o.days === 0) return '<b class="ded-done">' + t('ded.done', '已扣抵') + '</b>';
   return '<b>' + o.days + '</b>' + t('ded.sessions', ' 個交易日');
 }
-function dedCard(name, flat, trend, maxDays, target, slope){
+function dedCard(name, flat, maxDays, target){
   /* ⚠️ 閱讀順序＝結論先行：天數放最上面，「目前均線／明日扣抵 K 棒」是解釋，放後面。 */
   const dir = (flat.side === 'below')
     ? t('ded.up', '均線在價格下方，往上追')
     : t('ded.down', '均線在價格上方，往下貼近');
-  const slopeCls = slope > 0 ? 'ded-pos' : (slope < 0 ? 'ded-neg-v' : '');
-  const slopeTxt = (slope > 0 ? '+' : '') + slope + '%/' + t('ded.perDay', '日');
+  const flatLabel = LANG === 'en'
+    ? 'Flat (price stays at ' + target.toLocaleString() + ')'
+    : '盤整（價格停在 ' + target.toLocaleString() + '）';
   return '<div class="card"><h2>' + name + '</h2>'
     + '<div class="ded-rows">'
-    + '<div><span>' + t('ded.flat', '盤整（價格停在 ') + target.toLocaleString() + '）</span><span>'
+    + '<div><span>' + flatLabel + '</span><span>'
     + dedDays(flat, maxDays) + '</span></div>'
-    + '<div><span>' + t('ded.trend', '延續近 20 日斜率')
-    + ' <small class="' + slopeCls + '">(' + slopeTxt + ')</small></span><span>'
-    + dedDays(trend, maxDays) + '</span></div>'
     + '</div>'
-    /* ⚠️⚠️ 斜率為負時「天數變少」是價格跌下去碰到均線，不是均線追上來 —— 意義相反。 */
-    + (slope < 0 ? '<div class="ded-neg">' + t('ded.negNote',
-        '⚠️ 近期斜率是向下的，所以「趨勢」那一列的天數變少，是因為價格跌下去碰到均線，'
-        + '不是均線追上來。想估的若是多頭整理可以等多久，請看「盤整」那一列。') + '</div>' : '')
     + '<div class="ded-note">' + dir + '　·　'
     + t('ded.gap', '目前價位距離均線') + ' <b>'
     + (flat.gap_pct == null ? '—' : (flat.gap_pct > 0 ? '+' : '') + flat.gap_pct + '%') + '</b></div>'
@@ -8496,6 +8573,52 @@ function dedCard(name, flat, trend, maxDays, target, slope){
     + (flat.rising ? t('ded.rise', '低於目標價 → 均線會往上')
                    : t('ded.fall', '高於目標價 → 均線會往下')) + '</div></div>'
     + '</div></div>';
+}
+function dedBacktestHtml(b){
+  if (!b || b.error) return '<div class="card"><h2>'
+    + (LANG === 'en' ? '10-year Nasdaq Composite backtest' : '近十年 Nasdaq 指數歷史回測')
+    + '</h2><div style="color:#999">'
+    + (LANG === 'en' ? 'Not enough index history for this backtest.' : '指數歷史資料不足，暫時無法回測。')
+    + '</div></div>';
+  const none = LANG === 'en' ? 'Not observed' : '未發生';
+  const med = x => x == null ? none : x + (LANG === 'en' ? ' mo.' : ' 個月');
+  const pct = x => x == null ? '—' : x + '%';
+  const eventCell = (event, followup) => {
+    if (event && event.date) return event.date + '<br><b>' + event.months
+      + (LANG === 'en' ? ' mo.' : ' 個月') + '</b>';
+    return followup >= b.horizon_sessions
+      ? (LANG === 'en' ? 'Not observed in 9 months' : '9 個月內未發生')
+      : (LANG === 'en' ? 'Still being observed' : '持續觀察中');
+  };
+  const horizons = ['3','6','9'].map(m => {
+    const x = b.horizons[m] || {};
+    return '<div><b>' + m + (LANG === 'en' ? ' months' : ' 個月') + '</b>'
+      + '<span>' + (LANG === 'en' ? '50MA re-break: ' : '再跌破 50MA：')
+      + (x.short_breaks || 0) + '/' + (x.eligible || 0) + '（' + pct(x.short_pct) + '）</span>'
+      + '<span>' + (LANG === 'en' ? '150MA break: ' : '跌破 150MA：')
+      + (x.half_breaks || 0) + '/' + (x.eligible || 0) + '（' + pct(x.half_pct) + '）</span></div>';
+  }).join('');
+  const rows = (b.events || []).map(e => '<tr><td>' + e.signal_date + '</td><td>'
+    + eventCell(e.short_break, e.followup_sessions) + '</td><td>'
+    + eventCell(e.half_break, e.followup_sessions) + '</td></tr>').join('');
+  return '<div class="card"><h2>'
+    + (LANG === 'en' ? '10-year Nasdaq Composite backtest' : '近十年 Nasdaq 指數歷史回測') + '</h2>'
+    + '<div class="ded-backtest-kpis"><div class="ded-backtest-kpi">'
+    + (LANG === 'en' ? 'Signals' : '樣本事件') + '<b>' + b.event_count + '</b></div>'
+    + '<div class="ded-backtest-kpi">' + (LANG === 'en' ? 'Median to 50MA re-break' : '再次跌破 50MA 中位時間')
+    + '<b>' + med(b.short_median_months) + '</b></div><div class="ded-backtest-kpi">'
+    + (LANG === 'en' ? 'Median to 150MA break' : '跌破 150MA 中位時間')
+    + '<b>' + med(b.half_median_months) + '</b></div></div>'
+    + '<div class="ded-backtest-horizons">' + horizons + '</div>'
+    + '<div style="overflow-x:auto"><table class="ded-backtest-table"><thead><tr><th>'
+    + (LANG === 'en' ? 'First pullback' : '首次回檔訊號') + '</th><th>'
+    + (LANG === 'en' ? '50MA re-break' : '再次跌破 50MA') + '</th><th>'
+    + (LANG === 'en' ? '150MA break' : '跌破 150MA')
+    + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+    + '<div class="ded-backtest-method">' + (LANG === 'en'
+      ? 'Definition: after 20 straight sessions with Nasdaq above the 50MA above the 150MA and at least 4% above the 150MA, take the first close entering the 150MA ±4% zone. A 50MA event must first recover above the 50MA and then cross below it. A 150MA break requires three consecutive closes at least 5% below each day’s 150MA. The 3/6/9-month rates include only signals with complete follow-up for that horizon.'
+      : '口徑：Nasdaq 指數連續 20 個交易日維持「指數 > 50MA > 150MA」，且至少高於 150MA 4% 後，首次收盤進入 150MA ±4% 範圍。短期均線事件須先站回 50MA，再由上往下跌破；150MA 跌破則須連續 3 天收盤低於各日 150MA 5% 以上。3／6／9 個月比率只納入該期間追蹤完整的訊號。')
+    + '<br>' + (LANG === 'en' ? 'Data through ' : '資料截至 ') + b.as_of + '</div></div>';
 }
 async function runDeduct(){
   const btn = $('#dedBtn');
@@ -8517,25 +8640,26 @@ async function runDeduct(){
     const j = await r.json();
     if (j.error){ $('#dedStatus').textContent = j.error; $('#dedResult').innerHTML = ''; return; }
     $('#dedStatus').textContent = '';
-    const label = (LANG === 'en') ? (j.name || j.code) : (j.name_zh || j.name || j.code);
+    const label = (LANG === 'en')
+      ? (j.code === 'COMP' ? 'Nasdaq Composite' : (j.name || j.code))
+      : (j.name_zh || j.name || j.code);
     let h = '<div class="concl blue">' + label + '　'
       + t('ded.last', '最新收盤') + ' <b>' + j.last.toLocaleString() + '</b>　'
       + t('ded.target', '目標價') + ' <b>' + j.target.toLocaleString() + '</b>'
       + (j.custom_price ? '' : t('ded.useLast', '（未填，用最新收盤）'))
-      + '<div style="font-size:12.5px;font-weight:normal;color:#777;margin-top:6px">'
-      + t('ded.slope', '近 ') + j.slope_lookback + t('ded.slope2', ' 日平均每日 ')
-      + (j.slope_pct > 0 ? '+' : '') + j.slope_pct + '%</div></div>';
+      + '</div>';
+    h += dedBacktestHtml(j.backtest);
     for (const n of (j.mas || [50, 100, 150])){
-      const key = String(n), f = j.flat[key], tr = j.trend[key];
+      const key = String(n), f = j.flat[key];
       if (!f || f.ma == null){
         h += '<div class="card"><h2>' + n + 'MA</h2><div style="color:#999">'
           + t('ded.noData', '歷史收盤不足，算不出這條均線') + '</div></div>';
         continue;
       }
-      h += dedCard(n + t('ded.maUnit', ' 日線'), f, tr, j.max_days, j.target, j.slope_pct);
+      h += dedCard(n + t('ded.maUnit', ' 日線'), f, j.max_days, j.target);
     }
     h += '<div class="ded-warn">' + t('ded.warn',
-      '⚠️ 這是算術外推，不是預測。它假設未來每天都照同一個幅度走，真實市場不會這樣。天數請當成「如果照這個節奏」的粗估，不是保證還有幾天。') + '</div>';
+      '⚠️ 盤整扣抵是算術推估，回測是歷史頻率；兩者都不是預測，也不保證未來會重演。') + '</div>';
     $('#dedResult').innerHTML = h;
   } catch(e){
     $('#dedStatus').textContent = t('ded.fail', '試算失敗，請稍後再試');
@@ -9309,13 +9433,13 @@ PAGE_ROUTES = {
     },
     "deduction": {
         "page": "p10", "index": True,
-        "zh": ("均線扣抵法｜50／100／150 日線何時追上目前價位",
+        "zh": ("均線扣抵法｜盤整推估與近十年 Nasdaq 回測",
                "用扣抵值推算納斯達克綜合指數或個股的 50、100、150 日線，"
-               "在盤整或延續目前斜率兩種假設下，還要幾個交易日才會追上指定價位。免註冊。"),
-        "en": ("Moving-Average Deduction｜When Will the 50, 100 and 150MA Catch Up",
+               "估計盤整時還要幾個交易日才會追上指定價位，並查看近十年多頭首次回檔的 3／6／9 個月歷史統計。"),
+        "en": ("Moving-Average Deduction｜Flat Estimate and 10-Year Nasdaq Backtest",
                "Project the 50-, 100- and 150-day moving averages for the Nasdaq Composite or any "
-               "top-300 US stock using the deduction value, and see how many sessions they need "
-               "to reach a given price under a flat or trend-continuation assumption."),
+               "top-300 US stock under a flat-price assumption, plus 3/6/9-month statistics from "
+               "ten years of first-pullback events in the Nasdaq Composite."),
     },
     "alerts": {
         "page": "p4", "index": False,
@@ -10599,7 +10723,7 @@ def api_deduct():
 
     ⚠️ **只讀既有快取，不連網。** 指數讀 `nasdaq_index.json`、
        個股讀既有的 `hist_` —— 這頁是使用者一按就跑的，不能觸發外部請求。
-    ⚠️ 盤整與延續趨勢**兩種假設一起回**：單一數字會被當成預測。
+    只保留「價格停在目標價」的盤整假設；另附十年 Nasdaq 大盤歷史事件回測。
     """
     if not _valid_app_token(request.headers.get("X-App-Token")):
         return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
@@ -10629,14 +10753,17 @@ def api_deduct():
 
     last = float(closes[-1])
     target = price if price is not None else last
-    slope = _recent_slope(closes)
+    try:
+        with open(DEDUCTION_INDEX_SEED_FILE, encoding="utf-8") as f:
+            index_history = json.load(f) or {}
+    except Exception:
+        index_history = _load_cache("nasdaq_index.json", None) or {}
+    backtest = _deduction_index_backtest(sorted(index_history.items()))
     return jsonify(
         code=sym, name=name or sym, name_zh=(name if sym == "COMP"
                                              else zh_company(sym, name or sym)),
         last=round(last, 2), target=round(target, 2), custom_price=price is not None,
-        slope_pct=round(slope * 100, 3), slope_lookback=DEDUCT_SLOPE_LOOKBACK,
-        flat=_ma_deduction(closes, target, daily_change=0.0),
-        trend=_ma_deduction(closes, target, daily_change=slope),
+        flat=_ma_deduction(closes, target), backtest=backtest,
         mas=list(DEDUCT_MAS), max_days=DEDUCT_MAX_DAYS)
 
 

@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.09.01.2"
+APP_VERSION = "2026.09.01.3"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -49,7 +49,8 @@ BREAKOUT_STRUCTURE_FILE = os.path.join(BASE_DIR, "breakout_structure_seed.json")
 INDUSTRY_TAXONOMY_FILE = os.path.join(BASE_DIR, "industry_taxonomy_seed.json")
 DEDUCTION_INDEX_SEED_FILE = os.path.join(BASE_DIR, "deduction_index_10y_seed.json")
 _INDUSTRY_TAXONOMY_MEMO = {"mtime": None, "data": None}
-STRUCTURE_VERSION = 3
+STRUCTURE_VERSION = 4
+STRUCTURE_REBASE_MIN_SESSIONS = 20
 STRUCTURE_PERIODS = {"6m": 126, "1y": 252, "2y": 504, "5y": 1260}
 _BREAKOUT_STRUCTURE_MEMO = {"mtime": None, "rows": {}, "meta": {}}
 
@@ -1809,6 +1810,101 @@ def _structure_progress_metrics(values, peak_i, trough_i):
     }
 
 
+def _structure_cycle_history(dates, values, primary):
+    """Record the primary base and independently rearm after later 20% pullbacks."""
+    if not primary.get("available") or primary.get("prior_high") is None:
+        return []
+
+    def locate(text):
+        day = str(text or "").replace("/", "-")
+        try:
+            return dates.index(day)
+        except ValueError:
+            return None
+
+    def gain_at(pos):
+        gains = []
+        for days_back in (20, 40, 60):
+            if pos > days_back and values[pos - days_back] > 0:
+                gains.append((values[pos] / values[pos - days_back] - 1) * 100)
+        return max(gains) if gains else float("-inf")
+
+    def date_at(pos):
+        return dates[pos].replace("-", "/") if pos is not None else None
+
+    first_confirmation = locate(primary.get("confirmation_date"))
+    first_peak = locate(primary.get("prior_high_date"))
+    cycles = [{
+        "cycle_no": 1, "cycle_type": "primary",
+        "status": breakout_structure_status(primary),
+        "prior_high": primary.get("prior_high"),
+        "prior_high_date": primary.get("prior_high_date"),
+        "trough": primary.get("trough"), "trough_date": primary.get("trough_date"),
+        "max_drawdown_pct": primary.get("max_drawdown_pct"),
+        "development_date": primary.get("development_date"),
+        "warning_date": primary.get("early_warning_date"),
+        "confirmation_date": primary.get("confirmation_date"),
+        "consolidation_sessions": (first_confirmation - first_peak
+                                    if first_confirmation is not None and
+                                    first_peak is not None else None),
+    }]
+    if first_confirmation is None:
+        return cycles
+
+    cursor = first_confirmation
+    while cursor + 2 < len(values):
+        peak_i, peak = cursor + 1, float(values[cursor + 1])
+        drawdown_started = False
+        trough_i = developing_i = warning_i = confirmation_i = None
+        for pos in range(peak_i + 1, len(values)):
+            value = float(values[pos])
+            if not drawdown_started:
+                if value >= peak:
+                    peak, peak_i = value, pos
+                if pos > peak_i and value <= peak * .80:
+                    drawdown_started, trough_i = True, pos
+                continue
+            if value < float(values[trough_i]):
+                trough_i = pos
+            if pos - peak_i < STRUCTURE_REBASE_MIN_SESSIONS:
+                continue
+            if developing_i is None and value >= peak * .80:
+                developing_i = pos
+            if developing_i is not None and warning_i is None and value >= peak * .90:
+                warning_i = pos
+            if (developing_i is not None and value >= peak * .98
+                    and gain_at(pos) > 30):
+                confirmation_i = pos
+                break
+        if not drawdown_started:
+            break
+        current_progress = float(values[-1]) / peak
+        if confirmation_i is not None:
+            status = "matched"
+        elif warning_i is not None and current_progress >= .90:
+            status = "near"
+        elif developing_i is not None and current_progress >= .80:
+            status = "developing"
+        else:
+            status = "resetting"
+        end_i = confirmation_i if confirmation_i is not None else len(values) - 1
+        cycles.append({
+            "cycle_no": len(cycles) + 1, "cycle_type": "rebase", "status": status,
+            "prior_high": round(peak, 2), "prior_high_date": date_at(peak_i),
+            "trough": round(float(values[trough_i]), 2), "trough_date": date_at(trough_i),
+            "max_drawdown_pct": round((float(values[trough_i]) / peak - 1) * 100, 1),
+            "development_date": date_at(developing_i), "warning_date": date_at(warning_i),
+            "confirmation_date": date_at(confirmation_i),
+            "consolidation_sessions": end_i - peak_i,
+            "confirmation_momentum_pct": (round(gain_at(confirmation_i), 1)
+                                           if confirmation_i is not None else None),
+        })
+        if confirmation_i is None:
+            break
+        cursor = confirmation_i
+    return cycles
+
+
 def analyze_breakout_structure(rows, lookback_sessions=None):
     """辨識前高、至少 20% 回落、三個月整理與近期重回前高。"""
     clean = {}
@@ -1944,6 +2040,11 @@ def analyze_breakout_structure(rows, lookback_sessions=None):
                     "breakout": dates[breakout_i] if breakout_i is not None else None},
         **_structure_progress_metrics(values, peak_i, trough_i),
     })
+    cycles = _structure_cycle_history(dates, values, base)
+    base["structure_cycles"] = cycles
+    base["match_count"] = sum(cycle.get("status") == "matched" for cycle in cycles)
+    base["repeat_match_count"] = max(0, base["match_count"] - 1)
+    base["active_cycle_status"] = cycles[-1]["status"] if cycles else stage
     if stage == "developing":
         base["reason"] = "已回到前高 80%～90% 的結構發展區，尚未進入 90% 接近完成區"
     elif confirmation_i is None:
@@ -5426,6 +5527,9 @@ __SEO_HEAD__
   .structure-title b{font-family:var(--font-head);font-size:15px}.structure-title small{color:var(--mocha);line-height:1.5;text-align:right}
   .structure-tags{display:flex;gap:5px;flex-wrap:wrap;margin:0 0 9px}.structure-tags span{padding:3px 8px;border-radius:999px;background:var(--milk);border:1px solid var(--grounds);font-size:11px;color:var(--mocha)}
   .structure-metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:7px; margin-bottom:10px; }
+  .structure-cycles{margin:10px 0;padding:10px;border:1px solid var(--grounds);border-radius:11px;background:var(--foam)}
+  .structure-cycles-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px}.structure-cycles-head b{font-size:13px}.structure-cycles-head small{color:var(--mocha)}
+  .structure-cycle{display:grid;grid-template-columns:82px repeat(5,minmax(0,1fr));gap:7px;padding:8px 0;border-top:1px solid var(--grounds);font-size:11px}.structure-cycle:first-of-type{border-top:0}.structure-cycle>strong{color:var(--espresso)}.structure-cycle span{color:var(--mocha)}.structure-cycle span b{display:block;margin-top:2px;color:var(--espresso);font-family:var(--font-num);font-size:11.5px}.structure-cycle-status{display:inline-block;margin-top:4px;padding:2px 6px;border-radius:999px;background:var(--grounds);font-size:10px}.structure-cycle-status.matched{background:#dcefe4;color:#236345}.structure-cycle-status.near{background:#fff0c7;color:#8a6317}.structure-cycle-status.developing{background:#f7dfca;color:#93521c}
   .structure-metric { min-width:0; padding:8px 9px; border-radius:10px; background:var(--milk); }
   .structure-metric small{display:block;color:var(--mocha);font-size:10.5px}.structure-metric b{display:block;margin-top:3px;font:700 15px var(--font-num);overflow-wrap:anywhere}
   .structure-chart-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:7px 0 2px}
@@ -5459,7 +5563,7 @@ __SEO_HEAD__
   /* 640px 以下只顯示既有手機卡片；此規則必須放在 rs-structure-list 的桌機 display:grid 之後。 */
   @media(max-width:640px){.res-wide.rs-structure-list{display:none}}
   @media(max-width:760px) and (min-width:641px){.rs-structure-head{grid-template-columns:62px minmax(160px,1.4fr) repeat(2,minmax(85px,.7fr))}.rs-structure-industry,.rs-structure-close{display:none}}
-  @media(max-width:560px){.structure-panel{width:100%;padding:10px}.structure-metrics{grid-template-columns:1fr 1fr}.structure-title{display:block}.structure-title small{display:block;text-align:left;margin-top:3px}}
+  @media(max-width:560px){.structure-panel{width:100%;padding:10px}.structure-metrics{grid-template-columns:1fr 1fr}.structure-title{display:block}.structure-title small{display:block;text-align:left;margin-top:3px}.structure-cycle{grid-template-columns:1fr 1fr}.structure-cycle>strong{grid-column:1/-1}.structure-cycles-head{align-items:flex-start;flex-direction:column}}
   .screen-tools { max-width:560px; margin:10px auto; padding:10px; border:1px solid var(--grounds); border-radius:12px; background:var(--foam); display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
   .screen-tools input,.screen-tools select { min-width:0; height:38px; padding:7px 10px; border:1px solid var(--grounds); border-radius:9px; background:var(--milk); color:var(--espresso); font:inherit; }
   .screen-tools input { flex:1 1 145px; }.screen-tools select { flex:1 1 150px; }
@@ -6068,7 +6172,7 @@ __QUOTES_HTML__
   <h2 class="ptitle" data-i18n="structureScreen.title">飆股結構回測</h2>
   <details class="pgintro" open>
     <summary data-i18n="structureScreen.introT">回看前高、深度整理與重新轉強的完整路徑</summary>
-    <div class="pgintro-b" data-i18n-html="structureScreen.intro"><p>從目前市值前 300 大美股中，回看所選的最近 6 個月、1 年、2 年或 5 年。依序尋找重要前高、高點後至少 20% 回落、至少 3 個月整理，以及重新接近或突破前高。</p><p>回到前高 80%～90% 先列為橘色「結構發展中」，90%～98% 為黃色「結構接近完成」；到達前高 98% 且近 1～3 個月動能超過 30%，才轉為綠色「結構符合」。同時顯示右側低點、波動收縮及 20／60 日均線方向，日期可用逐日無未來資料回放驗證。</p></div>
+    <div class="pgintro-b" data-i18n-html="structureScreen.intro"><p>從目前市值前 300 大美股中，回看所選的最近 6 個月、1 年、2 年或 5 年。依序尋找重要前高、高點後至少 20% 回落、至少 3 個月整理，以及重新接近或突破前高。</p><p>回到前高 80%～90% 先列為橘色「結構發展中」，90%～98% 為黃色「結構接近完成」；到達前高 98% 且近 1～3 個月動能超過 30%，才轉為綠色「結構符合」。首次確認後仍會繼續追蹤；若再創波段高點、回落至少 20%，並隔至少 20 個交易日重新確認，就記為下一輪。</p><p>同時顯示右側低點、波動收縮及 20／60 日均線方向，日期可用逐日無未來資料回放驗證。</p></div>
   </details>
   <div class="structure-screen-controls">
     <label><span data-i18n="structureScreen.period">回測期間</span><select id="structurePeriod"><option value="6m" data-i18n="structureScreen.6m">6 個月</option><option value="1y" data-i18n="structureScreen.1y">1 年</option><option value="2y" data-i18n="structureScreen.2y">2 年</option><option value="5y" data-i18n="structureScreen.5y" selected>5 年</option></select></label>
@@ -6777,7 +6881,7 @@ const I18N = { en: {
   "screen.structure": "Trace pre-breakout structure (1–5 years)",
   "structureScreen.title": "Breakout Structure Backtest",
   "structureScreen.introT": "Trace the full path from prior high through a deep base and renewed strength",
-  "structureScreen.intro": "<p>Review the 300 largest US stocks over six months, one year, two years or five years.</p><p>80–90% of the prior high is Structure Developing, 90–98% is Nearly Complete, and green Match requires 98% plus over 30% momentum. Higher lows, volatility contraction and rising 20/60-day averages are shown as early diagnostics. Milestones can be verified by point-in-time replay without future data.</p>",
+  "structureScreen.intro": "<p>Review the 300 largest US stocks over six months, one year, two years or five years.</p><p>80–90% of the prior high is Structure Developing, 90–98% is Nearly Complete, and green Match requires 98% plus over 30% momentum. Tracking continues after confirmation: a later swing high, a drawdown of at least 20%, at least 20 sessions, and renewed confirmation create another recorded cycle.</p><p>Higher lows, volatility contraction and rising 20/60-day averages are shown as early diagnostics. Milestones can be verified by point-in-time replay without future data.</p>",
   "structureScreen.period": "Backtest period", "structureScreen.status": "Completion status",
   "structureScreen.pattern": "Pattern", "structureScreen.run": "Run structure screen",
   "structureScreen.6m": "6 months", "structureScreen.1y": "1 year",
@@ -7285,8 +7389,12 @@ function structurePatternName(v){return LANG==="en"?(STRUCTURE_PATTERN_EN[v]||v)
 function structureNumber(v,prefix="",suffix=""){return v==null?"—":prefix+Number(v).toLocaleString(undefined,{maximumFractionDigits:1})+suffix}
 function structurePanel(s){
   const d=s&&s.structure;if(!d)return "";
+  const cycles=d.structure_cycles||[],matchCount=d.match_count==null?cycles.filter(x=>x.status==="matched").length:Number(d.match_count),activeCycle=cycles.length?cycles[cycles.length-1]:null;
+  const activeLabel=!activeCycle?"":activeCycle.status==="matched"?(LANG==="en"?"matched":"符合"):activeCycle.status==="near"?(LANG==="en"?"nearly complete":"接近完成"):activeCycle.status==="developing"?(LANG==="en"?"developing":"發展中"):(LANG==="en"?"resetting":"整理中");
   const summary=!d.available?(LANG==="en"?"Unavailable":"無法回溯")
-    :d.matched?(LANG==="en"?"✓ Structure match":"✓ 結構符合")
+    :d.matched?(cycles.length>1&&activeCycle&&activeCycle.status!=="matched"
+      ?(LANG==="en"?`✓ ${matchCount} confirmed · cycle ${cycles.length} ${activeLabel}`:`✓ 已確認 ${matchCount} 次・第 ${cycles.length} 輪${activeLabel}`)
+      :(matchCount>1?(LANG==="en"?`✓ Structure match · ${matchCount} confirmations`:`✓ 結構符合・累計 ${matchCount} 次`):(LANG==="en"?"✓ Structure match":"✓ 結構符合")))
     :d.stage==="developing"?(LANG==="en"?"Structure developing":"結構發展中")
     :(d.prior_high!=null?(LANG==="en"?"Structure nearly complete":"結構接近完成"):(LANG==="en"?"Not formed":"未形成"));
   const summaryClass=!d.available?"":d.matched?"structure-hit":d.stage==="developing"?"structure-developing":d.prior_high!=null?"structure-near":"structure-miss";
@@ -7312,10 +7420,12 @@ function structurePanel(s){
     <div class="structure-metric"><small>${LANG==="en"?"Breakout month":"突破時間"}</small><b>${d.breakout_date||(LANG==="en"?"Not yet":"尚未突破")}</b></div>
     <div class="structure-metric"><small>${LANG==="en"?"Vs prior high":"突破後漲幅"}</small><b>${post}</b></div>
   </div>`:`<div class="structure-metrics"><div class="structure-metric"><small>${LANG==="en"?"Best 1–3M gain":"近 1～3 月最大漲幅"}</small><b>${gain}</b></div><div class="structure-metric"><small>${LANG==="en"?"History available":"可回溯期間"}</small><b>${d.lookback_years||"—"} ${LANG==="en"?"years":"年"}</b></div></div>`;
+  const cycleStatus=x=>x==="matched"?(LANG==="en"?"Confirmed":"已確認"):x==="near"?(LANG==="en"?"Nearly complete":"接近完成"):x==="developing"?(LANG==="en"?"Developing":"發展中"):(LANG==="en"?"Resetting":"整理中");
+  const cyclesHtml=cycles.length?`<div class="structure-cycles"><div class="structure-cycles-head"><b>${LANG==="en"?"Structure cycle history":"結構週期紀錄"}</b><small>${LANG==="en"?`${matchCount} confirmed; a new high followed by a 20% pullback rearms tracking`:`已確認 ${matchCount} 次；新高後回落 20% 才重新武裝`}</small></div>${cycles.map(c=>`<div class="structure-cycle"><strong>${LANG==="en"?`Cycle ${c.cycle_no}`:`第 ${c.cycle_no} 輪`}<small class="structure-cycle-status ${c.status}">${cycleStatus(c.status)}</small></strong><span>${LANG==="en"?"Prior high":"前高"}<b>${structureNumber(c.prior_high,"$")}</b><small>${c.prior_high_date||"—"}</small></span><span>${LANG==="en"?"Trough / drawdown":"低點／跌幅"}<b>${structureNumber(c.trough,"$")} · ${structureNumber(c.max_drawdown_pct,"","%")}</b><small>${c.trough_date||"—"}</small></span><span>${LANG==="en"?"Developing":"發展中"}<b>${c.development_date||"—"}</b></span><span>${LANG==="en"?"Warning":"預警"}<b>${c.warning_date||"—"}</b></span><span>${LANG==="en"?"Confirmation":"確認"}<b>${c.confirmation_date||(LANG==="en"?"Tracking":"持續追蹤")}</b><small>${c.consolidation_sessions==null?"":c.consolidation_sessions+(LANG==="en"?" sessions":" 個交易日")}</small></span></div>`).join("")}<div class="structure-note">${LANG==="en"?"Repeat cycles require a post-confirmation high, a drawdown of at least 20%, at least 20 sessions, and a renewed 98% recovery with over 30% momentum. Consecutive qualifying days in the same cycle count only once.":"後續週期必須在前次確認後創下新波段高點、回落至少 20%、間隔至少 20 個交易日，再重新回到前高 98% 且具備超過 30% 動能；同一輪連續符合只記一次。"}</div></div>`:"";
   const encoded=encodeURIComponent(JSON.stringify(d.chart||[])),markers=encodeURIComponent(JSON.stringify(d.markers||{}));
   const chart=(d.chart||[]).length>1?`<div class="structure-chart-head"><span class="structure-chart-range"></span><span class="structure-chart-buttons"><button type="button" data-weeks="52">1Y</button><button type="button" data-weeks="156" class="on">3Y</button><button type="button" data-weeks="9999">5Y</button></span></div><div class="structure-chart" data-series="${encoded}" data-markers="${markers}" data-high="${d.prior_high==null?"":d.prior_high}"></div><div class="structure-chart-read"></div>`:"";
   const note=LANG==="en"?"Drag the line horizontally to pan; use the wheel or buttons to zoom. Weekly closing prices only. Pattern labels are heuristic outlines, not OHLCV confirmation.":"在折線圖上左右拖曳可平移；滾輪或 1Y／3Y／5Y 可縮放。圖為每週最後收盤價；型態標籤只是收盤輪廓候選，不是 OHLCV 確認。";
-  return `<details class="structure-details"><summary class="${summaryClass}">${summary}</summary><div class="structure-panel"><div class="structure-title"><b>${LANG==="en"?"Pre-breakout structure":"飆股前期結構回溯"}</b><small>${LANG==="en"?"As of":"資料截至"} ${d.as_of||"—"} · ${d.lookback_years||"—"}${LANG==="en"?"Y":" 年"}</small></div>${tags?`<div class="structure-tags">${tags}</div>`:""}${reason}${metrics}${chart}<div class="structure-note">${note}</div></div></details>`;
+  return `<details class="structure-details"><summary class="${summaryClass}">${summary}</summary><div class="structure-panel"><div class="structure-title"><b>${LANG==="en"?"Pre-breakout structure":"飆股前期結構回溯"}</b><small>${LANG==="en"?"As of":"資料截至"} ${d.as_of||"—"} · ${d.lookback_years||"—"}${LANG==="en"?"Y":" 年"}</small></div>${tags?`<div class="structure-tags">${tags}</div>`:""}${reason}${metrics}${cyclesHtml}${chart}<div class="structure-note">${note}</div></div></details>`;
 }
 function initStructureChart(box){
   if(!box||box.dataset.ready==="1")return;box.dataset.ready="1";

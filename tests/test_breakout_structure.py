@@ -77,6 +77,28 @@ class BreakoutStructureTest(unittest.TestCase):
         self.assertLess(milestones["developing"], milestones["near"])
         self.assertLess(milestones["near"], milestones["matched"])
 
+    def test_repeat_cycle_rearms_once_after_new_high_and_twenty_percent_pullback(self):
+        values = ([100.0] * 80
+                  + [100 + 50 * i / 19 for i in range(20)]
+                  + [150 - 50 * i / 19 for i in range(20)]
+                  + [100 + 55 * i / 19 for i in range(20)]
+                  + [155.0] * 40)
+        start = date(2025, 1, 2)
+        dates = [(start + timedelta(days=index)).isoformat()
+                 for index in range(len(values))]
+        primary = {"available": True, "matched": True, "stage": "matched",
+                   "prior_high": 100, "prior_high_date": dates[20].replace("-", "/"),
+                   "trough": 70, "trough_date": dates[50].replace("-", "/"),
+                   "max_drawdown_pct": -30,
+                   "development_date": dates[65].replace("-", "/"),
+                   "early_warning_date": dates[70].replace("-", "/"),
+                   "confirmation_date": dates[79].replace("-", "/")}
+        cycles = app._structure_cycle_history(dates, values, primary)
+        self.assertEqual(len(cycles), 2)
+        self.assertEqual([cycle["status"] for cycle in cycles], ["matched", "matched"])
+        self.assertGreaterEqual(cycles[1]["consolidation_sessions"], 20)
+        self.assertLessEqual(cycles[1]["max_drawdown_pct"], -20)
+
     def test_suspected_split_discontinuity_is_rejected(self):
         rows = rounded_base()
         for row in rows[400:]:

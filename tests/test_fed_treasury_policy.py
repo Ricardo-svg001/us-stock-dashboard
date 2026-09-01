@@ -73,11 +73,13 @@ class FedTreasuryPolicyTest(unittest.TestCase):
         self.assertEqual(html.count("policy-board-label"), 10)
         for text in ("一、資金價格", "二、短期美元流動性",
                      "三、國債供給與聯準會資產負債表", "四、財政承受力",
-                     "美債總額", "美債／GDP", "利息／收入", "縮表模型",
+                     "美債總額", "美債／GDP", "國債利息／國庫收入", "縮表模型",
                      "不能用Fed利率直接乘總債務"):
             self.assertIn(text, html)
         self.assertIn("$40.1T", html)
         self.assertIn("26.1%", html)
+        self.assertIn("一年 +2.1%", html)
+        self.assertNotIn("一年 +2.1pp", html)
         self.assertIn("只有官方明確啟動淨資產購買計畫才標示為QE", html)
 
     def test_fiscal_debt_burden_uses_same_period_receipts_and_interest(self):

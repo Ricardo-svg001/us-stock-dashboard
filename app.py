@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.09.01.8"
+APP_VERSION = "2026.09.01.9"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -5411,9 +5411,9 @@ __SEO_HEAD__
   .ded-warn { max-width:560px; margin:14px auto 0; font-size:12.5px; color:var(--mocha);
               line-height:1.8; background:var(--foam); border:1px solid var(--grounds);
               border-radius:10px; padding:10px 13px; }
-  .ded-backtest-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.ded-backtest-kpi{padding:10px;border:1px solid var(--grounds);border-radius:10px;background:var(--milk);font-size:11px;color:var(--mocha)}.ded-backtest-kpi b{display:block;margin-top:4px;font:800 20px var(--font-num);color:var(--espresso)}.ded-backtest-table{width:100%;border-collapse:collapse;font-size:12px}.ded-backtest-table th,.ded-backtest-table td{padding:8px 7px;border-bottom:1px solid var(--grounds);text-align:left;vertical-align:top}.ded-backtest-table th{color:var(--mocha);font-size:11px}.ded-backtest-method{font-size:11.5px;color:var(--mocha);line-height:1.7;margin:10px 0}.ded-backtest-horizons{display:grid;gap:5px;margin:10px 0}.ded-backtest-horizons>div{display:grid;grid-template-columns:70px 1fr;gap:8px;padding:7px 9px;border-radius:8px;background:var(--foam);font-size:11.5px}.ded-backtest-horizons b{font-family:var(--font-num)}
+  .ded-backtest-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.ded-backtest-kpi{padding:10px;border:1px solid var(--grounds);border-radius:10px;background:var(--milk);font-size:11px;color:var(--mocha)}.ded-backtest-kpi b{display:block;margin-top:4px;font:800 20px var(--font-num);color:var(--espresso)}.ded-backtest-table{width:100%;border-collapse:collapse;font-size:12px}.ded-backtest-table th,.ded-backtest-table td{padding:8px 7px;border-bottom:1px solid var(--grounds);text-align:left;vertical-align:top}.ded-backtest-table th{color:var(--mocha);font-size:11px}.ded-backtest-method{font-size:11.5px;color:var(--mocha);line-height:1.7;margin:10px 0}.ded-backtest-section-title{margin:18px 0 6px;font-size:14px;color:var(--espresso)}.ded-backtest-reading{margin:8px 0 10px;padding:9px 11px;border-left:4px solid var(--caramel);background:var(--foam);font-size:11.5px;line-height:1.7;color:var(--mocha)}
   @media (max-width:640px){ .ded-grid { grid-template-columns:1fr; } }
-  @media (max-width:640px){.ded-backtest-kpis{grid-template-columns:1fr}.ded-backtest-table{font-size:11px}.ded-backtest-horizons>div{grid-template-columns:58px 1fr}}
+  @media (max-width:640px){.ded-backtest-kpis{grid-template-columns:1fr}.ded-backtest-table{font-size:11px}}
   /* ---- 風控管理 ---- */
   .chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px;
             background:var(--milk); border:1px solid var(--grounds); border-radius:999px;
@@ -8787,37 +8787,49 @@ function dedBacktestHtml(b){
       ? (LANG === 'en' ? 'Not observed in 12 months' : '12 個月內未發生')
       : (LANG === 'en' ? 'Still being observed' : '持續觀察中');
   };
-  const horizons = ['3','4','5','6','7','8','9','10','11','12'].map(m => {
+  const horizonRows = ['3','4','5','6','7','8','9','10','11','12'].map(m => {
     const x = b.horizons[m] || {};
-    return '<div><b>' + m + (LANG === 'en' ? ' months' : ' 個月') + '</b>'
-      + '<span>' + (LANG === 'en' ? '100MA: ' : '跌破 100MA：')
-      + (x.mid_breaks || 0) + '/' + (x.mid_eligible || 0) + '（' + pct(x.mid_pct) + '）<br>'
-      + (LANG === 'en' ? '150MA: ' : '跌破 150MA：')
-      + (x.half_breaks || 0) + '/' + (x.eligible || 0) + '（' + pct(x.half_pct) + '）</span></div>';
+    return '<tr><td><b>' + m + (LANG === 'en' ? ' months' : ' 個月') + '</b></td><td>'
+      + (x.mid_breaks || 0) + '/' + (x.mid_eligible || 0) + '<br><b>' + pct(x.mid_pct)
+      + '</b></td><td>' + (x.half_breaks || 0) + '/' + (x.eligible || 0)
+      + '<br><b>' + pct(x.half_pct) + '</b></td></tr>';
   }).join('');
   const rows = (b.events || []).map(e => '<tr><td>' + e.signal_date + '</td><td>'
     + eventCell(e.mid_break, e.followup_sessions) + '</td><td>'
     + eventCell(e.half_break, e.followup_sessions) + '</td></tr>').join('');
   const observed100 = (b.events || []).filter(e => e.mid_break && e.mid_break.date).length;
   const observed150 = (b.events || []).filter(e => e.half_break && e.half_break.date).length;
+  const month3 = b.horizons['3'] || {}, month12 = b.horizons['12'] || {};
+  const method = LANG === 'en'
+    ? 'Signal: after 20 straight sessions with Nasdaq above the 50MA above the 150MA and at least 4% above the 150MA, record the first close entering the 150MA ±4% zone. Breakdown: three consecutive closes at least 5% below the relevant 100MA or 150MA. A renewed 20-session bull confirmation can start another event. Observation window: months 3–12; periods beyond 12 months are excluded because their link to the original pullback becomes too weak.'
+    : '訊號起點：Nasdaq 連續 20 個交易日維持「指數 > 50MA > 150MA」，且至少高於 150MA 4% 後，記錄首次收盤進入 150MA ±4% 範圍。跌破定義：連續 3 天收盤低於當日 100MA 或 150MA 5% 以上。重新連續 20 日確認多頭後可開始下一筆事件。觀察期間為第 3～12 個月；超過 12 個月後，與原始回檔的因果關聯已不足，因此不納入。';
+  const reading = LANG === 'en'
+    ? 'In this sample, cumulative breakdown rates rise as the observation window extends from 3 to 12 months: 100MA ' + pct(month3.mid_pct) + ' → ' + pct(month12.mid_pct) + '; 150MA ' + pct(month3.half_pct) + ' → ' + pct(month12.half_pct) + '. This is a cumulative historical proportion, not proof that waiting itself causes a bear market.'
+    : '從第 3～12 個月可見，歷史累積跌破比例隨觀察時間延長而上升：100MA ' + pct(month3.mid_pct) + ' → ' + pct(month12.mid_pct) + '；150MA ' + pct(month3.half_pct) + ' → ' + pct(month12.half_pct) + '。這表示較晚發生的轉空也被逐步計入，不代表盤整時間本身造成空頭。';
   return '<div class="card"><h2>'
     + (LANG === 'en' ? '10-year Nasdaq Composite backtest' : '近十年 Nasdaq 指數歷史回測') + '</h2>'
+    + '<div class="ded-backtest-method"><b>' + (LANG === 'en' ? 'Backtest conditions' : '回測條件')
+    + '</b><br>' + method + '</div>'
     + '<div class="ded-backtest-kpis"><div class="ded-backtest-kpi">'
     + (LANG === 'en' ? 'Signals' : '樣本事件') + '<b>' + b.event_count + '</b></div>'
     + '<div class="ded-backtest-kpi">' + (LANG === 'en' ? 'Observed 100MA breaks' : '已跌破 100MA')
     + '<b>' + observed100 + '</b></div><div class="ded-backtest-kpi">'
     + (LANG === 'en' ? 'Observed 150MA breaks' : '已跌破 150MA')
     + '<b>' + observed150 + '</b></div></div>'
-    + '<div class="ded-backtest-horizons">' + horizons + '</div>'
+    + '<h3 class="ded-backtest-section-title">' + (LANG === 'en' ? 'First-pullback and first-break dates' : '首次回檔與首次跌破時間') + '</h3>'
     + '<div style="overflow-x:auto"><table class="ded-backtest-table"><thead><tr><th>'
     + (LANG === 'en' ? 'First pullback into 150MA ±4%' : '首次回到 150MA ±4%') + '</th><th>'
     + (LANG === 'en' ? '100MA break' : '跌破 100MA') + '</th><th>'
     + (LANG === 'en' ? '150MA break' : '跌破 150MA')
     + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
-    + '<div class="ded-backtest-method">' + (LANG === 'en'
-      ? 'Definition: after 20 straight sessions with Nasdaq above the 50MA above the 150MA and at least 4% above the 150MA, take the first close entering the 150MA ±4% zone. A 100MA or 150MA breakdown requires three consecutive closes at least 5% below that moving average. A renewed 20-session bull confirmation can start a new event while an older event remains under observation. Months 3 through 12 are cumulative rates with separate eligible counts for each moving average. Median observed time — 100MA: ' + med(b.mid_median_months) + '; 150MA: ' + med(b.half_median_months) + '.'
-      : '口徑：Nasdaq 指數連續 20 個交易日維持「指數 > 50MA > 150MA」，且至少高於 150MA 4% 後，取首次收盤進入 150MA ±4% 範圍的事件。跌破 100MA 或 150MA 都定義為連續 3 天收盤低於該日均線 5% 以上；重新連續 20 日確認多頭後，可以在舊事件仍追蹤時開始新事件。第 3 至第 12 個月分別使用兩條均線各自完整的樣本數。已發生跌破的中位時間：100MA ' + med(b.mid_median_months) + '；150MA ' + med(b.half_median_months) + '。')
-    + '<br>' + (LANG === 'en' ? 'Data through ' : '資料截至 ') + b.as_of + '</div></div>';
+    + '<h3 class="ded-backtest-section-title">' + (LANG === 'en' ? 'Cumulative breakdown rate over time' : '時間推移與累積跌破機率') + '</h3>'
+    + '<div class="ded-backtest-reading">' + reading + '</div>'
+    + '<div style="overflow-x:auto"><table class="ded-backtest-table"><thead><tr><th>'
+    + (LANG === 'en' ? 'Window' : '觀察期間') + '</th><th>100MA</th><th>150MA</th></tr></thead><tbody>'
+    + horizonRows + '</tbody></table></div>'
+    + '<div class="ded-backtest-method">' + (LANG === 'en' ? 'Median observed time — 100MA: ' : '已發生跌破的中位時間：100MA ')
+    + med(b.mid_median_months) + (LANG === 'en' ? '; 150MA: ' : '；150MA ') + med(b.half_median_months)
+    + '.<br>' + (LANG === 'en' ? 'Data through ' : '資料截至 ') + b.as_of + '</div></div>';
 }
 async function runDeduct(){
   const btn = $('#dedBtn');
@@ -10266,8 +10278,8 @@ def _fed_policy_panel_html():
               "截至 " + debt_date + "。總額是存量，不是明日到期額；對市場較直接的是公眾需要承接的部分。",
               "As of " + debt_date + ". This is a stock, not debt due tomorrow; the publicly held share is more directly relevant to markets.")
         + row("美債／GDP", "Debt / GDP", "經濟承受能力", "economic capacity",
-              percent(debt_gdp.get("value")) + "　一年 " + signed(debt_gdp_change, 1, "pp"),
-              percent(debt_gdp.get("value")) + " · 1y " + signed(debt_gdp_change, 1, "pp"),
+              percent(debt_gdp.get("value")) + "　一年 " + signed(debt_gdp_change, 1, "%"),
+              percent(debt_gdp.get("value")) + " · 1y " + signed(debt_gdp_change, 1, "%"),
               "資料季 " + gdp_date + "。" + debt_gdp_zh + " 這是長期財政指標，不是短線進出訊號。",
               "Quarter " + gdp_date + ". " + debt_gdp_en + " This is a long-run fiscal measure, not a short-term trading signal.")
         + row("縮表模型", "QT model", "10年期期限溢酬", "10Y term premium",
@@ -10280,7 +10292,7 @@ def _fed_policy_panel_html():
               "FY" + fiscal_year + " gross interest $" + amount(interest.get("gross_fytd"), 1e12, "T") + " · average rate " + percent(interest.get("avg_rate_pct")) + " · annualized estimate $" + amount(interest.get("annualized_cost_estimate"), 1e12, "T"),
               "截至 " + interest_date + "。利率上升會隨舊債到期再融資逐步傳導，不能用Fed利率直接乘總債務。",
               "As of " + interest_date + ". Higher rates feed through gradually as old debt matures; do not multiply total debt by the Fed rate.")
-        + row("利息／收入", "Interest / receipts", "財政空間", "fiscal room",
+        + row("國債利息／國庫收入", "Debt interest / Treasury receipts", "財政空間", "fiscal room",
               "毛利息 $" + amount(interest.get("gross_fytd"), 1e12, "T") + " ÷ 收入 $" + amount(interest.get("revenue_fytd"), 1e12, "T") + " ＝ " + percent(interest_share),
               "Gross interest $" + amount(interest.get("gross_fytd"), 1e12, "T") + " / receipts $" + amount(interest.get("revenue_fytd"), 1e12, "T") + " = " + percent(interest_share),
               burden_zh + " 此處是同期毛利息口徑，不是扣除政府利息收入後的淨利息。",

@@ -88,6 +88,16 @@ class DeductionBacktestTest(unittest.TestCase):
         self.assertEqual(self.result["horizons"]["12"]["mid_pct"], 88.9)
         self.assertEqual(self.result["horizons"]["12"]["half_pct"], 83.3)
 
+    def test_interface_explains_method_before_event_and_probability_tables(self):
+        with app.app.test_client() as client:
+            body = client.get("/deduction").get_data(as_text=True)
+        conditions = body.index("回測條件")
+        events = body.index("首次回檔與首次跌破時間")
+        probabilities = body.index("時間推移與累積跌破機率")
+        self.assertLess(conditions, events)
+        self.assertLess(events, probabilities)
+        self.assertIn("超過 12 個月後，與原始回檔的因果關聯已不足", body)
+
 
 if __name__ == "__main__":
     unittest.main()

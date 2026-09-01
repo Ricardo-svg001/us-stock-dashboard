@@ -28,7 +28,7 @@ class DeductionBacktestTest(unittest.TestCase):
         self.assertTrue(all("days" in row and "ma" in row for row in result.values()))
 
     def test_seed_backtest_is_stable_and_has_complete_horizon_denominators(self):
-        self.assertEqual(self.result["event_count"], 8)
+        self.assertEqual(self.result["event_count"], 19)
         self.assertEqual(set(self.result["horizons"]),
                          {str(month) for month in range(3, 10)})
         for month in range(3, 10):
@@ -40,31 +40,45 @@ class DeductionBacktestTest(unittest.TestCase):
                     and event["half_break"]["sessions"] <= sessions)
                 for event in self.result["events"])
             self.assertEqual(self.result["horizons"][months]["eligible"], expected)
+            mid_expected = sum(
+                event["followup_sessions"] >= sessions
+                or (event["mid_break"]["sessions"] is not None
+                    and event["mid_break"]["sessions"] <= sessions)
+                for event in self.result["events"])
+            self.assertEqual(self.result["horizons"][months]["mid_eligible"],
+                             mid_expected)
             self.assertNotIn("short_breaks", self.result["horizons"][months])
 
-    def test_backtest_contract_contains_only_150ma_breaks(self):
+    def test_backtest_contract_contains_100ma_and_150ma_breaks(self):
         self.assertNotIn("short_median_months", self.result)
         for event in self.result["events"]:
             self.assertNotIn("short_break", event)
+            self.assertIn("mid_break", event)
+            self.assertIn("half_break", event)
 
-    def test_every_reported_150ma_break_meets_three_day_five_percent_rule(self):
+    def test_every_reported_break_meets_three_day_five_percent_rule(self):
         ordered = sorted((date, float(close)) for date, close in self.history.items())
         dates = [row[0] for row in ordered]
         closes = [row[1] for row in ordered]
-        period = 150
-        moving = {}
-        total = sum(closes[:period])
-        moving[dates[period - 1]] = total / period
-        for index in range(period, len(closes)):
-            total += closes[index] - closes[index - period]
-            moving[dates[index]] = total / period
-        for event in self.result["events"]:
-            end_date = event["half_break"]["date"]
-            if not end_date:
-                continue
-            end = dates.index(end_date)
-            for index in range(end - 2, end + 1):
-                self.assertLessEqual(closes[index], moving[dates[index]] * 0.95)
+        for period, key in ((100, "mid_break"), (150, "half_break")):
+            moving = {}
+            total = sum(closes[:period])
+            moving[dates[period - 1]] = total / period
+            for index in range(period, len(closes)):
+                total += closes[index] - closes[index - period]
+                moving[dates[index]] = total / period
+            for event in self.result["events"]:
+                end_date = event[key]["date"]
+                if not end_date:
+                    continue
+                end = dates.index(end_date)
+                for index in range(end - 2, end + 1):
+                    self.assertLessEqual(closes[index], moving[dates[index]] * 0.95)
+
+    def test_renewed_bull_confirmation_can_start_another_event(self):
+        signals = {event["signal_date"] for event in self.result["events"]}
+        self.assertIn("2021-05-11", signals)
+        self.assertIn("2021-09-28", signals)
 
 
 if __name__ == "__main__":

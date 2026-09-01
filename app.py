@@ -41,7 +41,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-APP_VERSION = "2026.09.01.5"
+APP_VERSION = "2026.09.01.6"
 BUILD_COMMIT = (os.environ.get("RENDER_GIT_COMMIT") or "local")[:12]
 BUILD_BRANCH = os.environ.get("RENDER_GIT_BRANCH") or "local"
 BUILD_STARTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1375,8 +1375,8 @@ def _ma_deduction(closes, target, days_ahead=DEDUCT_MAX_DAYS, periods=DEDUCT_MAS
     return out
 
 
-def _deduction_index_backtest(rows, short_ma=50, long_ma=150, years=10):
-    """多頭首次回到長期均線附近後的逐日事件回測；訊號當下不使用未來資料。"""
+def _deduction_index_backtest(rows, short_ma=50, mid_ma=100, long_ma=150, years=10):
+    """多頭首次回到長期均線附近後，同時追蹤 100MA 與 150MA 跌破。"""
     clean = []
     for date, close in rows:
         try:
@@ -1401,7 +1401,9 @@ def _deduction_index_backtest(rows, short_ma=50, long_ma=150, years=10):
             out[index] = total / period
         return out
 
-    short_values, long_values = rolling_ma(short_ma), rolling_ma(long_ma)
+    short_values = rolling_ma(short_ma)
+    mid_values = rolling_ma(mid_ma)
+    long_values = rolling_ma(long_ma)
     cutoff = dates[-1] - timedelta(days=round(years * 365.25))
     horizon_sessions = 189
     events, index, bull_streak, armed = [], long_ma, 0, False
@@ -1416,12 +1418,18 @@ def _deduction_index_backtest(rows, short_ma=50, long_ma=150, years=10):
         if (armed and dates[index] >= cutoff and 0.96 <= ratio <= 1.04
                 and prior_ratio > 1.04):
             end = min(len(closes) - 1, index + horizon_sessions)
+            mid_break = None
             half_break = None
             for future in range(index + 1, end + 1):
-                if (future >= index + 3 and all(
+                if (mid_break is None and future >= index + 3 and all(
+                        closes[pos] <= mid_values[pos] * 0.95
+                        for pos in (future - 2, future - 1, future))):
+                    mid_break = future
+                if (half_break is None and future >= index + 3 and all(
                         closes[pos] <= long_values[pos] * 0.95
                         for pos in (future - 2, future - 1, future))):
                     half_break = future
+                if mid_break is not None and half_break is not None:
                     break
 
             def event_value(position):
@@ -1433,8 +1441,8 @@ def _deduction_index_backtest(rows, short_ma=50, long_ma=150, years=10):
 
             events.append({"signal_date": dates[index].isoformat(),
                            "followup_sessions": len(closes) - 1 - index,
+                           "mid_break": event_value(mid_break),
                            "half_break": event_value(half_break)})
-            index = half_break if half_break is not None else end
             bull_streak, armed = 0, False
         index += 1
 
@@ -1449,19 +1457,30 @@ def _deduction_index_backtest(rows, short_ma=50, long_ma=150, years=10):
     horizons = {}
     for months in range(3, 10):
         sessions = months * 21
+        mid_eligible = [event for event in events
+                        if event["followup_sessions"] >= sessions
+                        or (event["mid_break"]["sessions"] is not None
+                            and event["mid_break"]["sessions"] <= sessions)]
         eligible = [event for event in events
                     if event["followup_sessions"] >= sessions
                     or (event["half_break"]["sessions"] is not None
                         and event["half_break"]["sessions"] <= sessions)]
+        mid_hits = sum(event["mid_break"]["sessions"] is not None
+                       and event["mid_break"]["sessions"] <= sessions
+                       for event in mid_eligible)
         half_hits = sum(event["half_break"]["sessions"] is not None
                         and event["half_break"]["sessions"] <= sessions for event in eligible)
         horizons[str(months)] = {
+            "mid_eligible": len(mid_eligible), "mid_breaks": mid_hits,
+            "mid_pct": round(mid_hits / len(mid_eligible) * 100, 1) if mid_eligible else None,
             "eligible": len(eligible), "half_breaks": half_hits,
             "half_pct": round(half_hits / len(eligible) * 100, 1) if eligible else None}
     return {"as_of": dates[-1].isoformat(), "from": cutoff.isoformat(), "years": years,
-            "short_ma": short_ma, "long_ma": long_ma, "zone_pct": 4,
+            "short_ma": short_ma, "mid_ma": mid_ma, "long_ma": long_ma, "zone_pct": 4,
             "bull_confirm_sessions": 20, "horizon_sessions": horizon_sessions,
             "event_count": len(events), "events": events, "horizons": horizons,
+            "mid_median_months": median([event["mid_break"]["months"] for event in events
+                                           if event["mid_break"]["months"] is not None]),
             "half_median_months": median([event["half_break"]["months"] for event in events
                                           if event["half_break"]["months"] is not None])}
 
@@ -6523,7 +6542,7 @@ __QUOTES_HTML__
       所以這個天數可以當成「<b>還有多少時間可以慢慢整理</b>」的粗估。</p>
       <p>現在只保留<b>盤整假設</b>：價格停在指定價位，估算均線還要多久才會追上。
       另外提供近十年 Nasdaq 大盤歷史事件回測：多頭行情首次回到 150MA ±4% 範圍後，
-      統計第 3 至第 9 個月內跌破 150MA 的累積機率；跌破定義為連續 3 天收盤低於各日 150MA 5% 以上。</p>
+      統計第 3 至第 9 個月內跌破 100MA 與 150MA 的累積機率；跌破定義都是連續 3 天收盤低於各日均線 5% 以上。</p>
       <p>⚠️ <b>這是算術外推與歷史統計，不是預測。</b>天數與歷史比例都不是未來保證。</p>
     </div>
   </details>
@@ -6795,7 +6814,7 @@ const I18N = { en: {
   "nav.deduct": "MA Deduction", "nav.deduct.sub": "When the 50/100/150MA catches up",
   "p10.title": "Moving-Average Deduction",
   "ded.introT": "How much time is left to consolidate?",
-  "ded.intro": "<p><b>Deduction is arithmetic, not prediction.</b> The 50-day average drops the close from 50 sessions ago and adds the next close; the value being dropped is the <b>deduction value</b>.</p><p>This page keeps only the <b>flat-price assumption</b>: price stays at the selected level while we estimate when the 50MA, 100MA and 150MA catch up. Its ten-year Nasdaq Composite backtest measures the cumulative chance of a 150MA breakdown in months 3 through 9 after an established uptrend first pulls back into the 150MA ±4% zone. A breakdown requires three consecutive closes at least 5% below each day's 150MA.</p><p>⚠️ Arithmetic estimates and historical frequencies are not forecasts or guarantees.</p>",
+  "ded.intro": "<p><b>Deduction is arithmetic, not prediction.</b> The 50-day average drops the close from 50 sessions ago and adds the next close; the value being dropped is the <b>deduction value</b>.</p><p>This page keeps only the <b>flat-price assumption</b>: price stays at the selected level while we estimate when the 50MA, 100MA and 150MA catch up. Its ten-year Nasdaq Composite backtest measures the cumulative chances of 100MA and 150MA breakdowns in months 3 through 9 after an established uptrend first pulls back into the 150MA ±4% zone. Either breakdown requires three consecutive closes at least 5% below that day's moving average.</p><p>⚠️ Arithmetic estimates and historical frequencies are not forecasts or guarantees.</p>",
   "ded.pick": "Choose a symbol", "ded.index": "Nasdaq Composite", "ded.stock": "Stock (top 300)",
   "ded.ph": "Ticker or company name, e.g. AAPL",
   "ded.price": "Price to reach",
@@ -8771,29 +8790,33 @@ function dedBacktestHtml(b){
   const horizons = ['3','4','5','6','7','8','9'].map(m => {
     const x = b.horizons[m] || {};
     return '<div><b>' + m + (LANG === 'en' ? ' months' : ' 個月') + '</b>'
-      + '<span>' + (LANG === 'en' ? '150MA break: ' : '跌破 150MA：')
+      + '<span>' + (LANG === 'en' ? '100MA: ' : '跌破 100MA：')
+      + (x.mid_breaks || 0) + '/' + (x.mid_eligible || 0) + '（' + pct(x.mid_pct) + '）<br>'
+      + (LANG === 'en' ? '150MA: ' : '跌破 150MA：')
       + (x.half_breaks || 0) + '/' + (x.eligible || 0) + '（' + pct(x.half_pct) + '）</span></div>';
   }).join('');
   const rows = (b.events || []).map(e => '<tr><td>' + e.signal_date + '</td><td>'
+    + eventCell(e.mid_break, e.followup_sessions) + '</td><td>'
     + eventCell(e.half_break, e.followup_sessions) + '</td></tr>').join('');
-  const observed = (b.events || []).filter(e => e.half_break && e.half_break.date).length;
-  const nine = b.horizons['9'] || {};
+  const observed100 = (b.events || []).filter(e => e.mid_break && e.mid_break.date).length;
+  const observed150 = (b.events || []).filter(e => e.half_break && e.half_break.date).length;
   return '<div class="card"><h2>'
     + (LANG === 'en' ? '10-year Nasdaq Composite backtest' : '近十年 Nasdaq 指數歷史回測') + '</h2>'
     + '<div class="ded-backtest-kpis"><div class="ded-backtest-kpi">'
     + (LANG === 'en' ? 'Signals' : '樣本事件') + '<b>' + b.event_count + '</b></div>'
-    + '<div class="ded-backtest-kpi">' + (LANG === 'en' ? 'Observed breakdowns' : '已發生跌破')
-    + '<b>' + observed + '</b></div><div class="ded-backtest-kpi">'
-    + (LANG === 'en' ? '9-month cumulative rate' : '9 個月累積機率')
-    + '<b>' + pct(nine.half_pct) + '</b></div></div>'
+    + '<div class="ded-backtest-kpi">' + (LANG === 'en' ? 'Observed 100MA breaks' : '已跌破 100MA')
+    + '<b>' + observed100 + '</b></div><div class="ded-backtest-kpi">'
+    + (LANG === 'en' ? 'Observed 150MA breaks' : '已跌破 150MA')
+    + '<b>' + observed150 + '</b></div></div>'
     + '<div class="ded-backtest-horizons">' + horizons + '</div>'
     + '<div style="overflow-x:auto"><table class="ded-backtest-table"><thead><tr><th>'
     + (LANG === 'en' ? 'First pullback into 150MA ±4%' : '首次回到 150MA ±4%') + '</th><th>'
+    + (LANG === 'en' ? '100MA break' : '跌破 100MA') + '</th><th>'
     + (LANG === 'en' ? '150MA break' : '跌破 150MA')
     + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
     + '<div class="ded-backtest-method">' + (LANG === 'en'
-      ? 'Definition: after 20 straight sessions with Nasdaq above the 50MA above the 150MA and at least 4% above the 150MA, take the first close entering the 150MA ±4% zone. A breakdown requires three consecutive index closes at least 5% below each day’s 150MA. Month 3 through month 9 are cumulative rates and include signals whose breakdown is already known or whose follow-up is complete for that horizon. Median observed breakdown time: ' + med(b.half_median_months) + '.'
-      : '口徑：Nasdaq 指數連續 20 個交易日維持「指數 > 50MA > 150MA」，且至少高於 150MA 4% 後，取首次收盤進入 150MA ±4% 範圍的事件。跌破定義為連續 3 天大盤收盤價低於各日 150MA 5% 以上。第 3 至第 9 個月顯示累積機率，各月份納入已確定跌破，或追蹤期已完整的訊號。已發生跌破的中位時間：' + med(b.half_median_months) + '。')
+      ? 'Definition: after 20 straight sessions with Nasdaq above the 50MA above the 150MA and at least 4% above the 150MA, take the first close entering the 150MA ±4% zone. A 100MA or 150MA breakdown requires three consecutive closes at least 5% below that moving average. A renewed 20-session bull confirmation can start a new event while an older event remains under observation. Month 3 through month 9 are cumulative rates with separate eligible counts for each moving average. Median observed time — 100MA: ' + med(b.mid_median_months) + '; 150MA: ' + med(b.half_median_months) + '.'
+      : '口徑：Nasdaq 指數連續 20 個交易日維持「指數 > 50MA > 150MA」，且至少高於 150MA 4% 後，取首次收盤進入 150MA ±4% 範圍的事件。跌破 100MA 或 150MA 都定義為連續 3 天收盤低於該日均線 5% 以上；重新連續 20 日確認多頭後，可以在舊事件仍追蹤時開始新事件。第 3 至第 9 個月分別使用兩條均線各自完整的樣本數。已發生跌破的中位時間：100MA ' + med(b.mid_median_months) + '；150MA ' + med(b.half_median_months) + '。')
     + '<br>' + (LANG === 'en' ? 'Data through ' : '資料截至 ') + b.as_of + '</div></div>';
 }
 async function runDeduct(){

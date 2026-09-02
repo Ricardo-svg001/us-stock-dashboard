@@ -2904,7 +2904,7 @@ MACRO_CACHE_FILE = "us_rate_inflation_v6.json"   # v6: 日債改用每日檔，�
 TREASURY_XML = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
 JGB_DAILY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv"
 JGB_HISTORY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
-FED_POLICY_CACHE_FILE = "fed_treasury_policy_v5.json"  # v5: 財政年度利率、利息、收入與 GDP 走勢
+FED_POLICY_CACHE_FILE = "fed_treasury_policy_v7.json"  # v7: 分批 FRED、TGA 備援與部署後優先更新
 FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 NYFED_EFFR_API = "https://markets.newyorkfed.org/api/rates/unsecured/effr/last/30.json"
 FISCAL_DATA_API = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service"
@@ -3059,35 +3059,47 @@ def _fred_series_raw(series_id, years=3):
 
 
 def _fred_policy_series_raw():
-    """一次下載政策序列 ZIP，避免同時對 FRED 發出多個請求而被節流。"""
+    """分批下載政策序列，單一批失敗時仍保留其他已取得資料。"""
     import zipfile
     ids = ("DFF", "DFEDTARL", "DFEDTARU", "IORB", "A191RL1Q225SBEA", "GDP", "RRPONTSYD", "RPONTSYD",
            "WALCL", "WSHOSHO", "TREAST", "WSHOMCB", "WDTGAL", "WRESBAL",
            "GFDEGDQ188S")
     start = (_utcnow() - timedelta(days=366 * 3 + 14)).strftime("%Y-%m-%d")
-    # FRED 的批次 ZIP 對瀏覽器型 User-Agent 偶爾長時間掛住；官方下載端點用
-    # 簡單的資料客戶端標頭反而穩定，且只需一個請求。
-    r = requests.get(FRED_CSV, params={"id": ",".join(ids), "cosd": start},
-                     headers={"User-Agent": "curl/8.7.1", "Accept": "*/*"}, timeout=45)
-    r.raise_for_status()
     output = {key: [] for key in ids}
-    with zipfile.ZipFile(io.BytesIO(r.content)) as archive:
-        for name in archive.namelist():
-            if not name.lower().endswith(".csv"):
+    def parse(text, expected):
+        for item in csv.DictReader(text.splitlines()):
+            date_text = str(item.get("observation_date") or "")[:10]
+            if len(date_text) != 10:
                 continue
-            text = archive.read(name).decode("utf-8-sig", errors="replace")
-            for item in csv.DictReader(text.splitlines()):
-                date_text = str(item.get("observation_date") or "")[:10]
-                if len(date_text) != 10:
+            for key in expected:
+                raw = str(item.get(key) or "").strip()
+                if not raw or raw in (".", "NA"):
                     continue
-                for key in ids:
-                    raw = str(item.get(key) or "").strip()
-                    if not raw or raw in (".", "NA"):
-                        continue
-                    try:
-                        output[key].append((date_text, float(raw)))
-                    except ValueError:
-                        continue
+                try:
+                    output[key].append((date_text, float(raw)))
+                except ValueError:
+                    continue
+
+    # 一次請求全部序列偶爾會被 FRED 的壓縮下載端點中斷。分成三批後，至少
+    # 已成功的批次仍會寫入快取，首頁不會整塊只剩「資料正在整理」。
+    for index in range(0, len(ids), 5):
+        batch = ids[index:index + 5]
+        try:
+            r = requests.get(FRED_CSV, params={"id": ",".join(batch), "cosd": start},
+                             headers={"User-Agent": "curl/8.7.1", "Accept": "*/*"}, timeout=35)
+            r.raise_for_status()
+            blob = io.BytesIO(r.content)
+            if zipfile.is_zipfile(blob):
+                with zipfile.ZipFile(blob) as archive:
+                    for name in archive.namelist():
+                        if name.lower().endswith(".csv"):
+                            parse(archive.read(name).decode("utf-8-sig", errors="replace"), batch)
+            else:
+                parse(r.content.decode("utf-8-sig", errors="replace"), batch)
+        except Exception:
+            continue
+    if not any(output.values()):
+        raise RuntimeError("FRED policy batches returned no observations")
     return output
 
 
@@ -3373,9 +3385,10 @@ def _fed_treasury_policy_data(force=False):
     started = time.perf_counter()
     series = {}
     errors = []
-    with ThreadPoolExecutor(max_workers=5) as ex:
+    with ThreadPoolExecutor(max_workers=6) as ex:
         fred_future = ex.submit(_fred_policy_series_raw)
         effr_future = ex.submit(_nyfed_effr_raw)
+        tga_future = ex.submit(_fiscal_tga_raw)
         auction_future = ex.submit(_fiscal_auctions_raw)
         fiscal_future = ex.submit(_fiscal_debt_burden_raw)
         fomc_future = ex.submit(_fomc_calendar_raw)
@@ -3390,6 +3403,14 @@ def _fed_treasury_policy_data(force=False):
         except Exception:
             pass  # FRED DFF 是備援；NY Fed 暫時失敗不讓整張政策卡變成失敗。
         try:
+            tga_rows = tga_future.result(timeout=35)
+            # FRED 歷史資料正常時不覆蓋；只有缺值或明顯較舊時才用 Treasury
+            # Daily Statement 備援，讓 TGA 主卡至少能可靠顯示最新已公布值。
+            if tga_rows and (not series.get("WDTGAL") or tga_rows[-1][0] >= series["WDTGAL"][-1][0]):
+                series["WDTGAL"] = tga_rows
+        except Exception as exc:
+            errors.append("TGA:%s" % type(exc).__name__)
+        try:
             auctions = auction_future.result(timeout=35)
         except Exception as exc:
             auctions, errors = [], errors + ["Auctions:%s" % type(exc).__name__]
@@ -3401,6 +3422,22 @@ def _fed_treasury_policy_data(force=False):
             fomc = fomc_future.result(timeout=35)
         except Exception as exc:
             fomc, errors = {}, errors + ["FOMC:%s" % type(exc).__name__]
+
+    # 分批下載仍可能只缺其中一批；針對首頁必要序列改走單序列官方 CSV 補回。
+    # 這一步只在缺值時執行，避免平常增加 FRED 請求數。
+    required_fred = ("DFEDTARL", "DFEDTARU", "IORB", "WALCL", "WSHOSHO", "WDTGAL", "RRPONTSYD",
+                     "WRESBAL", "GFDEGDQ188S", "A191RL1Q225SBEA", "GDP")
+    missing_fred = [key for key in required_fred if not series.get(key)]
+    if missing_fred:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futures = {key: ex.submit(_fred_series_raw, key, 3) for key in missing_fred}
+            for key, future in futures.items():
+                try:
+                    rows = future.result(timeout=30)
+                    if rows:
+                        series[key] = rows
+                except Exception:
+                    errors.append("FRED-%s:fallback" % key)
 
     def latest(key):
         rows = series.get(key) or []
@@ -3778,6 +3815,14 @@ def _macro_updater():
     MACRO_STATE["enabled"] = True
     while True:
         try:
+            # 首次部署先產生首頁直接顯示的聯準會／財政部快取；不要等較慢的
+            # 美日殖利率與 CPI 更新完成，否則首頁會長時間停在「資料正在整理」。
+            policy_cached = _load_cache(FED_POLICY_CACHE_FILE, None)
+            if _fed_policy_refresh_due(policy_cached):
+                policy_data = _fed_treasury_policy_data(force=True)
+                MACRO_STATE["fed_policy_date"] = policy_data.get("as_of") or "—"
+                MACRO_STATE["treasury_action_date"] = (
+                    (policy_data.get("treasury") or {}).get("tga") or {}).get("date") or "—"
             cached = _load_cache(MACRO_CACHE_FILE, None)
             if _macro_refresh_due(cached):
                 with _MACRO_REFRESH_LOCK:
@@ -3795,12 +3840,6 @@ def _macro_updater():
                     "更新完成" if _macro_bonds_are_current(data)
                     else "來源仍落後，1 小時後重試")
                 MACRO_STATE["last_run"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
-            policy_cached = _load_cache(FED_POLICY_CACHE_FILE, None)
-            if _fed_policy_refresh_due(policy_cached):
-                policy_data = _fed_treasury_policy_data(force=True)
-                MACRO_STATE["fed_policy_date"] = policy_data.get("as_of") or "—"
-                MACRO_STATE["treasury_action_date"] = (
-                    (policy_data.get("treasury") or {}).get("tga") or {}).get("date") or "—"
         except Exception as exc:
             MACRO_STATE["last_result"] = "更新失敗，1 小時後重試：%s" % str(exc)[:100]
             MACRO_STATE["last_run"] = _utcnow().strftime("%Y-%m-%d %H:%M UTC")

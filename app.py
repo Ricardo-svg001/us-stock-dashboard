@@ -3921,26 +3921,22 @@ def get_nasdaq_index():
 
 # 站上均線的家數（首頁「大盤詳細數據」用）
 # ⚠️⚠️ **這裡是美股的線，不是台股的。**
-#   台股用 60／120／240（季線／半年線／年線），美股改成 **50／150／200**：
-#     ・50MA  —— 美股慣例中相當於台股季線的地位
-#     ・150MA —— 趨勢模板線，也是既有 breadth.json 用的那條（保持一致）
-#     ・200MA —— 美股最經典的長期線，等同台股的年線
-#   📌 直接照搬 60/120/240 會讓數字對不上美股讀者的既有認知，
-#      也跟站上其他頁面（50/150）說的不是同一種語言。
-SNAP_MAS = ((50, "50MA"), (150, "150MA"), (200, "200MA"))
+#   首頁市場寬度採站內約定：50／100／150MA 對應季線／半年線／年線。
+#   這是首頁橫斷面寬度的產品口徑，不改動其他頁面的趨勢模板或回測定義。
+SNAP_MAS = ((50, "50MA"), (100, "100MA"), (150, "150MA"))
 SNAP_NH_WINDOW = 60          # 創新高看幾個交易日
 SNAP_NH_TOL = 0.02           # 2% 容差，與創新高篩選頁一致
-SNAP_CACHE = "ma_breadth_snapshot_v2.json"  # v2: 強制限定當前前 300 大
+SNAP_CACHE = "ma_breadth_snapshot_v3.json"  # v3: 首頁市場寬度改為 50／100／150MA
 
 
 def build_ma_breadth_snapshot(universe=None, histories=None):
-    """今天有多少家站上 50／150／200MA，以及多少家創 60 日新高。
+    """今天有多少家站上 50／100／150MA，以及多少家創 60 日新高。
 
     ⚠️ **只能在預抓流程裡呼叫**（同 `build_breadth()`）：要讀幾百個快取檔。
     ⚠️ **純 Python，不用 pandas** —— 這個專案沒裝（見 5.2）。
 
     ⚠️⚠️ **每條均線的分母不一樣，不可以共用一個總數。**
-    新上市的股票湊不滿 200 天，算進 200MA 的分母會系統性低估比例。
+    新上市的股票湊不滿 150 天，算進 150MA 的分母會系統性低估比例。
     每條線各自回報「有足夠資料的家數」當分母。
     """
     above = {p: 0 for p, _ in SNAP_MAS}
@@ -4772,7 +4768,7 @@ def _phase_compute():
     try:
         snap = get_ma_breadth_snapshot() or {}
         long_rows = [r for r in snap.get("rows", [])
-                     if int(r.get("period") or 0) in (150, 200)]
+                     if int(r.get("period") or 0) in (100, 150)]
         long_breadth = (sum(float(r.get("pct") or 0) for r in long_rows) / len(long_rows)
                         if long_rows else None)
         phase, date, detail = _market_stage_from_index(
@@ -4830,7 +4826,7 @@ def _prefetch_impl(universe_n=300, force=False):
     PREFETCH_STATE["stage"] = "計算市場寬度"
     try:
         build_breadth(universe=uni, histories=histories)
-        # ⚠️ 順便算今日快照（50／150／200MA 家數 ＋ 創 60 日新高）——
+        # ⚠️ 順便算今日快照（50／100／150MA 家數 ＋ 創 60 日新高）——
         #    讀的是同一批 hist_ 快取檔，分開跑等於整批讀兩次。
         build_ma_breadth_snapshot(universe=uni, histories=histories)
         build_market_count_history(universe=uni, histories=histories)
@@ -5818,7 +5814,7 @@ __SEO_HEAD__
            margin:26px auto 14px; font-family:var(--font-head); font-weight:700;
            font-size:13px; color:var(--mocha); letter-spacing:.16em; }
   .qhead::after { content:""; flex:1; height:1px; background:var(--grounds); }
-  /* 首頁新版市場儀表板：結構與台股同步，均線口徑保留美股 50／150／200MA。 */
+  /* 首頁新版市場儀表板：季線／半年線／年線使用 50／100／150MA。 */
   #home{max-width:920px;margin:0 auto}
   .home-dashboard{display:grid;gap:16px}.market-now{display:grid;gap:14px;margin-bottom:18px}
   .market-now-hero,.market-data-card{background:var(--foam);border:1px solid var(--grounds);border-radius:16px;box-shadow:var(--shadow)}
@@ -5826,11 +5822,10 @@ __SEO_HEAD__
   .market-now-title{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.market-now-title h1{margin:0;font:900 32px var(--font-head);text-align:left}.market-now-title h1::after{display:none}
   .market-now-badge{display:inline-flex;padding:8px 20px;border-radius:999px;background:linear-gradient(135deg,var(--caramel),var(--caramel-2));color:#fff;font-weight:700}.market-now-hero p{margin:12px 0 0;color:var(--mocha);font-size:15px;line-height:1.7}
   .market-scope-note{margin-top:7px;color:var(--mocha);font-size:12px;line-height:1.65;opacity:.9}
-  .market-now-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}.market-data-card{padding:16px;min-width:0}.market-data-card h2{margin:0 0 12px;font:700 18px var(--font-head)}
-  .market-return-row{display:grid;grid-template-columns:150px 1fr 120px;align-items:stretch;border:1px solid var(--grounds);border-bottom:0}.market-return-row:last-child{border-bottom:1px solid var(--grounds)}.market-return-row>span{display:flex;flex-direction:column;justify-content:center;padding:13px}.market-return-row>span+span{border-left:1px solid var(--grounds)}
-  .market-return-main{font-family:var(--font-num);text-align:right}.market-return-main b{font-size:20px;color:var(--up)}.market-return-med{text-align:right;color:var(--mocha)}.market-return-med>b{display:block;font:700 20px var(--font-num)}.market-return-row>.market-return-quartiles{grid-column:1/-1;display:flex;flex-direction:row;align-items:center;justify-content:flex-end;gap:10px;padding:7px 13px;border-left:0!important;border-top:1px solid var(--grounds);background:color-mix(in srgb,var(--grounds) 18%,var(--foam));font:650 10.5px/1.45 var(--font-num)}.market-return-quartiles i{font-style:normal;color:var(--espresso);white-space:nowrap}
-  .breadth-row{display:grid;grid-template-columns:58px 1fr 104px;align-items:center;gap:10px;margin:13px 0}.breadth-row b{font-family:var(--font-head)}.breadth-bar{display:flex;height:12px;overflow:hidden;border-radius:4px;background:var(--grounds)}.breadth-above{background:var(--up)}.breadth-below{background:var(--down)}
-  .breadth-num{text-align:right;font:700 13px var(--font-num)}.breadth-num .up{color:var(--up)}.breadth-num .down{color:var(--down)}.breadth-legend{display:flex;gap:16px;margin-top:14px;color:var(--mocha);font-size:12px}.breadth-legend i{display:inline-block;width:9px;height:9px;margin-right:5px}
+  .market-now-grid{display:grid;grid-template-columns:1fr;gap:14px}.market-data-card{padding:16px;min-width:0}.market-data-card h2{margin:0 0 12px;font:700 18px var(--font-head)}
+  .market-return-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.market-return-card{min-width:0;overflow:hidden;border:1px solid var(--grounds);border-radius:12px;background:color-mix(in srgb,var(--foam) 95%,var(--grounds))}.market-return-card>header{padding:11px 14px;border-bottom:1px solid var(--grounds);font-family:var(--font-head);font-weight:800}.market-return-stats{display:grid;grid-template-columns:minmax(0,1fr) 116px;align-items:stretch}.market-return-participation,.market-return-med{padding:14px}.market-return-participation small,.market-return-med small{display:block;margin-bottom:6px;color:var(--mocha);font-size:11px}.market-return-count{display:flex;align-items:baseline;gap:7px;white-space:nowrap;font-family:var(--font-num)}.market-return-count b{font-size:27px;color:var(--up)}.market-return-count span{font-size:13px}.market-return-rate{display:block;margin-top:5px;font:800 20px var(--font-num);color:var(--up)}.market-return-med{border-left:1px solid var(--grounds);text-align:right}.market-return-med>b{display:block;font:800 20px var(--font-num);white-space:nowrap}.market-return-quartiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:9px 12px 11px;border-top:1px solid var(--grounds);background:color-mix(in srgb,var(--grounds) 18%,var(--foam))}.market-return-quartiles>em{grid-column:1/-1;color:var(--mocha);font:700 10px/1.4 var(--font-head);font-style:normal}.market-return-quartile{min-width:0;padding:6px 4px;border-radius:7px;background:var(--foam);text-align:center}.market-return-quartile b,.market-return-quartile i{display:block}.market-return-quartile b{font:800 10px var(--font-num);color:var(--caramel-2)}.market-return-quartile i{margin-top:2px;font:650 9.5px/1.3 var(--font-num);font-style:normal;color:var(--espresso);white-space:nowrap}
+  .breadth-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.breadth-row{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:10px;margin:0;padding:12px;border:1px solid var(--grounds);border-radius:10px}.breadth-row b{font-family:var(--font-head)}.breadth-bar{display:flex;height:12px;overflow:hidden;border-radius:4px;background:var(--grounds)}.breadth-above{background:var(--up)}.breadth-below{background:var(--down)}
+  .breadth-num{grid-column:1/-1;text-align:right;font:700 13px var(--font-num)}.breadth-num .up{color:var(--up)}.breadth-num .down{color:var(--down)}.breadth-legend{display:flex;gap:16px;margin-top:14px;color:var(--mocha);font-size:12px}.breadth-legend i{display:inline-block;width:9px;height:9px;margin-right:5px}
   .market-chart-card{padding-bottom:10px}.market-chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:6px}.market-chart-head h2{margin:0}.market-periods{display:flex}.market-periods button{border:1px solid var(--grounds);border-right:0;background:var(--foam);padding:7px 14px;cursor:pointer;color:var(--mocha)}.market-periods button:first-child{border-radius:8px 0 0 8px}.market-periods button:last-child{border-right:1px solid var(--grounds);border-radius:0 8px 8px 0}.market-periods button.on{background:var(--espresso);color:#fff}
   #homeIndexChart svg{width:100%;height:auto;display:block;touch-action:none;cursor:grab;user-select:none}#homeIndexChart svg.dragging{cursor:grabbing}.home-chart-read{min-height:20px;font:12px var(--font-num);color:var(--mocha);margin:2px 0 0 45px}.market-chart-note{font-size:11px;color:var(--mocha);text-align:right;margin-top:-3px}
   /* 「今日觀察」只是區段標題與內容容器，不另外鋪一層卡片底色。 */
@@ -5863,7 +5858,7 @@ __SEO_HEAD__
   @media(max-width:560px){.fed-policy-panel{padding:17px 16px}.fed-policy-head{display:block}.fed-policy-status{justify-content:flex-start;margin-top:10px}.fed-policy-grid{grid-template-columns:1fr}.policy-kpis{grid-template-columns:1fr 1fr}.fed-policy-fold>summary{padding:13px 12px}.fed-policy-fold>summary small{display:block;margin:3px 0 0}.liquidity-dashboard{padding:0 10px 11px}.liquidity-hero{align-items:flex-start;flex-direction:column;padding:14px}.liquidity-hero h3{font-size:24px}.liquidity-metrics{grid-template-columns:1fr 1fr}.liquidity-metric{padding:10px}.liquidity-metric:last-child{grid-column:1/-1}.liquidity-tabs{display:grid;grid-template-columns:repeat(3,1fr);width:100%}.liquidity-tabs button{padding:7px 4px}.policy-indicator-board{padding:0 10px 12px}.indicator-section{padding:18px 0}.indicator-section-head{gap:9px}.indicator-section-no{flex-basis:34px;height:34px}.indicator-section-head h3{font-size:19px}.indicator-summary{display:block;padding:10px 12px}.indicator-summary>b{display:block;margin-bottom:3px}.indicator-card-grid{grid-template-columns:1fr;gap:10px}.indicator-card,.indicator-card-wide{grid-column:auto;padding:17px 16px}.indicator-card h4{font-size:15px}.indicator-value{font-size:24px}.indicator-explain{font-size:12px;line-height:1.6}.indicator-detail-rows{grid-template-columns:1fr 1fr}.indicator-direction{max-width:100%;box-sizing:border-box}.policy-board li{grid-template-columns:1fr;gap:3px;padding:12px 0}.policy-board-label{color:var(--caramel-2)}.policy-board-data{font-size:13px}.policy-board-read{font-size:11.5px}}
   @media(max-width:560px){.home-actions,.home-action-panel .home-actions{grid-template-columns:1fr}.updnote{font-size:14px}.updnote small{font-size:12.5px}}
   @media(max-width:560px){.reading-row{grid-template-columns:54px 1fr}.ind-change-grid,.ind-stock-list{grid-template-columns:1fr}}
-  @media(max-width:560px){.market-now-grid{grid-template-columns:1fr}.market-now-hero{padding:17px 18px}.market-now-title h1{font-size:27px}.market-now-badge{padding:6px 13px}.market-return-row{grid-template-columns:96px 1fr}.market-return-row>span{padding:10px 8px}.market-return-main b,.market-return-med>b{font-size:16px}.market-return-med{grid-column:1/-1;border-left:0!important;border-top:1px solid var(--grounds);text-align:left}.market-return-row>.market-return-quartiles{justify-content:flex-start;flex-wrap:wrap;gap:3px 9px;font-size:10.5px}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods,.liquidity-periods{width:100%}.market-periods button,.liquidity-periods button{flex:1;padding:7px 5px}}
+  @media(max-width:560px){.market-now-grid,.market-return-grid,.breadth-grid{grid-template-columns:1fr}.market-now-hero{padding:17px 18px}.market-now-title h1{font-size:27px}.market-now-badge{padding:6px 13px}.market-return-stats{grid-template-columns:minmax(0,1fr) 108px}.market-return-participation,.market-return-med{padding:12px}.market-return-count b{font-size:24px}.market-return-quartiles{grid-template-columns:repeat(2,minmax(0,1fr))}.market-return-quartile i{font-size:10px}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods,.liquidity-periods{width:100%}.market-periods button,.liquidity-periods button{flex:1;padding:7px 5px}}
   /* 今日市場：市場階段（可展開看說明） */
   /* 到價提醒的股票選擇器（自台股版移植） */
   .stockpick { position:relative; }
@@ -7995,10 +7990,8 @@ function wireBreadthHover(j){
   svg.addEventListener("pointercancel", rest);
 }
 
-/* 今日快照：站上 50／150／200MA 的家數 ＋ 創 60 日新高家數。
-   ⚠️⚠️ 用的是**美股的線**（50／150／200），不是台股的 60／120／240 ——
-      50MA 相當於台股季線的地位、150MA 是趨勢模板線（與 breadth 折線圖同一條）、
-      200MA 是美股最經典的長期線。**照搬台股的數字會跟站上其他頁面說不同語言。**
+/* 今日快照：站上 50／100／150MA 的家數 ＋ 創 60 日新高家數。
+   首頁標示為季線 50MA、半年線 100MA、年線 150MA。
    📌 折線圖看的是「150MA 寬度的歷史走勢」，這裡看的是「今天各條線的橫斷面」——
       兩者互補：一個回答「現在算高還是低」，一個回答「現在是誰在撐」。 */
 function maSnapshotHtml(j){
@@ -8030,10 +8023,10 @@ function maSnapshotHtml(j){
     h += `<div class="baro-row"><span>${t("br.nh","創 "+nh.window+" 日新高")}</span>`+
          `<b style="color:${col(nh.pct,20)}">${nh.above} / ${nh.base}　${nh.pct}%</b></div>`;
   }
-  /* ⚠️⚠️ 分母不一樣一定要講。新上市的股票湊不滿 200 天，
-     不列入 200MA 的分母；不說明的話讀者會以為三條線可以直接互比。 */
+  /* ⚠️⚠️ 分母不一樣一定要講。新上市的股票湊不滿 150 天，
+     不列入 150MA 的分母；不說明的話讀者會以為三條線可以直接互比。 */
   h += `<div style="font-size:12px;color:#999;line-height:1.7;margin-top:6px">
-    ${t("br.snapNote","分母是「有足夠交易日可以計算該均線」的家數，所以三條線的分母不同（新上市股票湊不滿 200 天）。創新高採 2% 容差（收盤達 60 日高點的 98% 即算）。均線家數看「還站在趨勢上」，創新高家數看「正在突破」——後者通常掉得更早，因為它需要新的買盤。")}
+    ${t("br.snapNote","分母是「有足夠交易日可以計算該均線」的家數，所以三條線的分母可能不同（新上市股票可能湊不滿 150 天）。創新高採 2% 容差（收盤達 60 日高點的 98% 即算）。均線家數看「還站在趨勢上」，創新高家數看「正在突破」——後者通常掉得更早，因為它需要新的買盤。")}
     ${s.date ? "<br>" + t("br.snapAsOf","資料日期") + " " + s.date : ""}</div></div>`;
   return h;
 }
@@ -10426,9 +10419,9 @@ def _fed_policy_panel_html():
     if numeric(tga_change) is None:
         tga_kind, tga_dir_zh, tga_dir_en = "neutral", "需要觀察｜資料不足", "Watch | insufficient data"
     elif tga_change < 0:
-        tga_kind, tga_dir_zh, tga_dir_en = "positive", "向市場釋放流動性", "Liquidity released to markets"
+        tga_kind, tga_dir_zh, tga_dir_en = "positive", "↓ TGA 金額下降，向市場釋放流動性", "↓ TGA balance fell, releasing liquidity to markets"
     elif tga_change > 0:
-        tga_kind, tga_dir_zh, tga_dir_en = "negative", "從市場吸收流動性", "Liquidity drained from markets"
+        tga_kind, tga_dir_zh, tga_dir_en = "negative", "↑ TGA 金額上升，從市場吸收流動性", "↑ TGA balance rose, draining liquidity from markets"
     else:
         tga_kind, tga_dir_zh, tga_dir_en = "neutral", "影響中性／需要觀察", "Neutral / watch"
 
@@ -10859,7 +10852,7 @@ def _home_market_dashboard_html():
     med20 = float(r20.get("median_return") or 0)
     med60 = float(r60.get("median_return") or 0)
     snap = get_ma_breadth_snapshot() or {}
-    long_rows = [r for r in snap.get("rows", []) if int(r.get("period") or 0) in (150, 200)]
+    long_rows = [r for r in snap.get("rows", []) if int(r.get("period") or 0) in (100, 150)]
     long_breadth = (sum(float(r.get("pct") or 0) for r in long_rows) / len(long_rows)
                     if long_rows else None)
     if not r20:
@@ -10894,13 +10887,16 @@ def _home_market_dashboard_html():
         quartiles = ""
         if isinstance(r.get("q1_return"), (int, float)) and isinstance(r.get("q3_return"), (int, float)):
             q1, q3 = float(r["q1_return"]), float(r["q3_return"])
-            quartiles = ('<span class="market-return-quartiles"><span class="q-zh">報酬四分位數</span><span class="q-en" style="display:none">Return quartiles</span>'
-                         '<i>Q1 %+.2f%%</i><i>Q3 %+.2f%%</i></span>' % (q1, q3))
-        return ('<div class="market-return-row"><span><span class="q-zh">過去 %d 個交易日</span><span class="q-en" style="display:none">Past %d sessions</span></span>' % (days, days)
-                + '<span class="market-return-main"><b>%s</b> / %s <span class="q-zh">檔上漲</span><span class="q-en" style="display:none">advanced</span> · <b>%.1f%%</b></span>' % (r.get("winners",0),r.get("base",0),float(r.get("win_pct") or 0))
-                + '<span class="market-return-med"><span class="q-zh">中位報酬</span><span class="q-en" style="display:none">Median return</span><b style="color:%s">%s%.2f%%</b></span>%s</div>' % (color,sign,med,quartiles))
+            quartiles = ('<div class="market-return-quartiles"><em><span class="q-zh">報酬四分位區間</span><span class="q-en" style="display:none">Return quartile ranges</span></em>'
+                         '<span class="market-return-quartile"><b>Q1</b><i>≤ %+.2f%%</i></span>'
+                         '<span class="market-return-quartile"><b>Q2</b><i>%+.2f%%～%+.2f%%</i></span>'
+                         '<span class="market-return-quartile"><b>Q3</b><i>%+.2f%%～%+.2f%%</i></span>'
+                         '<span class="market-return-quartile"><b>Q4</b><i>≥ %+.2f%%</i></span></div>' % (q1, q1, med, med, q3, q3))
+        return ('<article class="market-return-card"><header><span class="q-zh">過去 %d 個交易日</span><span class="q-en" style="display:none">Past %d sessions</span></header>' % (days, days)
+                + '<div class="market-return-stats"><div class="market-return-participation"><small><span class="q-zh">上漲家數</span><span class="q-en" style="display:none">Advancers</span></small><div class="market-return-count"><b>%s</b><span>/ %s <span class="q-zh">檔</span><span class="q-en" style="display:none">stocks</span></span></div><strong class="market-return-rate">%.1f%%</strong></div>' % (r.get("winners",0),r.get("base",0),float(r.get("win_pct") or 0))
+                + '<div class="market-return-med"><small><span class="q-zh">中位報酬</span><span class="q-en" style="display:none">Median return</span></small><b style="color:%s">%s%.2f%%</b></div></div>%s</article>' % (color,sign,med,quartiles))
     breadth_rows = ""
-    labels = {50:("季線","50MA"),150:("中長期","150MA"),200:("年線","200MA")}
+    labels = {50:("季線（50MA）","50MA"),100:("半年線（100MA）","100MA"),150:("年線（150MA）","150MA")}
     for r in snap.get("rows", []):
         p=int(r.get("period") or 0)
         if p not in labels or r.get("pct") is None: continue
@@ -10916,8 +10912,8 @@ def _home_market_dashboard_html():
             '<div class="reading-card"><div class="reading-row"><b><span class="q-zh">數據</span><span class="q-en" style="display:none">Data</span></b><span><span class="q-zh">過去 20 日中位報酬 '+('%+.2f%%' % med20)+'、上漲家數 '+('%.1f%%' % win20)+'；60 日中位報酬 '+('%+.2f%%' % med60)+'。資料截至 '+_h.escape(str(as_of))+'。</span><span class="q-en" style="display:none">20-session median '+('%+.2f%%' % med20)+', advancers '+('%.1f%%' % win20)+'; 60-session median '+('%+.2f%%' % med60)+'. Data as of '+_h.escape(str(as_of))+'.</span></span></div>'
             '<div class="reading-row"><b><span class="q-zh">解讀</span><span class="q-en" style="display:none">Reading</span></b><span><span class="q-zh">'+zh+'</span><span class="q-en" style="display:none">'+en+'</span></span></div>'
             '<div class="reading-row"><b><span class="q-zh">限制</span><span class="q-en" style="display:none">Limit</span></b><span><span class="q-zh">目前市值前 300 大的已實現收盤報酬，只描述過去選股環境，不能據此預測下一段行情。</span><span class="q-en" style="display:none">Current top 300 and realised closing returns only. This describes the past selection environment and cannot forecast the next market move.</span></span></div></div></div>'
-            '<div class="market-now-grid"><div class="market-data-card"><h2><span class="q-zh">近期選股環境（回顧）</span><span class="q-en" style="display:none">Recent selection environment</span></h2>'+ret_row(20)+ret_row(60)+'</div>'
-            '<div class="market-data-card"><h2><span class="q-zh">市場寬度</span><span class="q-en" style="display:none">Market breadth</span></h2>'+breadth_rows+'<div class="breadth-legend"><span><i style="background:#278153"></i><span class="q-zh">站上均線</span><span class="q-en" style="display:none">Above MA</span></span><span><i style="background:#c84335"></i><span class="q-zh">跌破均線</span><span class="q-en" style="display:none">Below MA</span></span></div></div></div>'
+            '<div class="market-now-grid"><div class="market-data-card market-returns-card"><h2><span class="q-zh">近期選股環境（回顧）</span><span class="q-en" style="display:none">Recent selection environment</span></h2><div class="market-return-grid">'+ret_row(20)+ret_row(60)+'</div></div>'
+            '<div class="market-data-card market-breadth-card"><h2><span class="q-zh">市場寬度</span><span class="q-en" style="display:none">Market breadth</span></h2><div class="breadth-grid">'+breadth_rows+'</div><div class="breadth-legend"><span><i style="background:#278153"></i><span class="q-zh">站上均線</span><span class="q-en" style="display:none">Above MA</span></span><span><i style="background:#c84335"></i><span class="q-zh">跌破均線</span><span class="q-en" style="display:none">Below MA</span></span></div></div></div>'
             '<div class="market-data-card market-chart-card"><div class="market-chart-head"><h2><span class="q-zh">納斯達克・相對期間中位數</span><span class="q-en" style="display:none">Nasdaq vs period median</span></h2><div class="market-periods"><button class="on" data-days="756"><span class="q-zh">3年</span><span class="q-en" style="display:none">3Y</span></button><button data-days="252"><span class="q-zh">1年</span><span class="q-en" style="display:none">1Y</span></button><button data-days="126"><span class="q-zh">6個月</span><span class="q-en" style="display:none">6M</span></button><button data-days="63"><span class="q-zh">3個月</span><span class="q-en" style="display:none">3M</span></button></div></div><div id="homeIndexChart" data-series="'+encoded+'"></div><div class="market-chart-note"><span class="q-zh">縱軸0%＝所選期間收盤中位數；只描述相對位置，不預測未來。</span><span class="q-en" style="display:none">0% is the selected period’s median close; this describes position, not the future.</span></div></div></section>')
 
 
@@ -11198,7 +11194,7 @@ def api_breadth():
         span_days=len(days), span_years=round(len(days) / 252.0, 1),
         p={str(p): round(vals[max(0, min(len(vals) - 1, int(len(vals) * p / 100)))], 1)
            for p in (10, 25, 50, 75, 90)},
-        # 今日快照：站上 50／150／200MA 的家數 ＋ 創 60 日新高家數
+        # 今日快照：站上 50／100／150MA 的家數 ＋ 創 60 日新高家數
         # ⚠️ 一樣只讀快取，不重算（見上面的原則）。
         snapshot=get_ma_breadth_snapshot(),
         market_counts=_load_cache(MARKET_COUNT_CACHE, 24 * 365) or {},

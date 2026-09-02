@@ -2904,7 +2904,7 @@ MACRO_CACHE_FILE = "us_rate_inflation_v6.json"   # v6: 日債改用每日檔，�
 TREASURY_XML = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
 JGB_DAILY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv"
 JGB_HISTORY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
-FED_POLICY_CACHE_FILE = "fed_treasury_policy_v7.json"  # v7: 分批 FRED、TGA 備援與部署後優先更新
+FED_POLICY_CACHE_FILE = "fed_treasury_policy_v9.json"  # v9: IORB 延伸、實質 GDP 與一年 TGA 備援歷史
 FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 NYFED_EFFR_API = "https://markets.newyorkfed.org/api/rates/unsecured/effr/last/30.json"
 FISCAL_DATA_API = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service"
@@ -3113,7 +3113,7 @@ def _fiscal_tga_raw():
         FISCAL_DATA_API + "/v1/accounting/dts/operating_cash_balance",
         params={
             "filter": "account_type:eq:Treasury General Account (TGA) Closing Balance",
-            "sort": "-record_date", "page[size]": 100,
+            "sort": "-record_date", "page[size]": 400,
         }, headers=HEADERS, timeout=25)
     r.raise_for_status()
     rows = []
@@ -3486,6 +3486,8 @@ def _fed_treasury_policy_data(force=False):
     fiscal_history["nominal_gdp"] = [(date_text, value * 1e9)
                                       for date_text, value in (series.get("GDP") or [])
                                       if date_text >= fiscal_start]
+    fiscal_history["real_gdp_growth"] = [row for row in (series.get("A191RL1Q225SBEA") or [])
+                                          if row[0] >= one_year_ago]
     fiscal_health["qt_model"] = {
         "soma_pct_gdp": 1.0, "ten_year_term_premium_bp": 10,
         "source_date": "2022-06-03",
@@ -5483,6 +5485,13 @@ __SEO_HEAD__
   .mstat .msub { font-family:var(--font-num); font-size:11.5px; color:var(--mocha); margin-top:5px; }
   .mstat .mnote { font-family:var(--font-head); font-weight:700; font-size:14px; margin-top:3px; }
   .yield-chart { width:100%; height:auto; display:block; overflow:visible; }
+  .yield-chart-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .yield-chart-head h2 { margin:0; }
+  .yield-periods { display:flex; border:1px solid var(--grounds); border-radius:9px; overflow:hidden; }
+  .yield-periods button { border:0; border-right:1px solid var(--grounds); background:var(--cream); color:var(--mocha); font:inherit; font-size:12px; font-weight:700; padding:7px 12px; cursor:pointer; }
+  .yield-periods button:last-child { border-right:0; }
+  .yield-periods button:hover { background:var(--latte); }
+  .yield-periods button.on { background:var(--espresso); color:#fff; }
   html[data-theme="c"] .yield-tip rect { fill:#101B20; stroke:#D2A65F; opacity:.98; }
   html[data-theme="c"] .yield-tip text { fill:#F5EAD7; }
   .yield-legend { display:flex; gap:16px; flex-wrap:wrap; margin:8px 0 2px; font-size:12px; color:var(--mocha); }
@@ -8040,11 +8049,14 @@ function drawPolicyRateChart(){
   if(dates.length<2){box.innerHTML=`<div class="status">${LANG==='en'?'History is being prepared':'一年歷史資料正在整理'}</div>`;return}
   const byDate=rows=>Object.fromEntries(rows.map(r=>[r[0],Number(r[1])])),e=byDate(effr),i=byDate(iorb),vals=[...effr,...iorb].map(r=>Number(r[1]));
   const W=900,H=150,L=42,R=18,T=8,B=24,lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.12,.08),ylo=lo-pad,yhi=hi+pad,span=Math.max(.01,yhi-ylo);
-  const x=n=>L+n/(dates.length-1)*(W-L-R),y=v=>T+(yhi-v)/span*(H-T-B),points=(rows,color)=>rows.map(r=>`${x(dates.indexOf(r[0])).toFixed(1)},${y(Number(r[1])).toFixed(1)}`).join(' ');
-  const ticks=[yhi,(yhi+ylo)/2,ylo],grid=ticks.map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grounds)" stroke-dasharray="4 3"/><text x="${L-6}" y="${y(v)+3}" text-anchor="end" font-size="10" fill="var(--mocha)">${v.toFixed(2)}%</text>`).join('');
-  box.innerHTML=`<div class="policy-rate-read"></div><svg viewBox="0 0 ${W} ${H}" aria-label="One-year EFFR and IORB history">${grid}<polyline points="${points(effr)}" fill="none" stroke="var(--caramel-2)" stroke-width="2.4"/><polyline points="${points(iorb)}" fill="none" stroke="var(--up)" stroke-width="2.1"/><line class="policy-rate-guide" y1="${T}" y2="${H-B}" stroke="var(--mocha)" opacity="0"/><text x="${L}" y="${H-5}" font-size="10" fill="var(--mocha)">${dates[0].slice(0,7)}</text><text x="${W-R}" y="${H-5}" text-anchor="end" font-size="10" fill="var(--mocha)">${dates.at(-1).slice(0,7)}</text></svg>`;
-  const svg=box.querySelector('svg'),read=box.querySelector('.policy-rate-read'),guide=box.querySelector('.policy-rate-guide');
+  const x=n=>L+n/(dates.length-1)*(W-L-R),y=v=>T+(yhi-v)/span*(H-T-B);
+  // IORB 僅在利率設定生效日才可能有新觀察值；以最近一次有效值補到
+  // 每個 EFFR 日期，讓「利率未變」的期間保持水平並延伸到圖表最後一天。
   const valueAt=(map,index)=>{for(let n=index;n>=0;n--){const v=map[dates[n]];if(Number.isFinite(v))return v}return null};
+  const pointsFor=map=>dates.map((date,index)=>{const value=valueAt(map,index);return value===null?null:`${x(index).toFixed(1)},${y(value).toFixed(1)}`}).filter(Boolean).join(' ');
+  const ticks=[yhi,(yhi+ylo)/2,ylo],grid=ticks.map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grounds)" stroke-dasharray="4 3"/><text x="${L-6}" y="${y(v)+3}" text-anchor="end" font-size="10" fill="var(--mocha)">${v.toFixed(2)}%</text>`).join('');
+  box.innerHTML=`<div class="policy-rate-read"></div><svg viewBox="0 0 ${W} ${H}" aria-label="One-year EFFR and IORB history">${grid}<polyline points="${pointsFor(e)}" fill="none" stroke="var(--caramel-2)" stroke-width="2.4"/><polyline points="${pointsFor(i)}" fill="none" stroke="var(--up)" stroke-width="2.1"/><line class="policy-rate-guide" y1="${T}" y2="${H-B}" stroke="var(--mocha)" opacity="0"/><text x="${L}" y="${H-5}" font-size="10" fill="var(--mocha)">${dates[0].slice(0,7)}</text><text x="${W-R}" y="${H-5}" text-anchor="end" font-size="10" fill="var(--mocha)">${dates.at(-1).slice(0,7)}</text></svg>`;
+  const svg=box.querySelector('svg'),read=box.querySelector('.policy-rate-read'),guide=box.querySelector('.policy-rate-guide');
   const show=clientX=>{const r=svg.getBoundingClientRect();let n=Math.round((((clientX-r.left)/r.width*W)-L)/(W-L-R)*(dates.length-1));n=Math.max(0,Math.min(dates.length-1,n));const ev=valueAt(e,n),iv=valueAt(i,n),gx=x(n);read.textContent=`${dates[n]}　EFFR ${ev===null?'—':ev.toFixed(2)+'%'}　IORB ${iv===null?'—':iv.toFixed(2)+'%'}`;guide.setAttribute('x1',gx);guide.setAttribute('x2',gx);guide.setAttribute('opacity','.45')};
   svg.addEventListener('pointerdown',e=>{e.preventDefault();svg.setPointerCapture(e.pointerId);show(e.clientX)});svg.addEventListener('pointermove',e=>{if(e.pointerType==='mouse'||svg.hasPointerCapture(e.pointerId))show(e.clientX)});svg.addEventListener('pointerup',e=>{if(svg.hasPointerCapture(e.pointerId))svg.releasePointerCapture(e.pointerId)});show(svg.getBoundingClientRect().right-(R/W)*svg.getBoundingClientRect().width);
 }
@@ -9448,8 +9460,10 @@ function macroTile(it){
   }
   return `<div class="mstat"><div class="ml">${name}</div><div class="mv">${it.value}${unit}</div><div class="msub">${sub}</div></div>`;
 }
-function yieldChart(rows,market="us"){
+let US_YIELD_DAYS=756;
+function yieldChart(rows,market="us",days=756){
   if (!rows || rows.length < 2) return "";
+  rows=market==="us"?rows.slice(-Math.min(rows.length,Number(days)||756)):rows;
   const W=900,H=330,L=52,R=18,T=18,B=38,keys=[market+"2y",market+"10y",market+"30y"];
   const colors={[keys[0]]:"#c87533",[keys[1]]:"#3f718c",[keys[2]]:"#7a5b9e"};
   const vals=rows.flatMap(r=>keys.map(k=>Number(r[k])).filter(Number.isFinite));
@@ -9458,8 +9472,10 @@ function yieldChart(rows,market="us"){
   let grid="";for(let i=0;i<=4;i++){const v=min+(max-min)*i/4,yy=y(v);grid+=`<line x1="${L}" y1="${yy}" x2="${W-R}" y2="${yy}" stroke="var(--grounds)"/><text x="${L-8}" y="${yy+4}" text-anchor="end" fill="var(--mocha)" font-size="11">${v.toFixed(1)}%</text>`;}
   const paths=keys.map(k=>{let d="";rows.forEach((r,i)=>{if(Number.isFinite(Number(r[k])))d+=(d?"L":"M")+x(i).toFixed(1)+" "+y(Number(r[k])).toFixed(1)+" ";});return `<path d="${d}" fill="none" stroke="${colors[k]}" stroke-width="2.2"/>`;}).join("");
   const ticks=[0,Math.floor((rows.length-1)/2),rows.length-1].map(i=>`<text x="${x(i)}" y="${H-10}" text-anchor="middle" fill="var(--mocha)" font-size="11">${rows[i].date.slice(0,7)}</text>`).join("");
-  const title=market==="jp"?(LANG==="en"?"Japan government bond yields — 3 years":"日圓利率｜日債 2Y／10Y／30Y 三年走勢"):(LANG==="en"?"US Treasury yields — 3 years":"美債 2Y／10Y／30Y 三年走勢");
-  return `<div class="card"><h2>${title}</h2><div class="yield-legend"><span><i style="background:${colors[keys[0]]}"></i>2Y</span><span><i style="background:${colors[keys[1]]}"></i>10Y</span><span><i style="background:${colors[keys[2]]}"></i>30Y</span></div><svg class="yield-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${market==='jp'?'Japan government bond':'US Treasury'} yield chart" data-market="${market}" data-min="${min}" data-max="${max}">${grid}${paths}${ticks}<g class="yield-hover" visibility="hidden" pointer-events="none"><line class="yield-cross" y1="${T}" y2="${H-B}" stroke="var(--espresso)" stroke-width="1" stroke-dasharray="4 3" opacity=".55"/>${keys.map(k=>`<circle data-key="${k}" r="5" fill="${colors[k]}" stroke="white" stroke-width="2"/>`).join("")}<g class="yield-tip"><rect width="240" height="136" rx="12" fill="var(--espresso)" stroke="var(--grounds)" stroke-width="2" opacity=".96"/><text x="16" y="29" fill="white" font-size="20" font-weight="700"></text><text data-key="${keys[0]}" x="16" y="60" fill="white" font-size="20"></text><text data-key="${keys[1]}" x="16" y="90" fill="white" font-size="20"></text><text data-key="${keys[2]}" x="16" y="120" fill="white" font-size="20"></text></g></g><rect class="yield-hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent" style="cursor:crosshair;touch-action:none"/></svg><div class="status">${LANG==="en"?"Hover or drag to inspect daily yields.":"將滑鼠移到圖上，或用手指拖曳，可查看每日利率。"}</div></div>`;
+  const period=Number(days)===63?(LANG==="en"?"3 months":"三個月"):(Number(days)===252?(LANG==="en"?"1 year":"一年"):(LANG==="en"?"3 years":"三年"));
+  const title=market==="jp"?(LANG==="en"?"Japan government bond yields — 3 years":"日圓利率｜日債 2Y／10Y／30Y 三年走勢"):(LANG==="en"?`US Treasury yields — ${period}`:`美債 2Y／10Y／30Y ${period}走勢`);
+  const controls=market==="us"?`<div class="yield-periods" role="group" aria-label="${LANG==="en"?"Chart period":"圖表週期"}">${[[63,LANG==="en"?"3M":"3個月"],[252,LANG==="en"?"1Y":"1年"],[756,LANG==="en"?"3Y":"3年"]].map(([value,label])=>`<button type="button" class="${Number(days)===value?"on":""}" data-yield-days="${value}">${label}</button>`).join("")}</div>`:"";
+  return `<div class="card yield-card" data-yield-card="${market}"><div class="yield-chart-head"><h2>${title}</h2>${controls}</div><div class="yield-legend"><span><i style="background:${colors[keys[0]]}"></i>2Y</span><span><i style="background:${colors[keys[1]]}"></i>10Y</span><span><i style="background:${colors[keys[2]]}"></i>30Y</span></div><svg class="yield-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${market==='jp'?'Japan government bond':'US Treasury'} yield chart" data-market="${market}" data-min="${min}" data-max="${max}">${grid}${paths}${ticks}<g class="yield-hover" visibility="hidden" pointer-events="none"><line class="yield-cross" y1="${T}" y2="${H-B}" stroke="var(--espresso)" stroke-width="1" stroke-dasharray="4 3" opacity=".55"/>${keys.map(k=>`<circle data-key="${k}" r="5" fill="${colors[k]}" stroke="white" stroke-width="2"/>`).join("")}<g class="yield-tip"><rect width="240" height="136" rx="12" fill="var(--espresso)" stroke="var(--grounds)" stroke-width="2" opacity=".96"/><text x="16" y="29" fill="white" font-size="20" font-weight="700"></text><text data-key="${keys[0]}" x="16" y="60" fill="white" font-size="20"></text><text data-key="${keys[1]}" x="16" y="90" fill="white" font-size="20"></text><text data-key="${keys[2]}" x="16" y="120" fill="white" font-size="20"></text></g></g><rect class="yield-hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent" style="cursor:crosshair;touch-action:none"/></svg><div class="status">${LANG==="en"?"Hover or drag to inspect daily yields.":"將滑鼠移到圖上，或用手指拖曳，可查看每日利率。"}</div></div>`;
 }
 function setupYieldHover(svg,rows){
   if(!svg||!rows||rows.length<2)return;
@@ -9478,12 +9494,14 @@ function setupYieldHover(svg,rows){
   svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);
   svg.addEventListener("pointerleave",()=>hover.setAttribute("visibility","hidden"));
 }
-async function loadMacro(){
+let MACRO_CACHE=null;
+async function loadMacro(cachedData=null){
   const box = $("#macroBox");
   if (!box) return;
   box.innerHTML = `<div class="status">${t("pmac.loading", "讀取美國利率與 CPI…")}</div>`;
   try {
-    const data = await (await fetch("/api/macro")).json();
+    const data = cachedData || await (await fetch("/api/macro")).json();
+    MACRO_CACHE=data;
     const byKey = {};
     (data.items || []).forEach(it => byKey[it.key] = it);
     const groups = [
@@ -9496,7 +9514,7 @@ async function loadMacro(){
       const tiles = group[1].filter(k => byKey[k]).map(k => macroTile(byKey[k])).join("");
       if (tiles) html += `<div class="card"><h2>${group[0]}</h2><div class="macro-grid">${tiles}</div></div>`;
     });
-    html += yieldChart(data.yield_history);
+    html += yieldChart(data.yield_history,"us",US_YIELD_DAYS);
     html += yieldChart(data.jp_yield_history,"jp");
     if (data.yield_conclusions && data.yield_conclusions.length){
       html += `<div class="card"><h2>${LANG==="en"?"Yield curve reading":"殖利率判讀卡"}</h2><div class="reading-card"><div class="reading-row"><b>${LANG==="en"?"Data":"數據"}</b><span>${LANG==="en"?`Checked ${data.updated||"—"}; latest available closing yields.`:`資料檢查日 ${data.updated||"—"}；顯示最近可用收盤殖利率。`}</span></div><div class="reading-row"><b>${LANG==="en"?"Reading":"解讀"}</b><ul class="yield-findings">${data.yield_conclusions.map(c=>`<li class="${c.level||""}">${c.text}</li>`).join("")}</ul></div><div class="reading-row"><b>${LANG==="en"?"Limit":"限制"}</b><span>${LANG==="en"?"Rule-based review of past reversals, percentiles and curve spreads; it cannot predict the next rate move.":"依過去反轉、百分位與曲線利差整理，不能據此預測下一次利率方向。"}</span></div></div></div>`;
@@ -9504,8 +9522,12 @@ async function loadMacro(){
     if (!html) html = `<div class="status">${t("pmac.none", "暫時無法取得資料，請稍後再試。")}</div>`;
     else html += `<div class="status">${LANG === "en" ? "Checked" : "資料檢查日"}：${data.updated || "—"}</div>`;
     box.innerHTML = html;
-    setupYieldHover(box.querySelector('.yield-chart[data-market="us"]'),data.yield_history);
+    setupYieldHover(box.querySelector('.yield-chart[data-market="us"]'),data.yield_history.slice(-Math.min(data.yield_history.length,US_YIELD_DAYS)));
     setupYieldHover(box.querySelector('.yield-chart[data-market="jp"]'),data.jp_yield_history);
+    box.querySelectorAll('[data-yield-days]').forEach(button=>button.addEventListener('click',()=>{
+      US_YIELD_DAYS=Number(button.dataset.yieldDays)||756;
+      loadMacro(MACRO_CACHE);
+    }));
   } catch(e){
     box.innerHTML = `<div class="status">${t("pmac.none", "暫時無法取得資料，請稍後再試。")}</div>`;
   }
@@ -10539,7 +10561,7 @@ def _fed_policy_panel_html():
                 direction(kind, direction_zh, direction_en), bi(explain_zh, explain_en),
                 bi("查看說明", "Details"), bi(detail_zh, detail_en)))
 
-    def fiscal_chart(chart_id, options):
+    def fiscal_chart(chart_id, options, heading_zh="本財年已公布走勢", heading_en="Current fiscal-year released trend"):
         chart_series = {key: fiscal_history.get(key) or [] for key, _, _, _ in options}
         encoded = _h.escape(json.dumps(chart_series, ensure_ascii=False, separators=(",", ":")), quote=True)
         buttons = ''.join('<button data-fiscal-key="%s" data-fiscal-unit="%s"%s>%s</button>' % (
@@ -10547,7 +10569,7 @@ def _fed_policy_panel_html():
             for index, (key, zh, en, unit) in enumerate(options))
         return ('<div class="fiscal-trend" id="%s"><div class="fiscal-trend-head">%s<div class="fiscal-trend-tabs">%s</div></div>'
                 '<div class="fiscal-trend-chart" data-series="%s"></div></div>') % (
-                    chart_id, bi("本財年已公布走勢", "Current fiscal-year released trend"), buttons, encoded)
+                    chart_id, bi(heading_zh, heading_en), buttons, encoded)
 
     def indicator_section(number, title_zh, title_en, intro_zh, intro_en,
                           summary_zh, summary_en, cards):
@@ -10706,6 +10728,9 @@ def _fed_policy_panel_html():
                       if gdp_value is not None and gdp_prior is not None else "前次公布資料尚未取得")
     gdp_compare_en = ("vs prior release " + signed(gdp_value - gdp_prior, 1, " pp")
                       if gdp_value is not None and gdp_prior is not None else "Prior release unavailable")
+    real_gdp_chart = fiscal_chart(
+        "realGdpTrend", [("real_gdp_growth", "實質GDP季變動", "Real GDP quarterly change", "percent")],
+        "近一年已公布走勢", "One-year released trend")
     gdp_card = indicator_card(
         "實體經濟／GDP", "Real economy / GDP", "經濟是否正在擴張", "Whether economic activity is expanding",
         (number(real_gdp, 1, "%") if gdp_value is not None else "資料尚未取得"),
@@ -10714,7 +10739,8 @@ def _fed_policy_panel_html():
         "GDP用來確認經濟活動是擴張、放緩或收縮。單一季容易受短期因素影響，應搭配連續數季趨勢。",
         "GDP indicates whether activity is expanding, slowing or contracting. One quarter can be noisy, so several quarters should be read together.",
         "資料來源：FRED／BEA A191RL1Q225SBEA，實質GDP相較前期的季變動百分比（季調年率）；公布季：" + _h.escape(str(real_gdp.get("date") or "資料尚未取得")) + "。這不是「債務／GDP」財政比率。",
-        "Source: FRED/BEA A191RL1Q225SBEA, real GDP percent change from the preceding period at a seasonally adjusted annual rate; release quarter: " + _h.escape(str(real_gdp.get("date") or "unavailable")) + ". This is not the debt-to-GDP fiscal ratio.")
+        "Source: FRED/BEA A191RL1Q225SBEA, real GDP percent change from the preceding period at a seasonally adjusted annual rate; release quarter: " + _h.escape(str(real_gdp.get("date") or "unavailable")) + ". This is not the debt-to-GDP fiscal ratio.",
+        extra_html=real_gdp_chart)
 
     qt_main_zh = ("10年期限溢酬約 +" + qt_bp if qt_bp != "—" else "資料尚未取得")
     qt_main_en = ("10Y term premium about +" + qt_bp if qt_bp != "—" else "Data unavailable")
@@ -11121,7 +11147,7 @@ def _home_market_dashboard_html():
     series = [[str(k),round(float(v),2)] for k,v in sorted(idx.items()) if v is not None][-MARKET_INDEX_KEEP:]
     encoded = _h.escape(json.dumps(series,separators=(",",":")),quote=True)
     as_of = (counts.get("recent_returns") or {}).get("as_of") or snap.get("date") or "—"
-    return ('<section class="market-now"><div class="market-now-hero"><div class="market-now-title"><h1><span class="q-zh">今日市場</span><span class="q-en" style="display:none">Today’s Market</span></h1>'
+    return ('<section class="market-now"><div class="market-now-hero"><div class="market-now-title"><h1><span class="q-zh">納斯達克</span><span class="q-en" style="display:none">Nasdaq</span></h1>'
             '<span class="market-now-badge"><span class="q-zh">'+zh_badge+'</span><span class="q-en" style="display:none">'+en_badge+'</span></span></div>'
             '<div class="reading-card"><div class="reading-row"><b><span class="q-zh">數據</span><span class="q-en" style="display:none">Data</span></b><span><span class="q-zh">過去 20 日中位報酬 '+('%+.2f%%' % med20)+'、上漲家數 '+('%.1f%%' % win20)+'；60 日中位報酬 '+('%+.2f%%' % med60)+'。資料截至 '+_h.escape(str(as_of))+'。</span><span class="q-en" style="display:none">20-session median '+('%+.2f%%' % med20)+', advancers '+('%.1f%%' % win20)+'; 60-session median '+('%+.2f%%' % med60)+'. Data as of '+_h.escape(str(as_of))+'.</span></span></div>'
             '<div class="reading-row"><b><span class="q-zh">解讀</span><span class="q-en" style="display:none">Reading</span></b><span><span class="q-zh">'+zh+'</span><span class="q-en" style="display:none">'+en+'</span></span></div>'

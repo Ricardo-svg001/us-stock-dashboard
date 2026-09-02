@@ -2904,7 +2904,7 @@ MACRO_CACHE_FILE = "us_rate_inflation_v6.json"   # v6: 日債改用每日檔，�
 TREASURY_XML = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
 JGB_DAILY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv"
 JGB_HISTORY_CSV = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv"
-FED_POLICY_CACHE_FILE = "fed_treasury_policy_v3.json"  # v3: 5 指標＋近三年淨流動性序列
+FED_POLICY_CACHE_FILE = "fed_treasury_policy_v5.json"  # v5: 財政年度利率、利息、收入與 GDP 走勢
 FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 NYFED_EFFR_API = "https://markets.newyorkfed.org/api/rates/unsecured/effr/last/30.json"
 FISCAL_DATA_API = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service"
@@ -3061,7 +3061,7 @@ def _fred_series_raw(series_id, years=3):
 def _fred_policy_series_raw():
     """一次下載政策序列 ZIP，避免同時對 FRED 發出多個請求而被節流。"""
     import zipfile
-    ids = ("DFF", "DFEDTARL", "DFEDTARU", "IORB", "RRPONTSYD", "RPONTSYD",
+    ids = ("DFF", "DFEDTARL", "DFEDTARU", "IORB", "A191RL1Q225SBEA", "GDP", "RRPONTSYD", "RPONTSYD",
            "WALCL", "WSHOSHO", "TREAST", "WSHOMCB", "WDTGAL", "WRESBAL",
            "GFDEGDQ188S")
     start = (_utcnow() - timedelta(days=366 * 3 + 14)).strftime("%Y-%m-%d")
@@ -3167,24 +3167,27 @@ def _fiscal_debt_burden_raw():
     毛利息與收入都取 MTS Table 7 的同一財政年度累計欄位，避免用年度利息
     除以月度收入。平均利率是所有付息債務的加權平均，不是聯邦基金利率。
     """
-    def get(path, params):
+    def get_rows(path, params):
         response = requests.get(FISCAL_DATA_API + path, params=params,
                                 headers=HEADERS, timeout=30)
         response.raise_for_status()
-        rows = response.json().get("data", [])
-        return rows[0] if rows else {}
+        return response.json().get("data", [])
 
-    debt = get("/v2/accounting/od/debt_to_penny",
-               {"sort": "-record_date", "page[size]": 1})
-    avg_rate = get("/v2/accounting/od/avg_interest_rates",
-                   {"filter": "security_desc:eq:Total Interest-bearing Debt",
-                    "sort": "-record_date", "page[size]": 1})
-    receipts = get("/v1/accounting/mts/mts_table_7",
-                   {"filter": "classification_desc:eq:Total--Receipts This Year",
-                    "sort": "-record_date", "page[size]": 1})
-    interest = get("/v1/accounting/mts/mts_table_7",
-                   {"filter": "classification_desc:eq:Interest on Treasury Debt Securities (Gross)",
-                    "sort": "-record_date", "page[size]": 1})
+    debt_rows = get_rows("/v2/accounting/od/debt_to_penny",
+                         {"sort": "-record_date", "page[size]": 370})
+    rate_rows = get_rows("/v2/accounting/od/avg_interest_rates",
+                         {"filter": "security_desc:eq:Total Interest-bearing Debt",
+                          "sort": "-record_date", "page[size]": 100})
+    receipt_rows = get_rows("/v1/accounting/mts/mts_table_7",
+                            {"filter": "classification_desc:eq:Total--Receipts This Year",
+                             "sort": "-record_date", "page[size]": 100})
+    interest_rows = get_rows("/v1/accounting/mts/mts_table_7",
+                             {"filter": "classification_desc:eq:Interest on Treasury Debt Securities (Gross)",
+                              "sort": "-record_date", "page[size]": 100})
+    debt = debt_rows[0] if debt_rows else {}
+    avg_rate = rate_rows[0] if rate_rows else {}
+    receipts = receipt_rows[0] if receipt_rows else {}
+    interest = interest_rows[0] if interest_rows else {}
 
     def value(row, key):
         try:
@@ -3196,6 +3199,54 @@ def _fiscal_debt_burden_raw():
     rate = value(avg_rate, "avg_interest_rate_amt")
     revenue = value(receipts, "current_fytd_rcpt_outly_amt")
     gross_interest = value(interest, "current_fytd_rcpt_outly_amt")
+    fiscal_year = str(interest.get("record_fiscal_year") or receipts.get("record_fiscal_year") or "")
+
+    def sorted_rows(rows):
+        return sorted(rows, key=lambda row: str(row.get("record_date") or "")[:10])
+
+    def debt_at_or_before(rows, date_text):
+        found = None
+        for row in sorted_rows(rows):
+            if str(row.get("record_date") or "")[:10] > date_text:
+                break
+            candidate = value(row, "tot_pub_debt_out_amt")
+            if candidate is not None:
+                found = candidate
+        return found
+
+    # 使用本財政年度內的已公布月份。MTS是累計值，折線因此清楚呈現財年內
+    # 的實際累計路徑；平均利率與總債務的年化粗估則為各期存量快照。
+    try:
+        fiscal_start = "%04d-10-01" % (int(fiscal_year) - 1)
+    except (TypeError, ValueError):
+        fiscal_start = ""
+    def fy_rows(rows):
+        return [row for row in sorted_rows(rows)
+                if (str(row.get("record_fiscal_year") or "") == fiscal_year or
+                    (not row.get("record_fiscal_year") and
+                     str(row.get("record_date") or "")[:10] >= fiscal_start))]
+    rates = fy_rows(rate_rows)
+    receipts_by_date = {str(row.get("record_date") or "")[:10]: value(row, "current_fytd_rcpt_outly_amt")
+                        for row in fy_rows(receipt_rows)}
+    interest_by_date = {str(row.get("record_date") or "")[:10]: value(row, "current_fytd_rcpt_outly_amt")
+                        for row in fy_rows(interest_rows)}
+    history = {"avg_rate": [], "annualized_cost": [], "gross_interest": [],
+               "revenue": [], "interest_share": []}
+    for row in rates:
+        date_text, period_rate = str(row.get("record_date") or "")[:10], value(row, "avg_interest_rate_amt")
+        period_debt = debt_at_or_before(debt_rows, date_text)
+        if period_rate is not None:
+            history["avg_rate"].append((date_text, period_rate))
+        if period_rate is not None and period_debt is not None:
+            history["annualized_cost"].append((date_text, round(period_debt * period_rate / 100, 2)))
+    for date_text in sorted(set(receipts_by_date) & set(interest_by_date)):
+        period_revenue, period_interest = receipts_by_date[date_text], interest_by_date[date_text]
+        if period_interest is not None:
+            history["gross_interest"].append((date_text, period_interest))
+        if period_revenue is not None:
+            history["revenue"].append((date_text, period_revenue))
+        if period_interest is not None and period_revenue:
+            history["interest_share"].append((date_text, round(period_interest / period_revenue * 100, 3)))
     return {
         "debt": {
             "date": str(debt.get("record_date") or "")[:10],
@@ -3205,7 +3256,7 @@ def _fiscal_debt_burden_raw():
         },
         "interest": {
             "date": str(interest.get("record_date") or receipts.get("record_date") or "")[:10],
-            "fiscal_year": str(interest.get("record_fiscal_year") or receipts.get("record_fiscal_year") or ""),
+            "fiscal_year": fiscal_year,
             "gross_fytd": gross_interest,
             "revenue_fytd": revenue,
             "revenue_share_pct": (round(gross_interest / revenue * 100, 1)
@@ -3215,6 +3266,7 @@ def _fiscal_debt_burden_raw():
                                          if total is not None and rate is not None else None),
             "avg_rate_date": str(avg_rate.get("record_date") or "")[:10],
         },
+        "history": history,
     }
 
 
@@ -3355,6 +3407,11 @@ def _fed_treasury_policy_data(force=False):
         return ({"date": rows[-1][0], "value": rows[-1][1]} if rows else {})
 
     policy = {key.lower(): latest(key) for key in ("DFF", "DFEDTARL", "DFEDTARU", "IORB")}
+    one_year_ago = (_utcnow() - timedelta(days=366)).strftime("%Y-%m-%d")
+    policy["history"] = {
+        "effr": [row for row in (series.get("DFF") or []) if row[0] >= one_year_ago],
+        "iorb": [row for row in (series.get("IORB") or []) if row[0] >= one_year_ago],
+    }
     liquidity = {
         "on_rrp": {**latest("RRPONTSYD"), "change_20": _series_change(series.get("RRPONTSYD", []), 20)},
         "repo": {**latest("RPONTSYD"), "change_20": _series_change(series.get("RPONTSYD", []), 20)},
@@ -3374,6 +3431,24 @@ def _fed_treasury_policy_data(force=False):
     debt_to_gdp = {**latest("GFDEGDQ188S"),
                    "change_4q": _series_change(series.get("GFDEGDQ188S", []), 4)}
     fiscal_health["debt_to_gdp"] = debt_to_gdp
+    gdp_rows = series.get("A191RL1Q225SBEA", [])
+    fiscal_health["real_gdp"] = {
+        **latest("A191RL1Q225SBEA"),
+        "prior_value": gdp_rows[-2][1] if len(gdp_rows) >= 2 else None,
+        "prior_date": gdp_rows[-2][0] if len(gdp_rows) >= 2 else "",
+    }
+    fiscal_health["nominal_gdp"] = latest("GDP")
+    fiscal_history = fiscal_health.setdefault("history", {})
+    try:
+        fiscal_start = "%04d-10-01" % (int((fiscal_health.get("interest") or {}).get("fiscal_year")) - 1)
+    except (TypeError, ValueError):
+        fiscal_start = ""
+    fiscal_history["debt_gdp"] = [row for row in (series.get("GFDEGDQ188S") or [])
+                                   if row[0] >= fiscal_start]
+    # FRED GDP 單位是十億美元，圖表內統一轉為美元，以便共用金額格式化。
+    fiscal_history["nominal_gdp"] = [(date_text, value * 1e9)
+                                      for date_text, value in (series.get("GDP") or [])
+                                      if date_text >= fiscal_start]
     fiscal_health["qt_model"] = {
         "soma_pct_gdp": 1.0, "ten_year_term_premium_bp": 10,
         "source_date": "2022-06-03",
@@ -3406,7 +3481,7 @@ def _fed_treasury_policy_data(force=False):
             return bool(value)
         return False
     old_fiscal = old.get("fiscal_health") or {}
-    for subkey in ("debt", "interest", "debt_to_gdp"):
+    for subkey in ("debt", "interest", "debt_to_gdp", "real_gdp", "nominal_gdp", "history"):
         if not has_observation((data.get("fiscal_health") or {}).get(subkey)) and old_fiscal.get(subkey):
             data["fiscal_health"][subkey] = old_fiscal[subkey]
     for key in ("policy", "liquidity", "balance_sheet", "treasury", "fiscal_health",
@@ -5851,6 +5926,8 @@ __SEO_HEAD__
   html[data-theme="c"] .home-industry-list>span{background:#17252B;color:#F5EAD7}
   .fed-policy-panel{max-width:none;margin:0;padding:20px 22px}.fed-policy-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}.fed-policy-head h2{margin:0 0 4px;font-size:20px}.fed-policy-head p{margin:0;color:var(--mocha);font-size:12px;line-height:1.55}.fed-policy-status{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.policy-status{white-space:nowrap;border:1px solid var(--grounds);border-radius:999px;padding:4px 8px;font-size:11px;color:var(--mocha);background:var(--foam)}.policy-status.ok{color:var(--up);border-color:color-mix(in srgb,var(--up) 45%,var(--grounds))}.policy-status.warn{color:var(--caramel-2)}.policy-status.danger{color:var(--down)}
   .fed-policy-fold{border:1px solid var(--grounds);border-radius:14px;background:color-mix(in srgb,var(--foam) 92%,var(--grounds));overflow:hidden}.fed-policy-fold+.fed-policy-fold{margin-top:10px}.fed-policy-fold>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;cursor:pointer;list-style:none;font-family:var(--font-head);font-weight:850;color:var(--espresso)}.fed-policy-fold>summary::-webkit-details-marker{display:none}.fed-policy-fold>summary:after{content:'›';font:700 24px/1 var(--font-num);color:var(--caramel-2);transform:rotate(90deg);transition:transform .18s}.fed-policy-fold[open]>summary:after{transform:rotate(-90deg)}.fed-policy-fold>summary small{margin-left:8px;font:500 11px var(--font-num);color:var(--mocha)}.policy-detail-fold>.policy-board{padding:0 16px 4px}.liquidity-dashboard{padding:0 16px 16px}.liquidity-hero{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 18px;border-radius:13px;background:linear-gradient(135deg,color-mix(in srgb,var(--caramel) 22%,var(--foam)),color-mix(in srgb,var(--up) 10%,var(--foam)));border:1px solid color-mix(in srgb,var(--caramel) 45%,var(--grounds))}.liquidity-hero small{color:var(--mocha)}.liquidity-hero h3{margin:3px 0 2px;font:850 27px var(--font-num)}.liquidity-delta{white-space:nowrap;padding:6px 9px;border-radius:999px;background:var(--foam);color:var(--up);font:700 12px var(--font-num)}.liquidity-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0 16px}.liquidity-metric{min-width:0;padding:12px;border:1px solid var(--grounds);border-radius:12px;background:var(--foam)}.liquidity-metric-top{display:flex;align-items:flex-start;justify-content:space-between;gap:4px;font-size:11px;font-weight:800;color:var(--espresso)}.liquidity-metric code{font-size:9px;color:var(--mocha)}.liquidity-metric>b{display:block;margin:8px 0 1px;font:800 17px var(--font-num);overflow-wrap:anywhere}.liquidity-metric>small{display:block;color:var(--caramel-2);font:700 10px var(--font-num)}.liquidity-metric>p{margin:8px 0 0;color:var(--mocha);font-size:10.5px;line-height:1.45}.liquidity-chart-head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:8px}.liquidity-chart-head h3{margin:0;font-size:16px}.liquidity-chart-formula{color:var(--mocha);font:600 10px/1.45 var(--font-num)}.liquidity-chart-head p{margin:2px 0 0;color:var(--mocha);font-size:10px}.liquidity-tabs{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.liquidity-tabs button{border:1px solid var(--grounds);border-radius:999px;background:var(--foam);color:var(--mocha);padding:5px 9px;font:700 10px var(--font-num);cursor:pointer}.liquidity-tabs button.on{background:var(--espresso);border-color:var(--espresso);color:var(--foam)}#liquidityChart{position:relative;min-height:220px;border:1px solid var(--grounds);border-radius:12px;padding:7px;background:var(--foam)}#liquidityChart svg{display:block;width:100%;height:auto;touch-action:none}.liquidity-chart-read{min-height:18px;padding:2px 5px;color:var(--espresso);font:700 11px var(--font-num)}.liquidity-formula-note{margin:8px 2px 0;color:var(--mocha);font-size:10px;line-height:1.5}
+  .policy-rate-history{margin-top:13px;padding-top:10px;border-top:1px dashed var(--grounds)}.policy-rate-history-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--mocha);font-size:10px;font-weight:700}.policy-rate-history-head>span{white-space:nowrap;font:600 9px var(--font-num)}.policy-rate-history-head i{display:inline-block;width:7px;height:2px;margin:0 3px 2px 7px;vertical-align:middle}.policy-rate-history-head i.effr{background:var(--caramel-2)}.policy-rate-history-head i.iorb{background:var(--up)}#policyRateChart{min-height:145px;margin-top:5px}#policyRateChart svg{display:block;width:100%;height:auto;touch-action:none}.policy-rate-read{min-height:17px;color:var(--espresso);font:700 10px var(--font-num)}
+  .fiscal-trend{margin-top:13px;padding-top:10px;border-top:1px dashed var(--grounds)}.fiscal-trend-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;color:var(--mocha);font-size:10px;font-weight:700}.fiscal-trend-tabs{display:flex;justify-content:flex-end;gap:4px;flex-wrap:wrap}.fiscal-trend-tabs button{border:1px solid var(--grounds);border-radius:999px;background:var(--foam);color:var(--mocha);padding:3px 6px;font:700 9px var(--font-num);cursor:pointer}.fiscal-trend-tabs button.on{background:var(--espresso);border-color:var(--espresso);color:var(--foam)}.fiscal-trend-chart{min-height:132px;margin-top:5px}.fiscal-trend-chart svg{display:block;width:100%;height:auto;touch-action:none}.fiscal-trend-read{min-height:17px;color:var(--espresso);font:700 10px var(--font-num)}
   .fed-policy-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.fed-policy-block{border:1px solid var(--grounds);border-radius:12px;padding:13px 14px;background:color-mix(in srgb,var(--foam) 88%,var(--grounds))}.fed-policy-block h3{font-size:15px;margin:0 0 9px}.policy-kpis{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.policy-kpi{min-width:0}.policy-kpi small{display:block;color:var(--mocha);font-size:11px;line-height:1.35}.policy-kpi b{display:block;margin-top:2px;font:700 17px var(--font-num);overflow-wrap:anywhere}.policy-note{margin:9px 0 0;color:var(--mocha);font-size:11px;line-height:1.55}.auction-list{margin:8px 0 0;padding:0;list-style:none;color:var(--mocha);font-size:11px;line-height:1.55}.auction-list b{color:var(--espresso)}.fomc-line{margin-top:10px;padding:10px 13px;border-left:4px solid var(--caramel);background:color-mix(in srgb,var(--foam) 82%,var(--caramel) 18%);font-size:12px}.fed-reading{margin-top:12px}.fed-source{margin-top:10px;color:var(--mocha);font-size:10.5px;line-height:1.5}.fed-source a{color:var(--caramel-2)}
   .policy-indicator-board{padding:0 14px 16px}.indicator-section{padding:20px 0}.indicator-section+.indicator-section{border-top:1px solid var(--grounds)}.indicator-section-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:10px}.indicator-section-no{display:grid;place-items:center;flex:0 0 38px;height:38px;border-radius:11px;background:var(--espresso);color:var(--foam);font:800 12px var(--font-num)}.indicator-section-head h3{margin:0;font-size:22px;line-height:1.25}.indicator-section-head p{margin:4px 0 0;color:var(--mocha);font-size:12px;line-height:1.6}.indicator-summary{display:flex;gap:10px;align-items:flex-start;margin:0 0 12px;padding:11px 13px;border-radius:10px;background:color-mix(in srgb,var(--caramel) 11%,var(--foam));color:var(--mocha);font-size:12px;line-height:1.6}.indicator-summary>b{flex:0 0 auto;color:var(--caramel-2)}.indicator-card-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.indicator-card{min-width:0;padding:17px 18px;border:1px solid var(--grounds);border-radius:14px;background:var(--foam);box-shadow:0 3px 12px rgba(73,49,31,.04)}.indicator-card-wide{grid-column:1/-1}.indicator-card>header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.indicator-card h4{margin:0;font-size:16px;line-height:1.35}.indicator-card header p{margin:3px 0 0;color:var(--mocha);font-size:11px;line-height:1.45}.indicator-model-badge{flex:0 0 auto;padding:4px 7px;border:1px solid color-mix(in srgb,var(--caramel-2) 45%,var(--grounds));border-radius:999px;color:var(--caramel-2);font-size:9px;font-weight:800}.indicator-value{margin:15px 0 2px;font:850 27px/1.15 var(--font-num);white-space:nowrap;color:var(--espresso);overflow-x:auto;scrollbar-width:none}.indicator-value::-webkit-scrollbar{display:none}.indicator-change{margin-top:6px;color:var(--mocha);font:650 11px/1.45 var(--font-num)}.indicator-direction{display:inline-flex;align-items:center;gap:6px;margin-top:10px;padding:6px 9px;border:1px solid var(--grounds);border-radius:999px;font-size:11px;font-weight:800}.indicator-direction>b{font-size:15px;line-height:1}.indicator-direction.positive{color:#2f7a53;background:color-mix(in srgb,#2f7a53 8%,var(--foam));border-color:color-mix(in srgb,#2f7a53 38%,var(--grounds))}.indicator-direction.negative{color:#b64034;background:color-mix(in srgb,#b64034 8%,var(--foam));border-color:color-mix(in srgb,#b64034 38%,var(--grounds))}.indicator-direction.neutral{color:#8a6514;background:color-mix(in srgb,#b98216 10%,var(--foam));border-color:color-mix(in srgb,#8a6514 35%,var(--grounds))}.indicator-explain{margin:12px 0 0;color:var(--mocha);font-size:12px;line-height:1.65}.indicator-detail-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:10px}.indicator-detail-rows>div{padding:9px 10px;border-radius:9px;background:color-mix(in srgb,var(--grounds) 25%,var(--foam))}.indicator-detail-rows span{display:block;color:var(--mocha);font-size:10px}.indicator-detail-rows b{display:block;margin-top:2px;font:800 15px var(--font-num);white-space:nowrap}.indicator-more{margin-top:12px;border-top:1px dashed var(--grounds);padding-top:9px}.indicator-more>summary{cursor:pointer;list-style:none;color:var(--caramel-2);font-size:11px;font-weight:800}.indicator-more>summary::-webkit-details-marker{display:none}.indicator-more>summary:after{content:' ＋';font-family:var(--font-num)}.indicator-more[open]>summary:after{content:' −'}.indicator-more>div{padding-top:9px;color:var(--mocha);font-size:10.5px;line-height:1.65}.policy-board-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:11px}.policy-board-limit{margin:0;max-width:650px;color:var(--mocha);font-size:10.5px;line-height:1.55}.liquidity-periods{display:flex;justify-content:flex-end;margin:0 0 8px}.liquidity-periods button{border:1px solid var(--grounds);border-right:0;background:var(--foam);padding:6px 12px;cursor:pointer;color:var(--mocha);font:700 10px var(--font-num)}.liquidity-periods button:first-child{border-radius:8px 0 0 8px}.liquidity-periods button:last-child{border-right:1px solid var(--grounds);border-radius:0 8px 8px 0}.liquidity-periods button.on{background:var(--espresso);color:var(--foam)}
   .policy-board{margin:0;padding:0;list-style:none;border-top:1px solid var(--grounds)}.policy-board li{display:grid;grid-template-columns:130px minmax(0,.9fr) minmax(0,1.3fr);align-items:center;gap:14px;padding:12px 2px;border-bottom:1px dashed var(--grounds)}.policy-board li.policy-board-section{display:block;padding:15px 2px 7px;border-bottom:1px solid var(--grounds);font-family:var(--font-head);font-weight:800;color:var(--caramel-2)}.policy-board-section small{margin-left:8px;font-family:var(--font-num);font-weight:500;color:var(--mocha)}.policy-board-label{font-weight:800;color:var(--espresso)}.policy-board-label small{display:block;margin-top:2px;font-size:10px;font-weight:500;color:var(--mocha)}.policy-board-data{font:700 13px/1.55 var(--font-num);color:var(--espresso)}.policy-board-read{font-size:12px;line-height:1.6;color:var(--mocha)}.policy-board-read b{color:var(--caramel-2)}.policy-board-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:11px}.policy-board-limit{margin:0;max-width:650px;color:var(--mocha);font-size:10.5px;line-height:1.55}
@@ -7917,6 +7994,37 @@ function drawLiquidityChart(key=liquidityKey,days=liquidityDays){
 }
 document.querySelectorAll('[data-liquidity-key]').forEach(b=>b.onclick=()=>{liquidityKey=b.dataset.liquidityKey;document.querySelectorAll('[data-liquidity-key]').forEach(x=>x.classList.toggle('on',x===b));drawLiquidityChart()});
 document.querySelectorAll('[data-liquidity-days]').forEach(b=>b.onclick=()=>{liquidityDays=Number(b.dataset.liquidityDays);document.querySelectorAll('[data-liquidity-days]').forEach(x=>x.classList.toggle('on',x===b));drawLiquidityChart()});drawLiquidityChart();
+
+function drawPolicyRateChart(){
+  const box=$("#policyRateChart");if(!box)return;let all={};try{all=JSON.parse(box.dataset.series||"{}")}catch(e){}
+  const effr=all.effr||[],iorb=all.iorb||[],dates=[...new Set([...effr,...iorb].map(r=>r[0]))].sort();
+  if(dates.length<2){box.innerHTML=`<div class="status">${LANG==='en'?'History is being prepared':'一年歷史資料正在整理'}</div>`;return}
+  const byDate=rows=>Object.fromEntries(rows.map(r=>[r[0],Number(r[1])])),e=byDate(effr),i=byDate(iorb),vals=[...effr,...iorb].map(r=>Number(r[1]));
+  const W=900,H=150,L=42,R=18,T=8,B=24,lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.12,.08),ylo=lo-pad,yhi=hi+pad,span=Math.max(.01,yhi-ylo);
+  const x=n=>L+n/(dates.length-1)*(W-L-R),y=v=>T+(yhi-v)/span*(H-T-B),points=(rows,color)=>rows.map(r=>`${x(dates.indexOf(r[0])).toFixed(1)},${y(Number(r[1])).toFixed(1)}`).join(' ');
+  const ticks=[yhi,(yhi+ylo)/2,ylo],grid=ticks.map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grounds)" stroke-dasharray="4 3"/><text x="${L-6}" y="${y(v)+3}" text-anchor="end" font-size="10" fill="var(--mocha)">${v.toFixed(2)}%</text>`).join('');
+  box.innerHTML=`<div class="policy-rate-read"></div><svg viewBox="0 0 ${W} ${H}" aria-label="One-year EFFR and IORB history">${grid}<polyline points="${points(effr)}" fill="none" stroke="var(--caramel-2)" stroke-width="2.4"/><polyline points="${points(iorb)}" fill="none" stroke="var(--up)" stroke-width="2.1"/><line class="policy-rate-guide" y1="${T}" y2="${H-B}" stroke="var(--mocha)" opacity="0"/><text x="${L}" y="${H-5}" font-size="10" fill="var(--mocha)">${dates[0].slice(0,7)}</text><text x="${W-R}" y="${H-5}" text-anchor="end" font-size="10" fill="var(--mocha)">${dates.at(-1).slice(0,7)}</text></svg>`;
+  const svg=box.querySelector('svg'),read=box.querySelector('.policy-rate-read'),guide=box.querySelector('.policy-rate-guide');
+  const valueAt=(map,index)=>{for(let n=index;n>=0;n--){const v=map[dates[n]];if(Number.isFinite(v))return v}return null};
+  const show=clientX=>{const r=svg.getBoundingClientRect();let n=Math.round((((clientX-r.left)/r.width*W)-L)/(W-L-R)*(dates.length-1));n=Math.max(0,Math.min(dates.length-1,n));const ev=valueAt(e,n),iv=valueAt(i,n),gx=x(n);read.textContent=`${dates[n]}　EFFR ${ev===null?'—':ev.toFixed(2)+'%'}　IORB ${iv===null?'—':iv.toFixed(2)+'%'}`;guide.setAttribute('x1',gx);guide.setAttribute('x2',gx);guide.setAttribute('opacity','.45')};
+  svg.addEventListener('pointerdown',e=>{e.preventDefault();svg.setPointerCapture(e.pointerId);show(e.clientX)});svg.addEventListener('pointermove',e=>{if(e.pointerType==='mouse'||svg.hasPointerCapture(e.pointerId))show(e.clientX)});svg.addEventListener('pointerup',e=>{if(svg.hasPointerCapture(e.pointerId))svg.releasePointerCapture(e.pointerId)});show(svg.getBoundingClientRect().right-(R/W)*svg.getBoundingClientRect().width);
+}
+drawPolicyRateChart();
+
+function drawFiscalTrend(trend,key,unit){
+  const box=trend.querySelector('.fiscal-trend-chart');if(!box)return;let all={};try{all=JSON.parse(box.dataset.series||'{}')}catch(e){}
+  const rows=(all[key]||[]).map(r=>[r[0],Number(r[1])]).filter(r=>r[0]&&Number.isFinite(r[1]));
+  if(rows.length<2){box.innerHTML=`<div class="status">${LANG==='en'?'Released history is being prepared':'已公布歷史資料正在整理'}</div>`;return}
+  const W=900,H=145,L=65,R=18,T=8,B=24,vals=rows.map(r=>r[1]),lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.1,unit==='percent'?.12:unit==='money'?1e10:1),ylo=lo-pad,yhi=hi+pad,span=Math.max(.01,yhi-ylo);
+  const x=n=>L+n/(rows.length-1)*(W-L-R),y=v=>T+(yhi-v)/span*(H-T-B),money=v=>{const sign=v<0?'−':'';const abs=Math.abs(v);return sign+(abs>=1e12?(abs/1e12).toFixed(2)+'T':(abs/1e9).toFixed(1)+'B')},format=v=>unit==='percent'?v.toFixed(2)+'%':money(v);
+  const ticks=[yhi,(yhi+ylo)/2,ylo],grid=ticks.map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grounds)" stroke-dasharray="4 3"/><text x="${L-6}" y="${y(v)+3}" text-anchor="end" font-size="10" fill="var(--mocha)">${format(v)}</text>`).join('');
+  const pts=rows.map((r,n)=>`${x(n).toFixed(1)},${y(r[1]).toFixed(1)}`).join(' ');
+  box.innerHTML=`<div class="fiscal-trend-read"></div><svg viewBox="0 0 ${W} ${H}" aria-label="Fiscal trend">${grid}<polyline points="${pts}" fill="none" stroke="var(--caramel-2)" stroke-width="2.4" stroke-linejoin="round"/><line class="fiscal-trend-guide" y1="${T}" y2="${H-B}" stroke="var(--mocha)" opacity="0"/><circle class="fiscal-trend-dot" r="4" fill="var(--caramel-2)" stroke="var(--foam)" stroke-width="1.5" opacity="0"/><text x="${L}" y="${H-5}" font-size="10" fill="var(--mocha)">${rows[0][0].slice(0,7)}</text><text x="${W-R}" y="${H-5}" text-anchor="end" font-size="10" fill="var(--mocha)">${rows.at(-1)[0].slice(0,7)}</text></svg>`;
+  const svg=box.querySelector('svg'),read=box.querySelector('.fiscal-trend-read'),guide=box.querySelector('.fiscal-trend-guide'),dot=box.querySelector('.fiscal-trend-dot');
+  const show=clientX=>{const r=svg.getBoundingClientRect();let n=Math.round((((clientX-r.left)/r.width*W)-L)/(W-L-R)*(rows.length-1));n=Math.max(0,Math.min(rows.length-1,n));const gx=x(n);read.textContent=`${rows[n][0]}　${format(rows[n][1])}`;guide.setAttribute('x1',gx);guide.setAttribute('x2',gx);guide.setAttribute('opacity','.45');dot.setAttribute('cx',gx);dot.setAttribute('cy',y(rows[n][1]));dot.setAttribute('opacity','1')};
+  svg.addEventListener('pointerdown',e=>{e.preventDefault();svg.setPointerCapture(e.pointerId);show(e.clientX)});svg.addEventListener('pointermove',e=>{if(e.pointerType==='mouse'||svg.hasPointerCapture(e.pointerId))show(e.clientX)});svg.addEventListener('pointerup',e=>{if(svg.hasPointerCapture(e.pointerId))svg.releasePointerCapture(e.pointerId)});show(svg.getBoundingClientRect().right-(R/W)*svg.getBoundingClientRect().width);
+}
+document.querySelectorAll('.fiscal-trend').forEach(trend=>{const buttons=[...trend.querySelectorAll('[data-fiscal-key]')],select=button=>{buttons.forEach(x=>x.classList.toggle('on',x===button));drawFiscalTrend(trend,button.dataset.fiscalKey,button.dataset.fiscalUnit)};buttons.forEach(button=>button.onclick=()=>select(button));if(buttons[0])select(buttons[0])});
 
 /* ---- 大盤詳細數據：市場寬度的歷史折線圖 ----
    ⚠️ **展開才抓**，收合再展開不重複請求（照台股版 baro-box 的做法）。
@@ -10198,7 +10306,8 @@ def _fed_policy_panel_html():
     policy = data.get("policy") or {}; liquid = data.get("liquidity") or {}
     balance = data.get("balance_sheet") or {}; treasury = data.get("treasury") or {}
     fiscal = data.get("fiscal_health") or {}; debt = fiscal.get("debt") or {}
-    interest = fiscal.get("interest") or {}; debt_gdp = fiscal.get("debt_to_gdp") or {}
+    interest = fiscal.get("interest") or {}; debt_gdp = fiscal.get("debt_to_gdp") or {}; real_gdp = fiscal.get("real_gdp") or {}
+    nominal_gdp = fiscal.get("nominal_gdp") or {}; fiscal_history = fiscal.get("history") or {}
     qt_model = fiscal.get("qt_model") or {}
     dff, lower, upper, iorb = (policy.get(k) or {} for k in ("dff", "dfedtarl", "dfedtaru", "iorb"))
     rrp, repo = liquid.get("on_rrp") or {}, liquid.get("repo") or {}
@@ -10207,6 +10316,7 @@ def _fed_policy_panel_html():
     reserves = balance.get("bank_reserves") or {}; tga = treasury.get("tga") or {}
     net_liquidity = liquid.get("net_liquidity") or {}
     history = data.get("liquidity_history") or {}
+    policy_history_data = _h.escape(json.dumps(policy.get("history") or {}, ensure_ascii=False, separators=(",", ":")), quote=True)
 
     def number(item, scale=1, suffix=""):
         try:
@@ -10390,6 +10500,16 @@ def _fed_policy_panel_html():
                 direction(kind, direction_zh, direction_en), bi(explain_zh, explain_en),
                 bi("查看說明", "Details"), bi(detail_zh, detail_en)))
 
+    def fiscal_chart(chart_id, options):
+        chart_series = {key: fiscal_history.get(key) or [] for key, _, _, _ in options}
+        encoded = _h.escape(json.dumps(chart_series, ensure_ascii=False, separators=(",", ":")), quote=True)
+        buttons = ''.join('<button data-fiscal-key="%s" data-fiscal-unit="%s"%s>%s</button>' % (
+            key, unit, ' class="on"' if index == 0 else '', bi(zh, en))
+            for index, (key, zh, en, unit) in enumerate(options))
+        return ('<div class="fiscal-trend" id="%s"><div class="fiscal-trend-head">%s<div class="fiscal-trend-tabs">%s</div></div>'
+                '<div class="fiscal-trend-chart" data-series="%s"></div></div>') % (
+                    chart_id, bi("本財年已公布走勢", "Current fiscal-year released trend"), buttons, encoded)
+
     def indicator_section(number, title_zh, title_en, intro_zh, intro_en,
                           summary_zh, summary_en, cards):
         return (
@@ -10456,11 +10576,15 @@ def _fed_policy_panel_html():
     target_value_en = (("%.2f%%–%.2f%%" % (float(lower["value"]), float(upper["value"])))
                        if lower.get("value") is not None and upper.get("value") is not None else "Data unavailable")
     rate_aux = detail_rows([
-        ("EFFR", "EFFR", number(dff, 1, "%") if dff.get("value") is not None else "資料尚未取得",
+        ("有效聯邦基金利率（EFFR）", "Effective federal funds rate (EFFR)", number(dff, 1, "%") if dff.get("value") is not None else "資料尚未取得",
          number(dff, 1, "%") if dff.get("value") is not None else "Data unavailable"),
-        ("IORB", "IORB", number(iorb, 1, "%") if iorb.get("value") is not None else None,
+        ("準備金餘額利率（IORB）", "Interest on reserve balances (IORB)", number(iorb, 1, "%") if iorb.get("value") is not None else None,
          number(iorb, 1, "%") if iorb.get("value") is not None else None),
     ])
+    rate_history_html = ('<div class="policy-rate-history"><div class="policy-rate-history-head">'
+                         + bi("一年政策利率走勢", "One-year policy-rate history")
+                         + '<span><i class="effr"></i>EFFR <i class="iorb"></i>IORB</span></div>'
+                         + '<div id="policyRateChart" data-series="' + policy_history_data + '"></div></div>')
     policy_card = indicator_card(
         "政策利率", "Policy rate", "短期美元資金成本", "Short-term dollar funding cost",
         target_value_zh, target_value_en,
@@ -10470,7 +10594,7 @@ def _fed_policy_panel_html():
         "Policy rates anchor short-term dollar funding. Cuts generally support valuation and credit expansion; hikes raise financing costs across the economy.",
         policy_read_zh + " 不能只靠目前高低判斷寬鬆或緊縮，還要比較最近變動與市場預期。下次FOMC：" + fomc_date + "；資料日：" + _h.escape(str(dff.get("date") or "資料尚未取得")) + "。",
         policy_read_en + " The current level alone does not define easing or tightening; the latest move and market expectations also matter. Next FOMC: " + fomc_date + "; data date: " + _h.escape(str(dff.get("date") or "unavailable")) + ".",
-        extra_html=rate_aux, wide=True)
+        extra_html=rate_aux + rate_history_html, wide=True)
 
     rrp_main_zh = zh_usd_millions(rrp_current_million) if rrp_current_million is not None else "資料尚未取得"
     rrp_main_en = ("$" + number(rrp, 1, "B") if rrp_value is not None else "Data unavailable")
@@ -10532,14 +10656,26 @@ def _fed_policy_panel_html():
         "主要期限：" + auction_terms_zh + "。現有API快取沒有前一期或近期平均值，因此不顯示虛構比較。",
         "Maturity composition: " + auction_terms_en + ". The current cache has no prior-period or recent-average field, so no comparison is inferred.")
 
+    gdp_value, gdp_prior = numeric(real_gdp.get("value")), numeric(real_gdp.get("prior_value"))
+    if gdp_value is None:
+        gdp_kind, gdp_direction_zh, gdp_direction_en = "neutral", "需要觀察｜資料不足", "Watch | insufficient data"
+    elif gdp_value < 0:
+        gdp_kind, gdp_direction_zh, gdp_direction_en = "negative", "經濟季變動為負", "Quarterly change is negative"
+    else:
+        gdp_kind, gdp_direction_zh, gdp_direction_en = "positive", "經濟維持擴張", "Economy remains in expansion"
+    gdp_compare_zh = ("較前次公布 " + signed(gdp_value - gdp_prior, 1, " 個百分點")
+                      if gdp_value is not None and gdp_prior is not None else "前次公布資料尚未取得")
+    gdp_compare_en = ("vs prior release " + signed(gdp_value - gdp_prior, 1, " pp")
+                      if gdp_value is not None and gdp_prior is not None else "Prior release unavailable")
     gdp_card = indicator_card(
         "實體經濟／GDP", "Real economy / GDP", "經濟是否正在擴張", "Whether economic activity is expanding",
-        "資料尚未取得", "Data unavailable", "前一季比較資料尚未取得", "Prior-quarter comparison unavailable",
-        "neutral", "需要觀察｜資料不足", "Watch | insufficient data",
+        (number(real_gdp, 1, "%") if gdp_value is not None else "資料尚未取得"),
+        (number(real_gdp, 1, "%") if gdp_value is not None else "Data unavailable"),
+        gdp_compare_zh, gdp_compare_en, gdp_kind, gdp_direction_zh, gdp_direction_en,
         "GDP用來確認經濟活動是擴張、放緩或收縮。單一季容易受短期因素影響，應搭配連續數季趨勢。",
         "GDP indicates whether activity is expanding, slowing or contracting. One quarter can be noisy, so several quarters should be read together.",
-        "現有Fed／Treasury快取沒有實質GDP年化季增率欄位。網站現有的「債務／GDP」是財政比率，不能當成實質GDP成長。",
-        "The current Fed/Treasury cache has no annualized real-GDP growth field. The existing debt/GDP ratio is a fiscal ratio and cannot substitute for real-GDP growth.")
+        "資料來源：FRED／BEA A191RL1Q225SBEA，實質GDP相較前期的季變動百分比（季調年率）；公布季：" + _h.escape(str(real_gdp.get("date") or "資料尚未取得")) + "。這不是「債務／GDP」財政比率。",
+        "Source: FRED/BEA A191RL1Q225SBEA, real GDP percent change from the preceding period at a seasonally adjusted annual rate; release quarter: " + _h.escape(str(real_gdp.get("date") or "unavailable")) + ". This is not the debt-to-GDP fiscal ratio.")
 
     qt_main_zh = ("10年期限溢酬約 +" + qt_bp if qt_bp != "—" else "資料尚未取得")
     qt_main_en = ("10Y term premium about +" + qt_bp if qt_bp != "—" else "Data unavailable")
@@ -10554,17 +10690,23 @@ def _fed_policy_panel_html():
         "Estimated runoff speed: not stored in the current cache. Assumption: when SOMA falls by 1% of GDP, the Fed model reference implies roughly " + qt_bp + " on the 10Y term premium.",
         model=True)
 
+    debt_aux = detail_rows([
+        ("公眾持有債務", "Debt held by the public", zh_usd(debt.get("held_public")) if numeric(debt.get("held_public")) is not None else "資料尚未取得",
+         "$" + amount(debt.get("held_public"), 1e12, "T") if numeric(debt.get("held_public")) is not None else "Data unavailable"),
+        ("政府內部持有債務", "Intragovernmental holdings", zh_usd(debt.get("intragov")) if numeric(debt.get("intragov")) is not None else "資料尚未取得",
+         "$" + amount(debt.get("intragov"), 1e12, "T") if numeric(debt.get("intragov")) is not None else "Data unavailable"),
+    ])
     debt_card = indicator_card(
         "美國聯邦債務", "U.S. federal debt", "公眾持有債務＋政府內部持有債務", "Debt held by the public + intragovernmental holdings",
         zh_usd(debt.get("total")) if numeric(debt.get("total")) is not None else "資料尚未取得",
         "$" + amount(debt.get("total"), 1e12, "T") if numeric(debt.get("total")) is not None else "Data unavailable",
-        "存量結構：現有快取未提供前期變化", "Stock measure: no prior-period change stored",
+        "資料日：" + debt_date, "Data date: " + debt_date,
         "neutral", "債務結構觀察", "Debt-structure watch",
         "公眾持有債務需由市場、銀行、基金、海外投資人及聯準會等持有；政府內部持有則主要是政府信託基金之間的債權。",
         "Debt held by the public is held by markets, banks, funds, foreign investors and the Fed; intragovernmental holdings are mainly claims among government trust funds.",
         "公眾持有：" + zh_usd(debt.get("held_public")) + "；政府內部：" + zh_usd(debt.get("intragov")) + "；資料日：" + debt_date + "。來源欄位為Fiscal Data debt_to_penny的tot_pub_debt_out_amt、debt_held_public_amt與intragov_hold_amt。",
         "Held by public: $" + amount(debt.get("held_public"), 1e12, "T") + "; intragovernmental: $" + amount(debt.get("intragov"), 1e12, "T") + "; data date: " + debt_date + ". Source fields: Fiscal Data debt_to_penny.",
-        wide=True)
+        extra_html=debt_aux, wide=True)
 
     interest_aux = detail_rows([
         ("平均利率", "Average rate", percent(interest.get("avg_rate_pct")) if numeric(interest.get("avg_rate_pct")) is not None else "資料尚未取得",
@@ -10573,31 +10715,58 @@ def _fed_policy_panel_html():
          zh_usd(interest.get("annualized_cost_estimate")) if numeric(interest.get("annualized_cost_estimate")) is not None else "資料尚未取得",
          "$" + amount(interest.get("annualized_cost_estimate"), 1e12, "T") if numeric(interest.get("annualized_cost_estimate")) is not None else "Data unavailable"),
     ])
+    fiscal_cost_chart = fiscal_chart("fiscalCostTrend", [
+        ("avg_rate", "平均利率", "Average rate", "percent"),
+        ("annualized_cost", "年化粗估", "Annualized estimate", "money"),
+        ("gross_interest", "國債毛利息", "Gross debt interest", "money"),
+    ])
+    gross_interest_history = fiscal_history.get("gross_interest") or []
+    gross_interest_change = (_series_change(gross_interest_history, 1)
+                             if len(gross_interest_history) >= 2 else None)
     interest_card = indicator_card(
         "聯邦政府利息支出", "Federal interest expense", "再融資成本", "Refinancing cost",
         ("FY" + fiscal_year + "累計 " + zh_usd(interest.get("gross_fytd"))) if numeric(interest.get("gross_fytd")) is not None else "資料尚未取得",
         ("FY" + fiscal_year + " YTD $" + amount(interest.get("gross_fytd"), 1e12, "T")) if numeric(interest.get("gross_fytd")) is not None else "Data unavailable",
-        "現有快取未提供前期變化", "No prior-period change is stored",
+        ("較前期公布 " + zh_usd(gross_interest_change, True) if numeric(gross_interest_change) is not None else "前期公布資料尚未取得"),
+        ("vs prior release " + signed(gross_interest_change, 1e12, "T") if numeric(gross_interest_change) is not None else "Prior release unavailable"),
         "neutral", "需追蹤再融資壓力", "Refinancing pressure watch",
         "利率維持高檔越久，舊債到期後需以較高利率再融資，政府利息支出便可能繼續增加。",
         "The longer rates stay high, the more maturing debt may refinance at higher coupons, potentially raising government interest costs.",
         "FY" + fiscal_year + "累計毛利息是同財政年截至目前的實際累計，不是官方全年預估。年化粗估是依總債務與平均利率計算，不能用Fed利率直接乘總債務；兩種口徑分開標示。資料日：" + interest_date + "。",
         "FY" + fiscal_year + " gross interest is fiscal-year-to-date actual data, not an official full-year forecast. The annualized figure is a separate total-debt-times-average-rate estimate. Data date: " + interest_date + ".",
-        extra_html=interest_aux, wide=True)
+        extra_html=interest_aux + fiscal_cost_chart, wide=True)
 
+    share_chart = fiscal_chart("fiscalShareTrend", [
+        ("gross_interest", "國債毛利息", "Gross debt interest", "money"),
+        ("revenue", "聯邦收入", "Federal receipts", "money"),
+        ("interest_share", "利息／收入", "Interest / receipts", "percent"),
+    ])
+    interest_share_history = fiscal_history.get("interest_share") or []
+    interest_share_change = (_series_change(interest_share_history, 1)
+                             if len(interest_share_history) >= 2 else None)
     share_card = indicator_card(
         "國債利息／聯邦收入", "Debt interest / federal receipts", "收入中用於支付毛利息的比例", "Share of receipts used for gross interest",
         percent(interest_share) if numeric(interest_share) is not None else "資料尚未取得",
         percent(interest_share) if numeric(interest_share) is not None else "Data unavailable",
-        "前期比率：現有快取未提供", "Prior ratio: not stored in the current cache",
+        ("較前期公布 " + signed(interest_share_change, 1, " 個百分點") if numeric(interest_share_change) is not None else "前期公布資料尚未取得"),
+        ("vs prior release " + signed(interest_share_change, 1, " pp") if numeric(interest_share_change) is not None else "Prior release unavailable"),
         share_kind, share_dir_zh, share_dir_en,
         (("代表聯邦政府每收到100美元，約有%.1f美元需用來支付毛利息。" % interest_share)
          if numeric(interest_share) is not None else "此比率衡量聯邦收入被毛利息支出占用的程度。"),
         (("About $%.1f of every $100 in federal receipts is used for gross interest." % interest_share)
          if numeric(interest_share) is not None else "This ratio measures how much of federal receipts is consumed by gross interest."),
-        "公式：" + zh_usd(interest.get("gross_fytd")) + " ÷ " + zh_usd(interest.get("revenue_fytd")) + " ≈ " + percent(interest_share) + "。這是同期毛利息，不是扣除政府利息收入後的淨利息。比率升降判讀需前期值，現有快取未儲存。",
-        "Formula: $" + amount(interest.get("gross_fytd"), 1e12, "T") + " / $" + amount(interest.get("revenue_fytd"), 1e12, "T") + " ≈ " + percent(interest_share) + ". This is gross, not net, interest. A trend call requires a prior ratio, which is not stored.")
+        "公式：" + zh_usd(interest.get("gross_fytd")) + " ÷ " + zh_usd(interest.get("revenue_fytd")) + " ≈ " + percent(interest_share) + "。這是同期毛利息，不是扣除政府利息收入後的淨利息；折線圖以每月已公布的本財年累計資料呈現。",
+        "Formula: $" + amount(interest.get("gross_fytd"), 1e12, "T") + " / $" + amount(interest.get("revenue_fytd"), 1e12, "T") + " ≈ " + percent(interest_share) + ". This is gross, not net, interest; the chart uses each released fiscal-year-to-date monthly observation.",
+        extra_html=share_chart)
 
+    debt_gdp_aux = detail_rows([
+        ("名目 GDP", "Nominal GDP", zh_usd(numeric(nominal_gdp.get("value")) * 1e9) if numeric(nominal_gdp.get("value")) is not None else "資料尚未取得",
+         "$" + amount(numeric(nominal_gdp.get("value")) * 1e9, 1e12, "T") if numeric(nominal_gdp.get("value")) is not None else "Data unavailable"),
+    ])
+    debt_gdp_chart = fiscal_chart("debtGdpTrend", [
+        ("debt_gdp", "債務／GDP", "Debt / GDP", "percent"),
+        ("nominal_gdp", "名目 GDP", "Nominal GDP", "money"),
+    ])
     debt_gdp_card = indicator_card(
         "聯邦債務／GDP", "Federal debt / GDP", "債務相對經濟規模", "Debt relative to economic capacity",
         percent(debt_gdp.get("value")) if numeric(debt_gdp.get("value")) is not None else "資料尚未取得",
@@ -10607,8 +10776,9 @@ def _fed_policy_panel_html():
         debt_gdp_kind, debt_gdp_dir_zh, debt_gdp_dir_en,
         "債務／GDP用經濟規模檢視債務承受能力。比率上升表示債務增速快於名目經濟；下降則相反。",
         "Debt/GDP compares debt with the economy's scale. A rising ratio means debt is growing faster than nominal output; a decline means the reverse.",
-        "資料季：" + gdp_date + "。這是長期財政比率，不是實質GDP年化季增率，也不是短線買賣訊號。",
-        "Data quarter: " + gdp_date + ". This is a long-run fiscal ratio, not annualized real-GDP growth or a short-term trading signal.")
+        "資料季：" + gdp_date + "。名目GDP取FRED／BEA GDP季資料；這是長期財政比率，不是實質GDP年化季增率，也不是短線買賣訊號。",
+        "Data quarter: " + gdp_date + ". Nominal GDP uses FRED/BEA quarterly GDP data; this is a long-run fiscal ratio, not annualized real-GDP growth or a short-term trading signal.",
+        extra_html=debt_gdp_aux + debt_gdp_chart)
 
     liquidity_summary_zh = (("TGA下降正在釋放資金" if numeric(tga_change) is not None and tga_change < 0 else
                              "TGA上升正在吸收資金" if numeric(tga_change) is not None and tga_change > 0 else
@@ -10632,10 +10802,10 @@ def _fed_policy_panel_html():
                           "Fed securities were broadly stable over four weeks and remain on watch.")
     fiscal_summary_zh = (("毛利息占同期收入%.1f%%" % interest_share)
                          if numeric(interest_share) is not None else
-                         "利息占收入比率尚未取得") + "；現有快取無前期比率，不判定升降。"
+                         "利息占收入比率尚未取得") + "；本財年已公布的利率、利息、收入與GDP序列可切換查看。"
     fiscal_summary_en = (("Gross interest equals %.1f%% of same-period receipts" % interest_share)
                          if numeric(interest_share) is not None else
-                         "The interest-to-receipts ratio is unavailable") + "; no prior ratio is stored, so no trend is inferred."
+                         "The interest-to-receipts ratio is unavailable") + "; released fiscal-year rate, interest, receipts and GDP series are available in the charts."
 
     detail_sections = (
         '<div class="policy-indicator-board">'

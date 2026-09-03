@@ -5350,7 +5350,7 @@ __SEO_HEAD__
     overflow-x:clip;
     overscroll-behavior-y:none;
     -webkit-font-smoothing:antialiased; }
-  .wrap { max-width:960px; margin:0 auto; padding:16px; padding-top:70px;
+  .wrap { max-width:1440px; margin:0 auto; padding:16px; padding-top:70px;
           padding-bottom:calc(24px + env(safe-area-inset-bottom)); }
   h1, .ptitle { text-align:center; font-family:var(--font-head); font-weight:900; font-size:24px;
        color:var(--espresso); letter-spacing:.04em; margin:0 0 6px; }
@@ -5930,17 +5930,30 @@ __SEO_HEAD__
            font-size:13px; color:var(--mocha); letter-spacing:.16em; }
   .qhead::after { content:""; flex:1; height:1px; background:var(--grounds); }
   /* 首頁新版市場儀表板：季線／半年線／年線使用 50／100／150MA。 */
-  #home{max-width:920px;margin:0 auto}
-  .home-dashboard{display:grid;gap:16px}.market-now{display:grid;gap:14px;margin-bottom:18px}
-  /* 首頁閱讀順序：指數位置 → 今日觀察 → 市場狀態 → 回顧 → 寬度 → 總經。 */
+  #home{max-width:1180px;margin:0 auto}
+  #topBrand{position:fixed;z-index:97;top:19px;left:76px;display:block;color:var(--espresso);line-height:1.1;pointer-events:none}
+  #topBrand b{display:block;font:800 20px var(--font-brand)}
+  #topBrand small{display:block;margin-top:5px;color:var(--mocha);font:500 11px var(--font-body);letter-spacing:.04em}
+  #home .brandhead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+  .bpromise{margin:0 0 14px 54px;padding:0;color:var(--mocha);font:500 14px/1.7 var(--font-head)}
+  .market-view-toggle{margin:-6px 0 14px 54px}
+  .market-view-toggle button{border:1px solid var(--grounds);border-radius:999px;background:var(--foam);color:var(--mocha);padding:6px 12px;cursor:pointer;font:700 12px var(--font-body);box-shadow:var(--shadow)}
+  .home-dashboard{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(290px,.9fr);gap:14px;align-items:stretch}
+  .home-dashboard .market-chart-card{grid-column:1;grid-row:1}
+  .home-dashboard .home-action-panel{grid-column:2;grid-row:1}
+  .home-dashboard .market-now-hero,
+  .home-dashboard .market-returns-card,
+  .home-dashboard .market-breadth-card,
+  .home-dashboard .fed-policy-panel{grid-column:1/-1}
   .home-dashboard .market-now,.home-dashboard .market-now-grid{display:contents}
-  .home-dashboard .market-chart-card{order:1}.home-dashboard .home-action-panel{order:2}
-  .home-dashboard .market-now-hero{order:3}.home-dashboard .market-returns-card{order:4}
-  .home-dashboard .market-breadth-card{order:5}.home-dashboard .fed-policy-panel{order:6}
-  .market-return-quartiles{display:none}
-  .market-now-hero,.market-data-card{background:var(--foam);border:1px solid var(--grounds);border-radius:16px;box-shadow:var(--shadow)}
-  .market-now-hero{padding:22px 28px;background:linear-gradient(135deg,#fffdf9,#f8f0e4);border-radius:18px}
-  .market-now-title{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.market-now-title h1{margin:0;font:900 32px var(--font-head);text-align:left}.market-now-title h1::after{display:none}
+  #home:not(.market-data-view) .market-now-hero,
+  #home:not(.market-data-view) .market-breadth-card{display:none!important}
+  .market-now-hero,.market-data-card,.fed-policy-panel,.hs-box,.home-industry,.island-shortcut{background:var(--foam);border:0;border-radius:22px;box-shadow:var(--shadow)}
+  .market-chart-card,.market-now-hero,.market-data-card,.fed-policy-panel{padding:18px}
+  .market-chart-card{min-height:300px}
+  .market-now-hero{background:linear-gradient(180deg,var(--foam),#F6EAD6)}
+  html[data-theme="c"] .market-now-hero{background:var(--foam)}
+  .market-now-title{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.market-now-title h1{margin:0;font:900 22px var(--font-head);text-align:left}.market-now-title h1::after{display:none}
   .market-now-badge{display:inline-flex;padding:8px 20px;border-radius:999px;background:linear-gradient(135deg,var(--caramel),var(--caramel-2));color:#fff;font-weight:700}.market-now-hero p{margin:12px 0 0;color:var(--mocha);font-size:15px;line-height:1.7}
   .market-scope-note{margin-top:7px;color:var(--mocha);font-size:12px;line-height:1.65;opacity:.9}
   .market-now-grid{display:grid;grid-template-columns:1fr;gap:14px}.market-data-card{padding:16px;min-width:0}.market-data-card h2{margin:0 0 12px;font:700 18px var(--font-head)}
@@ -5951,26 +5964,34 @@ __SEO_HEAD__
   #homeIndexChart svg{width:100%;height:auto;display:block;touch-action:none;cursor:grab;user-select:none}#homeIndexChart svg.dragging{cursor:grabbing}.home-chart-read{min-height:20px;font:12px var(--font-num);color:var(--mocha);margin:2px 0 0 45px}.market-chart-note{font-size:11px;color:var(--mocha);text-align:right;margin-top:-3px}
   /* 「今日觀察」只是區段標題與內容容器，不另外鋪一層卡片底色。 */
   .home-action-panel{padding:0;background:transparent;border:0;box-shadow:none}
-  /* 與「今日市場」共用同一個 960px 首頁欄寬；不要再受舊版 560px 卡片寬度限制。 */
-  .home-action-panel .qhead{max-width:none;margin:14px 0 8px}
-  .home-action-panel .home-section-note{max-width:none;margin:0 0 12px}
-  .home-action-panel .home-actions{max-width:none;grid-template-columns:1fr 1fr}
-  #home>.qhead{max-width:920px}
+  .home-action-panel .qhead,.home-action-panel .home-section-note{display:none}
+  .home-action-panel .home-actions{max-width:none;grid-template-columns:1fr;gap:14px}
+  #home>.qhead{max-width:1180px}
   html[data-theme="c"] .home-action-panel{background:transparent!important;border:0;box-shadow:none}
   html[data-theme="c"] .data-health-line.health-ok{color:#75d7a2;background:rgba(39,129,83,.22)}
   html[data-theme="c"] .data-health-line.health-stale{color:#ff9b8f;background:rgba(200,67,53,.20)}
   .home-section-note{max-width:560px;margin:-6px auto 12px;color:var(--mocha);font-size:12px;line-height:1.65}
-  .home-actions{max-width:560px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:10px}
-  .home-actions .hs-box,.home-actions .home-industry{margin:0;min-width:0;max-width:none}
-  .home-industry{display:block;text-decoration:none;color:inherit;background:linear-gradient(135deg,#fffaf2,#f3e6d3);border:1px solid #e4d2b6}
-  .home-industry:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(91,63,39,.09)}
+  .home-actions{max-width:none;margin:0;display:grid;grid-template-columns:1fr;gap:14px}
+  .home-actions .hs-box,.home-actions .home-industry{margin:0;min-width:0;max-width:none;border:0;border-radius:22px}
+  .home-industry{display:block;text-decoration:none;color:inherit;background:linear-gradient(180deg,var(--foam),#F6EAD6)}
+  .home-industry:hover{transform:translateY(-1px)}
+  .hs-box{max-width:none}
+  .home-actions .hs-n{font-size:38px;color:#24362C}
+  html[data-theme="c"] .home-actions .hs-n{color:#8fc5a5}
+  .home-shortcuts{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+  .island-shortcut{display:flex;min-height:150px;flex-direction:column;padding:18px;background:linear-gradient(180deg,var(--foam),#F6EAD6);color:var(--espresso);text-decoration:none}
+  html[data-theme="c"] .island-shortcut{background:#21343a;color:#f5ead7}
+  .island-shortcut b{font:800 17px var(--font-head)}
+  .island-shortcut span{margin:10px 0;color:var(--mocha);font:400 13px/1.7 var(--font-body)}
+  .island-shortcut em{margin-top:auto;color:var(--caramel-2);font:800 13px var(--font-body);font-style:normal}
   .home-industry-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
   .home-industry-head h2{margin:0}.home-industry-head>span{color:var(--mocha);font-weight:700;font-size:14px}
   .home-industry-list{display:flex;gap:8px;flex-wrap:wrap}
   .home-industry-list>span{width:100%;padding:7px 10px;border-radius:10px;background:rgba(255,255,255,.72);font-size:14px}
   html[data-theme="c"] .home-industry{background:#21343A;border-color:#466068}
   html[data-theme="c"] .home-industry-list>span{background:#17252B;color:#F5EAD7}
-  .fed-policy-panel{max-width:none;margin:0;padding:20px 22px}.fed-policy-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}.fed-policy-head h2{margin:0 0 4px;font-size:20px}.fed-policy-head p{margin:0;color:var(--mocha);font-size:12px;line-height:1.55}.fed-policy-status{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.policy-status{white-space:nowrap;border:1px solid var(--grounds);border-radius:999px;padding:4px 8px;font-size:11px;color:var(--mocha);background:var(--foam)}.policy-status.ok{color:var(--up);border-color:color-mix(in srgb,var(--up) 45%,var(--grounds))}.policy-status.warn{color:var(--caramel-2)}.policy-status.danger{color:var(--down)}
+  .liquidity-dashboard{padding:0!important;margin:0 0 12px}
+  .liquidity-chart-wrap{padding:0 16px 16px}.fed-policy-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}.fed-policy-head h2{margin:0 0 4px;font-size:20px}.fed-policy-head p{margin:0;color:var(--mocha);font-size:12px;line-height:1.55}.fed-policy-status{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.policy-status{white-space:nowrap;border:1px solid var(--grounds);border-radius:999px;padding:4px 8px;font-size:11px;color:var(--mocha);background:var(--foam)}.policy-status.ok{color:var(--up);border-color:color-mix(in srgb,var(--up) 45%,var(--grounds))}.policy-status.warn{color:var(--caramel-2)}.policy-status.danger{color:var(--down)}
   .fed-policy-fold{border:1px solid var(--grounds);border-radius:14px;background:color-mix(in srgb,var(--foam) 92%,var(--grounds));overflow:hidden}.fed-policy-fold+.fed-policy-fold{margin-top:10px}.fed-policy-fold>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;cursor:pointer;list-style:none;font-family:var(--font-head);font-weight:850;color:var(--espresso)}.fed-policy-fold>summary::-webkit-details-marker{display:none}.fed-policy-fold>summary:after{content:'›';font:700 24px/1 var(--font-num);color:var(--caramel-2);transform:rotate(90deg);transition:transform .18s}.fed-policy-fold[open]>summary:after{transform:rotate(-90deg)}.fed-policy-fold>summary small{margin-left:8px;font:500 11px var(--font-num);color:var(--mocha)}.policy-detail-fold>.policy-board{padding:0 16px 4px}.liquidity-dashboard{padding:0 16px 16px}.liquidity-hero{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 18px;border-radius:13px;background:linear-gradient(135deg,color-mix(in srgb,var(--caramel) 22%,var(--foam)),color-mix(in srgb,var(--up) 10%,var(--foam)));border:1px solid color-mix(in srgb,var(--caramel) 45%,var(--grounds))}.liquidity-hero small{color:var(--mocha)}.liquidity-hero h3{margin:3px 0 2px;font:850 27px var(--font-num)}.liquidity-delta{white-space:nowrap;padding:6px 9px;border-radius:999px;background:var(--foam);color:var(--up);font:700 12px var(--font-num)}.liquidity-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0 16px}.liquidity-metric{min-width:0;padding:12px;border:1px solid var(--grounds);border-radius:12px;background:var(--foam)}.liquidity-metric-top{display:flex;align-items:flex-start;justify-content:space-between;gap:4px;font-size:11px;font-weight:800;color:var(--espresso)}.liquidity-metric code{font-size:9px;color:var(--mocha)}.liquidity-metric>b{display:block;margin:8px 0 1px;font:800 17px var(--font-num);overflow-wrap:anywhere}.liquidity-metric>small{display:block;color:var(--caramel-2);font:700 10px var(--font-num)}.liquidity-metric>p{margin:8px 0 0;color:var(--mocha);font-size:10.5px;line-height:1.45}.liquidity-chart-head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:8px}.liquidity-chart-head h3{margin:0;font-size:16px}.liquidity-chart-formula{color:var(--mocha);font:600 10px/1.45 var(--font-num)}.liquidity-chart-head p{margin:2px 0 0;color:var(--mocha);font-size:10px}.liquidity-tabs{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.liquidity-tabs button{border:1px solid var(--grounds);border-radius:999px;background:var(--foam);color:var(--mocha);padding:5px 9px;font:700 10px var(--font-num);cursor:pointer}.liquidity-tabs button.on{background:var(--espresso);border-color:var(--espresso);color:var(--foam)}#liquidityChart{position:relative;min-height:220px;border:1px solid var(--grounds);border-radius:12px;padding:7px;background:var(--foam)}#liquidityChart svg{display:block;width:100%;height:auto;touch-action:none}.liquidity-chart-read{min-height:18px;padding:2px 5px;color:var(--espresso);font:700 11px var(--font-num)}.liquidity-formula-note{margin:8px 2px 0;color:var(--mocha);font-size:10px;line-height:1.5}
   .policy-rate-history{margin-top:13px;padding-top:10px;border-top:1px dashed var(--grounds)}.policy-rate-history-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--mocha);font-size:10px;font-weight:700}.policy-rate-history-head>span{white-space:nowrap;font:600 9px var(--font-num)}.policy-rate-history-head i{display:inline-block;width:7px;height:2px;margin:0 3px 2px 7px;vertical-align:middle}.policy-rate-history-head i.effr{background:var(--caramel-2)}.policy-rate-history-head i.iorb{background:var(--up)}#policyRateChart{min-height:145px;margin-top:5px}#policyRateChart svg{display:block;width:100%;height:auto;touch-action:none}.policy-rate-read{min-height:17px;color:var(--espresso);font:700 10px var(--font-num)}
   .fiscal-trend{margin-top:13px;padding-top:10px;border-top:1px dashed var(--grounds)}.fiscal-trend-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;color:var(--mocha);font-size:10px;font-weight:700}.fiscal-trend-tabs{display:flex;justify-content:flex-end;gap:4px;flex-wrap:wrap}.fiscal-trend-tabs button{border:1px solid var(--grounds);border-radius:999px;background:var(--foam);color:var(--mocha);padding:3px 6px;font:700 9px var(--font-num);cursor:pointer}.fiscal-trend-tabs button.on{background:var(--espresso);border-color:var(--espresso);color:var(--foam)}.fiscal-trend-chart{min-height:132px;margin-top:5px}.fiscal-trend-chart svg{display:block;width:100%;height:auto;touch-action:none}.fiscal-trend-read{min-height:17px;color:var(--espresso);font:700 10px var(--font-num)}
@@ -5979,7 +6000,23 @@ __SEO_HEAD__
   .policy-board{margin:0;padding:0;list-style:none;border-top:1px solid var(--grounds)}.policy-board li{display:grid;grid-template-columns:130px minmax(0,.9fr) minmax(0,1.3fr);align-items:center;gap:14px;padding:12px 2px;border-bottom:1px dashed var(--grounds)}.policy-board li.policy-board-section{display:block;padding:15px 2px 7px;border-bottom:1px solid var(--grounds);font-family:var(--font-head);font-weight:800;color:var(--caramel-2)}.policy-board-section small{margin-left:8px;font-family:var(--font-num);font-weight:500;color:var(--mocha)}.policy-board-label{font-weight:800;color:var(--espresso)}.policy-board-label small{display:block;margin-top:2px;font-size:10px;font-weight:500;color:var(--mocha)}.policy-board-data{font:700 13px/1.55 var(--font-num);color:var(--espresso)}.policy-board-read{font-size:12px;line-height:1.6;color:var(--mocha)}.policy-board-read b{color:var(--caramel-2)}.policy-board-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:11px}.policy-board-limit{margin:0;max-width:650px;color:var(--mocha);font-size:10.5px;line-height:1.55}
   @media(max-width:900px){.liquidity-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.liquidity-metric:last-child{grid-column:1/-1}.liquidity-chart-head{align-items:flex-start;flex-direction:column}.liquidity-tabs{justify-content:flex-start}}
   @media(max-width:560px){.fed-policy-panel{padding:17px 16px}.fed-policy-head{display:block}.fed-policy-status{justify-content:flex-start;margin-top:10px}.fed-policy-grid{grid-template-columns:1fr}.policy-kpis{grid-template-columns:1fr 1fr}.fed-policy-fold>summary{padding:13px 12px}.fed-policy-fold>summary small{display:block;margin:3px 0 0}.liquidity-dashboard{padding:0 10px 11px}.liquidity-hero{align-items:flex-start;flex-direction:column;padding:14px}.liquidity-hero h3{font-size:24px}.liquidity-metrics{grid-template-columns:1fr 1fr}.liquidity-metric{padding:10px}.liquidity-metric:last-child{grid-column:1/-1}.liquidity-tabs{display:grid;grid-template-columns:repeat(3,1fr);width:100%}.liquidity-tabs button{padding:7px 4px}#liquidityChart{min-height:0}.policy-indicator-board{padding:0 10px 12px}.indicator-section{padding:18px 0}.indicator-section-head{gap:9px}.indicator-section-no{flex-basis:34px;height:34px}.indicator-section-head h3{font-size:19px}.indicator-summary{display:block;padding:10px 12px}.indicator-summary>b{display:block;margin-bottom:3px}.indicator-card-grid{grid-template-columns:1fr;gap:10px}.indicator-card,.indicator-card-wide{grid-column:auto;padding:17px 16px}.indicator-card h4{font-size:15px}.indicator-value{font-size:24px}.indicator-explain{font-size:12px;line-height:1.6}.indicator-detail-rows{grid-template-columns:1fr 1fr}.indicator-direction{max-width:100%;box-sizing:border-box}.policy-board li{grid-template-columns:1fr;gap:3px;padding:12px 0}.policy-board-label{color:var(--caramel-2)}.policy-board-data{font-size:13px}.policy-board-read{font-size:11.5px}}
-  @media(max-width:560px){.home-actions,.home-action-panel .home-actions{grid-template-columns:1fr}.updnote{font-size:14px}.updnote small{font-size:12.5px}}
+  @media(min-width:761px){
+    .home-dashboard .market-chart-card{align-self:stretch;display:grid;grid-template-rows:auto minmax(0,1fr) auto;height:100%}
+    .market-chart-card #homeIndexChart{display:grid;min-height:0}
+    #homeIndexChart svg{height:100%;min-height:260px}
+  }
+  @media(max-width:760px){
+    #topBrand{top:20px;left:62px}#topBrand small{display:none}
+    .bpromise,.market-view-toggle{margin-left:0}
+    .home-dashboard{grid-template-columns:1fr;gap:10px}
+    .home-dashboard .market-chart-card,
+    .home-dashboard .home-action-panel,
+    .home-dashboard .market-now-hero,
+    .home-dashboard .market-returns-card,
+    .home-dashboard .market-breadth-card,
+    .home-dashboard .fed-policy-panel{grid-column:1;grid-row:auto}
+    .home-shortcuts{grid-template-columns:1fr}
+  }
   @media(max-width:560px){.reading-row{grid-template-columns:54px 1fr}.ind-change-grid,.ind-stock-list{grid-template-columns:1fr}}
   @media(max-width:560px){.market-now-grid,.market-return-grid,.breadth-grid{grid-template-columns:1fr}.market-now-hero{padding:17px 18px}.market-now-title h1{font-size:27px}.market-now-badge{padding:6px 13px}.market-return-stats{grid-template-columns:minmax(0,1fr) 108px}.market-return-participation,.market-return-med{padding:12px}.market-return-count b{font-size:24px}.market-return-quartiles{grid-template-columns:repeat(2,minmax(0,1fr))}.market-return-quartile i{font-size:10px}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods,.liquidity-periods{width:100%}.market-periods button,.liquidity-periods button{flex:1;padding:7px 5px}}
   /* 今日市場：市場階段（可展開看說明） */
@@ -6207,6 +6244,7 @@ __SEO_HEAD__
 <body>
 
 <button id="menuBtn" aria-label="選單" data-i18n-aria="ui.menu"><span></span><span></span><span></span></button>
+<div id="topBrand"><b data-i18n="brand.name">美股咖啡館</b><small><span class="q-zh">點左上角看全部功能</span><span class="q-en" style="display:none">Open the menu for every tool</span></small></div>
 <div id="topBtns">
   <a id="mktBtn" href="__TW_URL__" title="切換到台股咖啡館" aria-label="切換到台股咖啡館" data-i18n-aria="ui.mkt.aria">🇹🇼 <span data-i18n="ui.mkt">台股</span></a>
   <button id="themeBtn" type="button" aria-label="選擇咖啡館外觀" aria-expanded="false">☕ 外觀</button>
@@ -6272,18 +6310,15 @@ __SEO_HEAD__
       <span class="sep">·</span><span id="bdate">—</span>
     </div>
   </div>
+  <p class="bpromise"><span class="q-zh">不是告訴你買哪一檔，而是告訴你今天該怎麼打這場仗。</span><span class="q-en" style="display:none">Not which stock to buy — how to fight today’s battle.</span></p>
+  <p class="market-view-toggle"><button type="button" id="marketViewBtn"><span class="q-zh">展開市場狀態</span><span class="q-en" style="display:none">Show market status</span></button></p>
 
-  <!-- ============ 今日市場（版面照台股版）============
-       結論秒開、細節手動：
-         · 「大盤詳細數據」要展開才去打 /api/breadth，
-           不讓每個訪客都觸發後端工作（台股版踩過，見台股 5.4） -->
   <div class="home-dashboard">
 __HOME_MARKET_DASHBOARD__
 
 __FED_POLICY_PANEL__
 
-  <section class="home-action-panel"><div class="qhead"><span class="q-zh">今日觀察 · ACTIONS</span><span class="q-en" style="display:none">WHAT TO EXPLORE</span></div>
-  <div class="home-section-note"><span class="q-zh">先看近期選股結果，再查看強勢股與產業集中方向。以下都是過去資料的整理，不是未來預測。</span><span class="q-en" style="display:none">Start with realised selection results, then explore strong stocks and sector concentration. Nothing here predicts the future.</span></div>
+  <section class="home-action-panel">
   <div class="home-actions">
     __HOME_SCREEN__
     <a class="card home-industry" href="/industries">
@@ -6292,6 +6327,18 @@ __FED_POLICY_PANEL__
     </a>
   </div>
   </section></div>
+  <div class="home-shortcuts">
+    <a class="island-shortcut" href="/breakout-structure">
+      <b><span class="q-zh">飆股拉回找買點</span><span class="q-en" style="display:none">Breakout pullbacks</span></b>
+      <span><span class="q-zh">前高回落後重新靠近前高；查看 U 型底與杯柄結構。</span><span class="q-en" style="display:none">After a pullback from a prior high, look for U-bottoms and cup-with-handle outlines.</span></span>
+      <em><span class="q-zh">進結構頁 →</span><span class="q-en" style="display:none">Open structure →</span></em>
+    </a>
+    <a class="island-shortcut" href="/deduction">
+      <b><span class="q-zh">均線扣抵法</span><span class="q-en" style="display:none">Moving-average catch-up</span></b>
+      <span><span class="q-zh">季線、半年線、年線還要幾天追上現價。</span><span class="q-en" style="display:none">How many days until the 50 / 100 / 150-day averages catch the close.</span></span>
+      <em><span class="q-zh">進扣抵頁 →</span><span class="q-en" style="display:none">Open catch-up →</span></em>
+    </a>
+  </div>
 
 </div>
 
@@ -7268,7 +7315,7 @@ if (langBtn){
       const active=document.querySelector('.market-periods button.on');
       drawHomeIndex(Number(active?.dataset.days||756));
     }
-    if (typeof drawLiquidityChart === "function") drawLiquidityChart();
+    if (typeof drawLiquidityChart === "function" && document.querySelector(".liquidity-fold")?.open) drawLiquidityChart();
   };
 }
 
@@ -8028,6 +8075,18 @@ function drawHomeIndex(days=756){
   svg.addEventListener('pointerdown',e=>{e.preventDefault();svg.classList.add('dragging');svg.setPointerCapture(e.pointerId);show(e.clientX)});svg.addEventListener('pointermove',e=>{if(e.pointerType==='mouse'||svg.hasPointerCapture(e.pointerId)){e.preventDefault();show(e.clientX)}});const release=e=>{svg.classList.remove('dragging');if(svg.hasPointerCapture(e.pointerId))svg.releasePointerCapture(e.pointerId)};svg.addEventListener('pointerup',release);svg.addEventListener('pointercancel',release);show(svg.getBoundingClientRect().right-(R/W)*svg.getBoundingClientRect().width);
 }
 document.querySelectorAll('.market-periods button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.market-periods button').forEach(x=>x.classList.toggle('on',x===b));drawHomeIndex(Number(b.dataset.days))});drawHomeIndex();
+(function(){
+  const home=$("#home"),btn=$("#marketViewBtn");if(!home)return;
+  const apply=on=>{
+    home.classList.toggle("market-data-view",on);
+    if(!btn)return;
+    const zh=btn.querySelector(".q-zh"),en=btn.querySelector(".q-en");
+    if(zh)zh.textContent=on?"收合市場狀態":"展開市場狀態";
+    if(en)en.textContent=on?"Hide market status":"Show market status";
+  };
+  apply(new URLSearchParams(location.search).get("view")==="market-data");
+  if(btn)btn.onclick=()=>apply(!home.classList.contains("market-data-view"));
+})();
 
 let liquidityKey='net_liquidity', liquidityDays=1096;
 function drawLiquidityChart(key=liquidityKey,days=liquidityDays){
@@ -8049,8 +8108,9 @@ function drawLiquidityChart(key=liquidityKey,days=liquidityDays){
   const show=clientX=>{const r=svg.getBoundingClientRect();let i=Math.round((((clientX-r.left)/r.width*W)-L)/(W-L-R)*(rows.length-1));i=Math.max(0,Math.min(rows.length-1,i));const gx=x(i),v=vals[i];read.textContent=`${rows[i][0]}　${label}　${money(v)}`;guide.setAttribute('x1',gx);guide.setAttribute('x2',gx);guide.setAttribute('opacity','.45');dot.setAttribute('cx',gx);dot.setAttribute('cy',y(v));dot.setAttribute('opacity','1')};
   svg.addEventListener('pointerdown',e=>{e.preventDefault();svg.setPointerCapture(e.pointerId);show(e.clientX)});svg.addEventListener('pointermove',e=>{if(e.pointerType==='mouse'||svg.hasPointerCapture(e.pointerId))show(e.clientX)});svg.addEventListener('pointerup',e=>{if(svg.hasPointerCapture(e.pointerId))svg.releasePointerCapture(e.pointerId)});show(svg.getBoundingClientRect().right-(R/W)*svg.getBoundingClientRect().width);
 }
-document.querySelectorAll('[data-liquidity-key]').forEach(b=>b.onclick=()=>{liquidityKey=b.dataset.liquidityKey;document.querySelectorAll('[data-liquidity-key]').forEach(x=>x.classList.toggle('on',x===b));drawLiquidityChart()});
-document.querySelectorAll('[data-liquidity-days]').forEach(b=>b.onclick=()=>{liquidityDays=Number(b.dataset.liquidityDays);document.querySelectorAll('[data-liquidity-days]').forEach(x=>x.classList.toggle('on',x===b));drawLiquidityChart()});drawLiquidityChart();
+document.querySelectorAll('[data-liquidity-days]').forEach(b=>b.onclick=()=>{liquidityDays=Number(b.dataset.liquidityDays);document.querySelectorAll('[data-liquidity-days]').forEach(x=>x.classList.toggle('on',x===b));drawLiquidityChart()});
+document.querySelectorAll('.liquidity-fold').forEach(fold=>fold.addEventListener('toggle',()=>{if(fold.open)drawLiquidityChart()}));
+if(document.querySelector('.liquidity-fold')?.open)drawLiquidityChart();
 
 function drawPolicyRateChart(){
   const box=$("#policyRateChart");if(!box)return;let all={};try{all=JSON.parse(box.dataset.series||"{}")}catch(e){}
@@ -10528,7 +10588,8 @@ def _fed_policy_panel_html():
     interest_date = _h.escape(str(interest.get("date") or "—"))
     gdp_date = _h.escape(str(debt_gdp.get("date") or "—"))
     qt_bp = amount(qt_model.get("ten_year_term_premium_bp"), 1, "bp")
-    chart_data = _h.escape(json.dumps(history, ensure_ascii=False, separators=(",", ":")), quote=True)
+    chart_data = _h.escape(json.dumps({"net_liquidity": history.get("net_liquidity") or []},
+                                      ensure_ascii=False, separators=(",", ":")), quote=True)
 
     def numeric(value):
         return value if isinstance(value, (int, float)) else None
@@ -10664,7 +10725,7 @@ def _fed_policy_panel_html():
         "Policy rates anchor short-term dollar funding. Cuts generally support valuation and credit expansion; hikes raise financing costs across the economy.",
         policy_read_zh + " 不能只靠目前高低判斷寬鬆或緊縮，還要比較最近變動與市場預期。下次FOMC：" + fomc_date + "；資料日：" + _h.escape(str(dff.get("date") or "資料尚未取得")) + "。",
         policy_read_en + " The current level alone does not define easing or tightening; the latest move and market expectations also matter. Next FOMC: " + fomc_date + "; data date: " + _h.escape(str(dff.get("date") or "unavailable")) + ".",
-        extra_html=rate_aux + rate_history_html, wide=True)
+        extra_html=rate_aux, wide=True)
 
     rrp_main_zh = zh_usd_millions(rrp_current_million) if rrp_current_million is not None else "資料尚未取得"
     rrp_main_en = ("$" + number(rrp, 1, "B") if rrp_value is not None else "Data unavailable")
@@ -10749,7 +10810,7 @@ def _fed_policy_panel_html():
         "GDP indicates whether activity is expanding, slowing or contracting. One quarter can be noisy, so several quarters should be read together.",
         "資料來源：FRED／BEA A191RL1Q225SBEA，實質GDP相較前期的季變動百分比（季調年率）；公布季：" + _h.escape(str(real_gdp.get("date") or "資料尚未取得")) + "。這不是「債務／GDP」財政比率。",
         "Source: FRED/BEA A191RL1Q225SBEA, real GDP percent change from the preceding period at a seasonally adjusted annual rate; release quarter: " + _h.escape(str(real_gdp.get("date") or "unavailable")) + ". This is not the debt-to-GDP fiscal ratio.",
-        extra_html=real_gdp_chart)
+        extra_html="")
 
     qt_main_zh = ("10年期限溢酬約 +" + qt_bp if qt_bp != "—" else "資料尚未取得")
     qt_main_en = ("10Y term premium about +" + qt_bp if qt_bp != "—" else "Data unavailable")
@@ -10808,7 +10869,7 @@ def _fed_policy_panel_html():
         "The longer rates stay high, the more maturing debt may refinance at higher coupons, potentially raising government interest costs.",
         "FY" + fiscal_year + "累計毛利息是同財政年截至目前的實際累計，不是官方全年預估。年化粗估是依總債務與平均利率計算，不能用Fed利率直接乘總債務；兩種口徑分開標示。資料日：" + interest_date + "。",
         "FY" + fiscal_year + " gross interest is fiscal-year-to-date actual data, not an official full-year forecast. The annualized figure is a separate total-debt-times-average-rate estimate. Data date: " + interest_date + ".",
-        extra_html=interest_aux + fiscal_cost_chart, wide=True)
+        extra_html=interest_aux, wide=True)
 
     share_chart = fiscal_chart("fiscalShareTrend", [
         ("gross_interest", "國債毛利息", "Gross debt interest", "money"),
@@ -10831,7 +10892,7 @@ def _fed_policy_panel_html():
          if numeric(interest_share) is not None else "This ratio measures how much of federal receipts is consumed by gross interest."),
         "公式：" + zh_usd(interest.get("gross_fytd")) + " ÷ " + zh_usd(interest.get("revenue_fytd")) + " ≈ " + percent(interest_share) + "。這是同期毛利息，不是扣除政府利息收入後的淨利息；折線圖以每月已公布的本財年累計資料呈現。",
         "Formula: $" + amount(interest.get("gross_fytd"), 1e12, "T") + " / $" + amount(interest.get("revenue_fytd"), 1e12, "T") + " ≈ " + percent(interest_share) + ". This is gross, not net, interest; the chart uses each released fiscal-year-to-date monthly observation.",
-        extra_html=share_chart)
+        extra_html="")
 
     debt_gdp_aux = detail_rows([
         ("名目 GDP", "Nominal GDP", zh_usd(numeric(nominal_gdp.get("value")) * 1e9) if numeric(nominal_gdp.get("value")) is not None else "資料尚未取得",
@@ -10852,7 +10913,7 @@ def _fed_policy_panel_html():
         "Debt/GDP compares debt with the economy's scale. A rising ratio means debt is growing faster than nominal output; a decline means the reverse.",
         "資料季：" + gdp_date + "。名目GDP取FRED／BEA GDP季資料；這是長期財政比率，不是實質GDP年化季增率，也不是短線買賣訊號。",
         "Data quarter: " + gdp_date + ". Nominal GDP uses FRED/BEA quarterly GDP data; this is a long-run fiscal ratio, not annualized real-GDP growth or a short-term trading signal.",
-        extra_html=debt_gdp_aux + debt_gdp_chart)
+        extra_html=debt_gdp_aux)
 
     liquidity_summary_zh = (("TGA下降正在釋放資金" if numeric(tga_change) is not None and tga_change < 0 else
                              "TGA上升正在吸收資金" if numeric(tga_change) is not None and tga_change > 0 else
@@ -10952,18 +11013,17 @@ def _fed_policy_panel_html():
         + metric_card("bank_reserves", 5, "銀行準備金", "Bank reserves", "WRESBAL", reserves,
                       reserves.get("change_4w"), "最後確認銀行體系真正還剩多少流動性。",
                       "The final check on liquidity actually left in the banking system.")
-        + '</div><div class="liquidity-chart-head"><div><h3>'
+        + '</div></div>')
+    liquidity_chart = (
+        '<details class="fed-policy-fold liquidity-fold"><summary>'
+        + bi("流動性走勢<small>淨流動性・點擊展開</small>",
+             "Liquidity trend<small>Net liquidity · tap to expand</small>")
+        + '</summary><div class="liquidity-chart-wrap"><div class="liquidity-chart-head"><div><h3>'
         + bi("流動性走勢", "Liquidity trend")
         + ' <span class="liquidity-chart-formula">' + bi("（淨流動性＝Fed 總資產（WALCL）− TGA（WDTGAL）− ON RRP（RRPONTSYD））",
                                                             "(Net liquidity = Fed total assets (WALCL) − TGA (WDTGAL) − ON RRP (RRPONTSYD))") + '</span>'
-        + '</h3><p>' + bi("可切換指標與3個月～3年期間；縱軸為兆／億美元", "Switch metrics and periods from 3 months to 3 years; y-axis uses USD")
-        + '</p></div><div class="liquidity-tabs">'
-        + ''.join('<button data-liquidity-key="%s"%s>%s</button>' % (key, ' class="on"' if key == "net_liquidity" else '', bi(zh, en))
-                  for key, zh, en in (("net_liquidity", "淨流動性", "Net liquidity"),
-                                      ("securities", "持有證券", "Securities"),
-                                      ("total_assets", "總資產", "Assets"), ("tga", "TGA", "TGA"),
-                                      ("on_rrp", "RRP", "RRP"), ("bank_reserves", "準備金", "Reserves")))
-        + '</div></div><div class="liquidity-periods">'
+        + '</h3><p>' + bi("只畫淨流動性；期間可切 3 個月～3 年，縱軸為兆／億美元", "Net liquidity only; switch 3 months to 3 years; y-axis uses USD")
+        + '</p></div></div><div class="liquidity-periods">'
         + '<button data-liquidity-days="92">' + bi("3個月", "3M") + '</button>'
         + '<button data-liquidity-days="183">' + bi("6個月", "6M") + '</button>'
         + '<button data-liquidity-days="365">' + bi("1年", "1Y") + '</button>'
@@ -10971,20 +11031,17 @@ def _fed_policy_panel_html():
         + '</div><div id="liquidityChart" data-series="' + chart_data + '"></div><p class="liquidity-formula-note">'
         + bi("淨流動性是常用市場代理值，不是聯準會官方會計項目；不含其他 Fed 負債，不應單獨當作買賣訊號。",
              "Net liquidity is a market proxy, not an official Fed accounting line; it excludes other Fed liabilities and is not a standalone trading signal.")
-        + '</p></div>')
+        + '</p></div></details>')
     return (
-        '<section class="card fed-policy-panel"><div class="fed-policy-head"><div><h2><span class="q-zh">聯準會與財政部動向</span><span class="q-en" style="display:none">Fed &amp; Treasury watch</span></h2>'
-        '<p><span class="q-zh">從資金價格、美元流動性、國債供給到財政承受力；只描述已發生的變化</span><span class="q-en" style="display:none">From the price of money and dollar liquidity to Treasury supply and fiscal capacity; observed changes only</span></p></div><div class="fed-policy-status">'
+        '<section class="card fed-policy-panel"><div class="fed-policy-head"><div><h2><span class="q-zh">聯準會與財政部・流動性</span><span class="q-en" style="display:none">Fed, Treasury &amp; liquidity</span></h2>'
+        '<p><span class="q-zh">美股首頁的流動性島嶼。點開可看淨流動性走勢；政策與財政詳細數據另外收合。</span><span class="q-en" style="display:none">The US-home liquidity island. Expand for the net-liquidity trend; policy and fiscal detail stay folded.</span></p></div><div class="fed-policy-status">'
         + status("利率", "Rates", str(dff.get("date") or ""), expected_lag=1, publish_hour=10)
         + status("資產負債表", "Balance sheet", str(assets.get("date") or ""), True)
         + status("財政部", "Treasury", str(tga.get("date") or ""), expected_lag=1, publish_hour=16) + '</div></div>'
-        + '<details class="fed-policy-fold liquidity-fold" open><summary>'
-        + bi("一、流動性數據<small>5 指標・近三年</small>",
-             "1. Liquidity data<small>5 gauges · three years</small>")
-        + '</summary>' + liquidity_dashboard + '</details>'
+        + liquidity_dashboard + liquidity_chart
         + '<details class="fed-policy-fold policy-detail-fold"><summary>'
-        + bi("二至五、政策與財政詳細數據<small>點擊展開</small>",
-             "2–5. Policy and fiscal detail<small>Tap to expand</small>")
+        + bi("政策與財政詳細數據<small>點擊展開</small>",
+             "Policy and fiscal detail<small>Tap to expand</small>")
         + '</summary>' + detail_sections + '</details>'
         + '<div class="policy-board-meta"><p class="policy-board-limit">'
         + bi("資料截至 " + as_of + "。不同指標的時間尺度不同，任何單一數字都不能預測股市；只有官方明確啟動淨資產購買計畫才標示為QE。",

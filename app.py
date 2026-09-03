@@ -4570,6 +4570,7 @@ def build_home_screen():
     _save_cache("home_screen.json", {
         "n": len(rows),
         "as_of": res.get("as_of", ""),
+        "result": res,
         # 產業速報只描述這批「嚴格多頭＋站上 10 日線」結果的集中度，
         # 並不是完整產業強弱排名；首頁文案必須把口徑說清楚。
         "sectors": sectors,
@@ -7433,6 +7434,7 @@ if ($("#go1")) $("#go1").onclick = () => {
     days: parseInt(val("days"), 10),
     match: val("mode") || "any",
     align: val("align"),
+    home_cache: new URLSearchParams(location.search).get("view") === "results",
     eps_halves: !!($("#epsHalves1") && $("#epsHalves1").checked),
     valuation: !!($("#valuation1") && $("#valuation1").checked),
     structure_history: !!($("#structureHistory1") && $("#structureHistory1").checked)
@@ -12434,6 +12436,15 @@ def api_screen():
     if not _valid_app_token(request.headers.get("X-App-Token")):
         return jsonify(error="連線憑證已過期，請重新整理頁面"), 403
     p = request.get_json(silent=True) or {}
+    if p.get("home_cache"):
+        cached = _load_cache("home_screen.json", None) or {}
+        result = cached.get("result")
+        if result:
+            jid = uuid.uuid4().hex[:12]
+            now = time.time()
+            JOBS[jid] = {"status": "完成", "done": True, "progress": 100,
+                         "result": result, "_created_ts": now, "_ended_ts": now}
+            return jsonify(job=jid)
     params = {
         "universe_n": int(p.get("universe_n") or 150),
         "ma": int(p.get("ma") or 50),

@@ -5904,23 +5904,10 @@ __SEO_HEAD__
   .navitem.active { border-left-color:var(--caramel); color:var(--caramel-2); background:var(--milk); }
   .navitem small { display:block; color:var(--mocha); font-size:12px; margin-top:2px;
              font-weight:400; font-family:var(--font-body); }
-  /* 選股菜單群組（可收合） */
-  .navgroup summary { display:block; padding:15px 22px; font-family:var(--font-head);
-             font-size:16px; color:var(--espresso); cursor:pointer; list-style:none;
-             border-left:3px solid transparent; position:relative; }
-  .navgroup summary::-webkit-details-marker { display:none; }
-  .navgroup summary:hover { background:var(--milk); }
-  .navgroup summary::after { content:"▸"; position:absolute; right:20px; top:16px;
-             color:var(--caramel); font-size:14px; transition:transform .15s; }
-  .navgroup[open] summary::after { transform:rotate(90deg); }
-  .navgroup summary small { display:block; color:var(--mocha); font-size:12px; margin-top:2px;
-             font-weight:400; font-family:var(--font-body); }
-  .navgroup .navitem.sub { padding-left:34px; }
-  .navitem i, .navgroup summary i { font-style:normal; display:inline-block;
+  .navitem i { font-style:normal; display:inline-block;
             width:22px; margin-right:8px; text-align:center; font-size:15px; }
-  .navitem b, .navgroup summary b { font-weight:inherit; font-family:inherit; }
-  .navitem small, .navgroup summary small { padding-left:30px; }
-  .navgroup .navitem.sub small { padding-left:30px; }
+  .navitem b { font-weight:inherit; font-family:inherit; }
+  .navitem small { padding-left:30px; }
   /* 首頁：科斯托蘭尼名言卡 */
   .updnote { width:100%; max-width:920px; margin:0 auto 14px; padding:14px 18px;
             background:var(--foam); border:1px solid var(--grounds); border-radius:10px;
@@ -5933,6 +5920,7 @@ __SEO_HEAD__
   .data-health-line.health-stale{color:#9b3f2d;background:rgba(200,67,53,.10)}
   /* B／C／D 僅替換色票；版面、字級、間距及資訊層級固定共用。 */
   .data-quality-strip{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 14px}.data-quality-chip{display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:5px 10px;border:1px solid var(--grounds);border-radius:999px;background:var(--foam);color:var(--mocha);font-size:12px;font-weight:700;line-height:1.4}.data-quality-chip::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--mocha)}.data-quality-chip.dq-ok::before{background:#278153}.data-quality-chip.dq-pending::before{background:#b8872e}.data-quality-chip.dq-warn::before{background:#d2782c}.data-quality-chip.dq-danger{border-color:#c84335;background:rgba(200,67,53,.13);color:#9b3026;font-weight:900}.data-quality-chip.dq-danger::before{background:#c84335;box-shadow:0 0 0 4px rgba(200,67,53,.14)}
+  .page>.data-quality-strip{margin:18px 0 0;padding-top:14px;border-top:1px solid var(--grounds)}
   .reading-card{display:grid;gap:0;margin-top:14px;border:1px solid var(--grounds);border-radius:13px;overflow:hidden;background:var(--foam)}.reading-row{display:grid;grid-template-columns:68px 1fr;gap:12px;padding:10px 12px;font-size:13px;line-height:1.65;color:var(--mocha)}.reading-row+.reading-row{border-top:1px solid var(--grounds)}.reading-row b{color:var(--espresso);font-family:var(--font-head)}
   .ind-change-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}.ind-change{padding:9px;border:1px solid var(--grounds);border-radius:10px;background:var(--milk);font-size:12px}.ind-change b{display:block;margin-top:3px;font-family:var(--font-num)}.ind-stock-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:10px}.ind-stock{display:grid;grid-template-columns:1fr auto;gap:6px 8px;padding:8px 9px;border:1px solid var(--grounds);border-radius:9px;color:inherit;text-decoration:none;font-size:12px;background:var(--foam)}
   .ind-stock-main{min-width:0}.ind-stock-reason{grid-column:1/-1;padding-top:5px;border-top:1px solid var(--grounds);color:var(--mocha);font-size:11px;line-height:1.55}.ind-overlaps{margin:12px 0;padding:10px 12px;border:1px solid var(--grounds);border-radius:10px;background:var(--milk)}.ind-overlaps>b{display:block;margin-bottom:7px;font-size:12px}.ind-overlap-list{display:flex;flex-wrap:wrap;gap:6px}.ind-overlap-chip{appearance:none;border:1px solid var(--grounds);border-radius:999px;padding:5px 9px;background:var(--foam);color:var(--espresso);font:700 11px var(--font-num);cursor:pointer}.ind-overlap-chip:hover{border-color:var(--caramel)}.ind-overlap-chip small{color:var(--mocha);font-weight:500}.ind-structure-badge,.ind-relevance-badge{display:inline-block;margin-left:5px;padding:2px 6px;border-radius:999px;font-size:10px;font-weight:700;vertical-align:1px}.ind-relevance-badge{background:rgba(180,103,42,.12);color:var(--mocha)}.ind-structure-badge.matched{background:rgba(61,139,103,.14);color:#2f7657}.ind-structure-badge.near{background:rgba(211,154,44,.17);color:#8a6200}.ind-structure-badge.developing{background:rgba(180,103,42,.13);color:#9a5524}.ind-structure-empty{padding:18px;text-align:center;color:var(--mocha)}
@@ -6187,6 +6175,28 @@ __SEO_HEAD__
   /* App 裡隱藏跨網域的台股入口 —— 見 <head> 的 in-app 偵測 */
   html.in-app #mktBtn { display:none; }
   @media(max-width:420px){ #mktBtn, #topBtns #langBtn { padding:0 11px; font-size:12.5px; } }
+  /* 本日菜單：與台股站共用同一套兩階層、字體、色彩與間距。 */
+  #menuBtn{background:radial-gradient(circle at 30% 30%,#4A3A2A,#24362C);box-shadow:0 10px 24px rgba(36,54,44,.18)}
+  #sidebar{top:16px;bottom:16px;left:-350px;width:320px;height:auto;padding:16px;background:var(--foam);border:0;border-radius:28px;box-shadow:var(--shadow);z-index:150}
+  #sidebar.open{left:16px}
+  #overlay{z-index:140;background:rgba(36,54,44,.28);backdrop-filter:blur(2px)}
+  .menu-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px;padding:2px 4px 8px}
+  #sidebar .sbTitle{position:static;font:800 21px var(--font-brand);color:var(--espresso)}
+  .menu-head p{margin:6px 0 0;color:var(--mocha);font:500 12px/1.5 var(--font-body)}
+  #menuCloseBtn{width:34px;height:34px;flex:0 0 34px;border:0;border-radius:50%;background:var(--milk);color:var(--espresso);font-size:20px;cursor:pointer}
+  .nav-section{padding:14px 8px 5px;color:var(--mocha);font:800 11px var(--font-body);letter-spacing:.14em;text-transform:none}
+  .navitem,.menu-action{display:block;width:100%;padding:10px 8px;border:0;border-left:0;border-radius:12px;background:transparent;color:var(--espresso);text-align:left;text-decoration:none;font:inherit}
+  .navitem:hover,.menu-action:hover{background:#F4EAD8}
+  html[data-theme="c"] .navitem:hover,html[data-theme="c"] .menu-action:hover{background:#2b4249;color:#f5ead7}
+  .navitem.active{background:#24362C;color:#F7F1E6;border-left:0}
+  .navitem.active small{color:#F7F1E6;opacity:.78}
+  .navitem i{width:28px;margin-right:10px;vertical-align:top;font-size:16px}
+  .navitem b{font:800 14px var(--font-body)}
+  .navitem small{padding-left:38px;margin-top:2px;color:var(--mocha);font:400 11px/1.4 var(--font-body)}
+  @media(max-width:760px){
+    #sidebar{top:12px;bottom:12px;left:-110%;width:calc(100% - 24px);border-radius:24px}
+    #sidebar.open{left:12px}
+  }
   .site-footer { max-width:1180px; margin:0 auto; padding:0 18px calc(28px + env(safe-area-inset-bottom)); text-align:center;
                  color:var(--mocha); font-size:12px; line-height:1.8; }
   .site-footer a { color:var(--caramel-2); text-decoration:none; font-weight:700; }
@@ -6222,38 +6232,31 @@ __SEO_HEAD__
 </div>
 
 <nav id="sidebar">
-  <div class="sbTitle">☕ <span data-i18n="brand.name">美股咖啡館</span></div>
-  <a class="navitem active" data-page="home" href="/"><i>☕</i><b data-i18n="nav.home">菜單首頁</b><small data-i18n="nav.home.sub">今天適合出手嗎</small></a>
-  <div class="nav-section"><span class="q-zh">研究市場</span><span class="q-en" style="display:none">Research</span></div>
-  <details class="navgroup">
-    <summary><i>📋</i><b><span class="q-zh">選股與產業</span><span class="q-en" style="display:none">Stocks & sectors</span></b><small><span class="q-zh">強勢股・產業輪動・拉回買點</span><span class="q-en" style="display:none">Momentum, rotation and pullbacks</span></small></summary>
-    <a class="navitem sub" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
-    <a class="navitem sub" data-page="pind" href="/industries"><i>🧱</i><b data-i18n="nav.industry">產業分析</b><small data-i18n="nav.industry.sub">動能擴散・產業領先股</small></a>
-    <a class="navitem sub" data-page="p3" href="/pullback"><i>⭐</i><b data-i18n="p3.title">拉回找買點</b><small data-i18n="nav.pull.sub">收盤回到均線±3%</small></a>
-    <a class="navitem sub" data-page="pstructure" href="/breakout-structure"><i>🏗️</i><b data-i18n="nav.structure">飆股結構回測</b><small data-i18n="nav.structure.sub">6個月～5年・U型底與杯柄</small></a>
-    <a class="navitem sub" data-page="pgrow" href="/growth"><i>🌱</i><b data-i18n="grow.title">長期成長股列表</b><small data-i18n="nav.grow.sub">十年累計・年化報酬</small></a>
-  </details>
-  <details class="navgroup">
-    <summary><i>🌤️</i><b><span class="q-zh">市場工具</span><span class="q-en" style="display:none">Market tools</span></b><small><span class="q-zh">總經・正2・均線位置</span><span class="q-en" style="display:none">Macro, leverage and moving averages</span></small></summary>
-    <a class="navitem sub" data-page="pmac" href="/macro"><i>🏦</i><b data-i18n="pmac.title">利率與購買力</b><small data-i18n="nav.macro.sub">美債 2Y・10Y・CPI</small></a>
-    <a class="navitem sub" data-page="p11" href="/consolidation"><i>🧭</i><b data-i18n="lev.title">正2 逐月績效</b><small data-i18n="nav.lev.sub">QLD・實際倍數</small></a>
-    <a class="navitem sub" data-page="p10" href="/deduction"><i>📐</i><b data-i18n="nav.deduct">均線扣抵法</b><small data-i18n="nav.deduct.sub">50／100／150MA 何時追上</small></a>
-  </details>
-  <div class="nav-section"><span class="q-zh">我的工具</span><span class="q-en" style="display:none">My tools</span></div>
-  <details class="navgroup">
-    <summary><i>⭐</i><b data-i18n="nav.mine">我的自選股</b><small data-i18n="nav.mine.sub">績效・同期比較・風控・提醒</small></summary>
-    <a class="navitem sub" data-page="p7" href="/twr"><i>📈</i><b data-i18n="p7.title">我的績效</b><small data-i18n="nav.twr.sub">TWR 報酬率試算</small></a>
-    <a class="navitem sub" data-page="p12" href="/comparison"><i>⚖️</i><b data-i18n="p12.title">同期比較</b><small data-i18n="nav.compare.sub">如果當初買了別檔</small></a>
-    <a class="navitem sub" data-page="p8" href="/risk"><i>🛡️</i><b data-i18n="p8.title">風控管理</b><small data-i18n="nav.risk.sub">ATR・波動率・趨勢・Beta</small></a>
-    <a class="navitem sub" data-page="p4" href="/alerts"><i>🔔</i><b data-i18n="p4.title">推播通知</b><small data-i18n="nav.alert.sub">收盤到價提醒（測試中）</small></a>
-  </details>
-  <div class="nav-section"><span class="q-zh">學習與其他</span><span class="q-en" style="display:none">Learn & more</span></div>
+  <header class="menu-head"><div><div class="sbTitle"><span class="q-zh">本日菜單</span><span class="q-en" style="display:none">Today's Menu</span></div><p><span class="q-zh">全部功能從這裡進出。首頁只是開胃菜。</span><span class="q-en" style="display:none">All tools live here. The home page is the daily starter.</span></p></div><button id="menuCloseBtn" type="button" aria-label="關閉選單">×</button></header>
+  <div class="nav-section"><span class="q-zh">今日營業</span><span class="q-en" style="display:none">Today</span></div>
+  <a class="navitem active" data-page="home" href="/"><i>☀️</i><b data-i18n="nav.home">今日市場</b><small data-i18n="nav.home.sub">今天適合出手嗎</small></a>
+  <a class="navitem" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
+  <a class="navitem" data-page="pind" href="/industries"><i>🧱</i><b data-i18n="nav.industry">產業分析</b><small data-i18n="nav.industry.sub">動能擴散・產業領先股</small></a>
+  <a class="navitem" data-page="p4" href="/alerts"><i>🔔</i><b data-i18n="p4.title">到價提醒</b><small data-i18n="nav.alert.sub">收盤到價提醒（測試中）</small></a>
+  <div class="nav-section"><span class="q-zh">找買點</span><span class="q-en" style="display:none">Entries</span></div>
+  <a class="navitem" data-page="pstructure" href="/breakout-structure"><i>🏗️</i><b data-i18n="nav.structure">飆股結構</b><small data-i18n="nav.structure.sub">6個月～5年・U型底與杯柄</small></a>
+  <a class="navitem" data-page="p3" href="/pullback"><i>⭐</i><b data-i18n="p3.title">拉回篩選</b><small data-i18n="nav.pull.sub">收盤回到均線 ±3%</small></a>
+  <a class="navitem" data-page="p10" href="/deduction"><i>📐</i><b data-i18n="nav.deduct">均線扣抵法</b><small data-i18n="nav.deduct.sub">50／100／150MA 何時追上</small></a>
+  <div class="nav-section"><span class="q-zh">盤勢與錢</span><span class="q-en" style="display:none">Markets & money</span></div>
+  <a class="navitem" data-page="pmac" href="/macro"><i>🏦</i><b data-i18n="pmac.title">利率與購買力</b><small data-i18n="nav.macro.sub">美債 2Y・10Y・CPI</small></a>
+  <a class="navitem" data-page="p11" href="/consolidation"><i>🧭</i><b data-i18n="lev.title">正 2 逐月績效</b><small data-i18n="nav.lev.sub">QLD・實際倍數</small></a>
+  <a class="navitem" data-page="p8" href="/risk"><i>🛡️</i><b data-i18n="p8.title">風控管理</b><small data-i18n="nav.risk.sub">ATR・波動率・趨勢・Beta</small></a>
+  <a class="navitem" data-page="pgrow" href="/growth"><i>🌱</i><b data-i18n="grow.title">長期成長股</b><small data-i18n="nav.grow.sub">十年累計・年化報酬</small></a>
+  <a class="navitem" data-page="p7" href="/twr"><i>📈</i><b data-i18n="p7.title">我的績效</b><small data-i18n="nav.twr.sub">TWR 報酬率試算</small></a>
+  <a class="navitem" data-page="p12" href="/comparison"><i>⚖️</i><b data-i18n="p12.title">同期比較</b><small data-i18n="nav.compare.sub">如果當初買了別檔</small></a>
+  <div class="nav-section"><span class="q-zh">專業工具</span><span class="q-en" style="display:none">Pro tools</span></div>
+  <a class="navitem" data-page="p5" href="/pro"><i>🚀</i><b data-i18n="nav.proHigh">創新高</b><small data-i18n="nav.proHigh.sub">近期強勢突破股票</small></a>
+  <a class="navitem" data-page="p9" href="/pro/rs"><i>🏆</i><b data-i18n="nav.proRs">RS 指數</b><small data-i18n="nav.proRs.sub">市場相對強弱排名</small></a>
+  <div class="nav-section"><span class="q-zh">外場</span><span class="q-en" style="display:none">More</span></div>
+  <a class="navitem" href="__TW_URL__"><i>🇹🇼</i><b><span class="q-zh">台股咖啡館</span><span class="q-en" style="display:none">Taiwan Stock Café</span></b><small><span class="q-zh">同一套菜單的另一間店</span><span class="q-en" style="display:none">The Taiwan-market sister café</span></small></a>
   <a class="navitem" data-page="pm" href="/articles"><i>📚</i><b data-i18n="pm.title">文章區</b><small data-i18n="pm.sub">美股大盤與動量交易教學</small></a>
-  <details class="navgroup">
-    <summary><i>☕</i><b data-i18n="nav.pro">升級專業版</b><small data-i18n="nav.pro.sub">創新高・RS 指數</small></summary>
-    <a class="navitem sub" data-page="p5" href="/pro"><i>🚀</i><b data-i18n="nav.proHigh">創新高</b><small data-i18n="nav.proHigh.sub">近期強勢突破股票</small></a>
-    <a class="navitem sub" data-page="p9" href="/pro/rs"><i>🏆</i><b data-i18n="nav.proRs">RS 指數</b><small data-i18n="nav.proRs.sub">市場相對強弱排名</small></a>
-  </details>
+  <button class="navitem menu-action" id="menuThemeBtn" type="button"><i>☕</i><b><span class="q-zh">外觀</span><span class="q-en" style="display:none">Theme</span></b><small><span class="q-zh">切換店面配色</span><span class="q-en" style="display:none">Change the café palette</span></small></button>
+  <button class="navitem menu-action" id="menuLangBtn" type="button"><i>EN</i><b>Language</b><small><span class="q-zh">中文 / English</span><span class="q-en" style="display:none">English / 中文</span></small></button>
 </nav>
 
 <div class="wrap">
@@ -6272,7 +6275,6 @@ __SEO_HEAD__
 
   <!-- ============ 今日市場（版面照台股版）============
        結論秒開、細節手動：
-         · __PHASE_BAR__ 只讀快取、零成本，一進來就看得到答案
          · 「大盤詳細數據」要展開才去打 /api/breadth，
            不讓每個訪客都觸發後端工作（台股版踩過，見台股 5.4） -->
   <div class="home-dashboard">
@@ -7274,6 +7276,11 @@ if (langBtn){
 const sidebar = $("#sidebar"), overlay = $("#overlay");
 $("#menuBtn").onclick = () => { sidebar.classList.toggle("open"); overlay.classList.toggle("show"); };
 overlay.onclick = () => { sidebar.classList.remove("open"); overlay.classList.remove("show"); };
+if ($("#menuCloseBtn")) $("#menuCloseBtn").onclick = () => {
+  sidebar.classList.remove("open"); overlay.classList.remove("show");
+};
+if ($("#menuThemeBtn")) $("#menuThemeBtn").addEventListener("click", () => $("#themeBtn")?.click());
+if ($("#menuLangBtn")) $("#menuLangBtn").addEventListener("click", () => $("#langBtn")?.click());
 document.querySelectorAll(".navitem").forEach(i => i.onclick = () => {
   sidebar.classList.remove("open"); overlay.classList.remove("show");
 });
@@ -9539,7 +9546,7 @@ async function loadMacro(cachedData=null){
 let DATA_HEALTH=null;
 const PAGE_DATA_SOURCES={home:['market_returns','market_breadth','nasdaq_index','fed_policy','treasury_actions'],pind:['market_breadth'],pmac:['us_yields','jp_yields'],p1:['market_returns'],p3:['market_returns'],pstructure:['market_returns'],pgrow:['market_returns'],p11:['nasdaq_index'],p7:['nasdaq_index'],p8:['market_returns'],p12:['market_returns'],p10:['nasdaq_index'],p4:['market_returns'],p5:['market_returns'],p9:['market_returns']};
 function qualityChip(item){const cls={ok:'dq-ok',pending:'dq-pending',warn:'dq-warn',danger:'dq-danger'}[item.severity]||'dq-danger';const zh=`${item.label_zh||'資料'}：${item.status_zh||'更新失敗，沿用舊資料'}`;const en=`${item.label_en||'Data'}: ${item.status_en||'Update failed; using older data'}`;return `<span class="data-quality-chip ${cls}" title="${item.actual||''}"><span class="q-zh"${LANG==='zh'?'':' style="display:none"'}>${zh}</span><span class="q-en"${LANG==='en'?'':' style="display:none"'}>${en}</span></span>`}
-function renderDataQuality(){if(!DATA_HEALTH)return;Object.entries(PAGE_DATA_SOURCES).forEach(([pid,keys])=>{const page=document.getElementById(pid);if(!page)return;let strip=page.querySelector(':scope > .data-quality-strip');if(!strip){strip=document.createElement('div');strip.className='data-quality-strip';const title=page.querySelector(':scope > .ptitle');title?title.insertAdjacentElement('afterend',strip):page.prepend(strip)}strip.innerHTML=keys.map(k=>qualityChip(DATA_HEALTH.items[k]||{})).join('')})}
+function renderDataQuality(){if(!DATA_HEALTH)return;Object.entries(PAGE_DATA_SOURCES).forEach(([pid,keys])=>{const page=document.getElementById(pid);if(!page)return;let strip=page.querySelector(':scope > .data-quality-strip');if(!strip){strip=document.createElement('div');strip.className='data-quality-strip'}page.append(strip);strip.innerHTML=keys.map(k=>qualityChip(DATA_HEALTH.items[k]||{})).join('')})}
 async function loadDataQuality(){try{DATA_HEALTH=await readJson(await fetch('/api/data-health'));renderDataQuality()}catch(e){DATA_HEALTH={items:{market_returns:{severity:'danger',status_zh:'更新失敗，沿用舊資料',status_en:'Update failed; using older data',label_zh:'資料',label_en:'Data'}}};Object.keys(PAGE_DATA_SOURCES).forEach(k=>PAGE_DATA_SOURCES[k]=['market_returns']);renderDataQuality()}}
 loadDataQuality();
 
@@ -11297,7 +11304,6 @@ def _render(slug=None):
     html = html.replace("__START_PAGE__", start_page, 1)
     html = html.replace("__TW_URL__", TW_URL)
     html = html.replace("__HOME_MARKET_DASHBOARD__", _home_market_dashboard_html())
-    html = html.replace("__PHASE_BAR__", _phase_banner_html())
     html = html.replace("__UPDATE_NOTE__", _update_note_html())
     html = html.replace("__FED_POLICY_PANEL__", _fed_policy_panel_html())
     html = html.replace("__HOME_SCREEN__", _home_screen_html())
@@ -11310,15 +11316,6 @@ def _render(slug=None):
     #    （applyLang 是純前端，不會回頭跟伺服器要資料）。
     html = html.replace("__ART_LINKS__",
                         _art_links_html("zh") + _art_links_html("en"))
-    html = html.replace("__QUOTES_HTML__", _quotes_html())
-    import html as _hq
-    _src = "<br>".join(_hq.escape(x) for x in QUOTE_SOURCES)
-    _src_en = "<br>".join(_hq.escape(x) for x in (QUOTE_SOURCES_EN or QUOTE_SOURCES))
-    html = html.replace(
-        "__QUOTE_SRC__",
-        '<span class="q-zh">' + (_src + "<br>" if _src else "") + '每日更新兩則輪替</span>'
-        '<span class="q-en" style="display:none">'
-        + (_src_en + "<br>" if _src_en else "") + 'Two quotes daily, on rotation</span>')
     html = html.replace("__SEO_HEAD__", _seo_head(slug, lang), 1)
     # ⚠️ 這兩個是 JS 字串常值，必須跳脫雙引號，否則標題含 " 就會把 <script> 打斷。
     html = html.replace("__TITLE_ZH__", title_zh.replace('"', '\\"'), 1)

@@ -5940,6 +5940,12 @@ __SEO_HEAD__
   /* 首頁新版市場儀表板：季線／半年線／年線使用 50／100／150MA。 */
   #home{max-width:920px;margin:0 auto}
   .home-dashboard{display:grid;gap:16px}.market-now{display:grid;gap:14px;margin-bottom:18px}
+  /* 首頁閱讀順序：指數位置 → 今日觀察 → 市場狀態 → 回顧 → 寬度 → 總經。 */
+  .home-dashboard .market-now,.home-dashboard .market-now-grid{display:contents}
+  .home-dashboard .market-chart-card{order:1}.home-dashboard .home-action-panel{order:2}
+  .home-dashboard .market-now-hero{order:3}.home-dashboard .market-returns-card{order:4}
+  .home-dashboard .market-breadth-card{order:5}.home-dashboard .fed-policy-panel{order:6}
+  .market-return-quartiles{display:none}
   .market-now-hero,.market-data-card{background:var(--foam);border:1px solid var(--grounds);border-radius:16px;box-shadow:var(--shadow)}
   .market-now-hero{padding:22px 28px;background:linear-gradient(135deg,#fffdf9,#f8f0e4);border-radius:18px}
   .market-now-title{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.market-now-title h1{margin:0;font:900 32px var(--font-head);text-align:left}.market-now-title h1::after{display:none}
@@ -6268,8 +6274,6 @@ __SEO_HEAD__
   <div class="home-dashboard">
 __HOME_MARKET_DASHBOARD__
 
-__UPDATE_NOTE__
-
 __FED_POLICY_PANEL__
 
   <section class="home-action-panel"><div class="qhead"><span class="q-zh">今日觀察 · ACTIONS</span><span class="q-en" style="display:none">WHAT TO EXPLORE</span></div>
@@ -6283,18 +6287,6 @@ __FED_POLICY_PANEL__
   </div>
   </section></div>
 
-  <!-- ⚠️ 這裡原本是「找強勢股／拉回找買點」兩張 menu-item 卡。
-       2026-08-07 移除 —— 左側選單已經有同樣的入口，首頁再放一次只是重複，
-       換成名言卡（與台股版共用同一份 quotes/）。 -->
-  <div class="qhead" data-i18n="home.qhead">今日供應 · QUOTES</div>
-  __PHASE_BAR__
-  <div id="qbox">
-__QUOTES_HTML__
-  </div>
-  <div class="qmore-wrap">
-    <button class="qmore" id="qmoreBtn" onclick="drawQuote()" data-i18n="home.more">再抽一張 ☕</button>
-  </div>
-  <div class="qsrc">__QUOTE_SRC__</div>
 </div>
 
 <!-- ============ 找強勢股 ============ -->
@@ -11098,26 +11090,11 @@ def _home_market_dashboard_html():
     if not r20:
         zh_badge, en_badge = "資料整理中", "Updating"
         zh, en = "近期選股資料正在更新。", "Recent stock-selection data is updating."
-    elif med20 >= 7 and win20 >= 65 and med60 >= 5:
-        zh_badge, en_badge = "明顯偏強", "Clearly strong"
-        zh, en = "多數個股參與上漲，20日漲幅明顯，60日趨勢也維持正向。", "Participation is broad, the 20-session gain is meaningful and the 60-session trend remains positive."
-    elif med20 >= 3 and win20 >= 55 and med60 >= 0:
-        zh_badge, en_badge = "溫和偏強", "Moderately strong"
-        zh, en = "上漲家數過半，個股中位漲幅已有強度，近期選股環境偏有利。", "More than half advanced and the median gain has meaningful strength."
-    elif med20 <= -3 and win20 < 45:
-        zh_badge, en_badge = "明顯偏弱", "Clearly weak"
-        zh, en = "多數個股下跌且中位報酬明顯為負，近期選股難度高。", "Most stocks fell and the median return is clearly negative."
-    elif -3 < med20 < 3:
-        zh_badge, en_badge = "盤整偏弱", "Weak consolidation"
-        zh, en = "個股20日中位報酬不足3%，整體漲幅有限，行情以區間整理為主。", "The 20-session median return is below 3%, so gains are limited and the market is range-bound."
     else:
-        zh_badge, en_badge = "盤勢整理", "Consolidating"
-        zh, en = "報酬強弱與上漲家數沒有同步，類股表現分化。", "Return strength and participation disagree, indicating a divided market."
-    if r20 and long_breadth is not None:
-        if long_breadth >= 60:
-            zh += " 150／200日線寬度偏高，市場位階較高。"; en += " 150/200-day breadth indicates a higher market position."
-        elif long_breadth <= 40:
-            zh += " 150／200日線寬度偏低，市場仍處低位階。"; en += " 150/200-day breadth remains at a lower market position."
+        zh_badge = "20日中位報酬為正" if med20 >= 0 else "20日中位報酬為負"
+        en_badge = "20-session median is positive" if med20 >= 0 else "20-session median is negative"
+        zh = "過去 20 個交易日，市值前 300 檔中位報酬 %+.2f%%，上漲家數 %.1f%%。" % (med20, win20)
+        en = "Over the past 20 sessions, the current top 300 median return was %+.2f%% and %.1f%% advanced." % (med20, win20)
 
     def ret_row(days):
         r = by_day.get(days)

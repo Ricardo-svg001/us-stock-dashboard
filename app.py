@@ -4646,7 +4646,7 @@ def _home_screen_html():
     #    本來就可能一檔都沒有 —— 直接顯示「0 檔」會像壞掉，所以換一句話講清楚。
     if n == 0:
         return (
-            '<a class="hs-box" href="/screener">'
+            '<a class="hs-box" href="/screener?view=results">'
             '<span class="hs-head">'
             '<b class="q-zh">強勢股篩選：今天沒有符合條件</b>'
             '<b class="q-en" style="display:none">Momentum screen: no matches today</b>'
@@ -4664,7 +4664,7 @@ def _home_screen_html():
     names_en = ", ".join(_h.escape("%s" % r["symbol"]) for r in d.get("top", []))
     more_zh = " 等" if n > len(d.get("top", [])) else ""
     return (
-        '<a class="hs-box" href="/screener">'
+        '<a class="hs-box" href="/screener?view=results">'
         '<span class="hs-head">'
         '<b class="q-zh">強勢股篩選</b>'
         '<b class="q-en" style="display:none">Momentum screen</b>'
@@ -5842,6 +5842,9 @@ __SEO_HEAD__
   .screen-tools button:hover { border-color:var(--caramel); color:var(--caramel-2); }
   .screen-tools .export { background:var(--caramel); color:#fff; border-color:var(--caramel); }
   .screen-tools-status { flex-basis:100%; min-height:16px; color:var(--mocha); font-size:12px; }
+  /* 首頁入口直接開啟預設強勢股結果；一般 /screener 保留條件工作台。 */
+  #p1.results-only > .pgintro,#p1.results-only > .card,#p1.results-only > .screen-tools,
+  #p1.results-only > .gobtn{display:none!important}
   .sort-th { cursor:pointer; user-select:none; text-decoration:underline dotted; text-underline-offset:3px; }
   .momentum-badge { display:inline-flex; align-items:center; padding:3px 8px; border:1px solid currentColor;
            border-radius:999px; font-size:11px; font-weight:800; line-height:1.25; white-space:nowrap; }
@@ -7450,6 +7453,11 @@ if ($("#go1")) $("#go1").onclick = () => {
   }).catch(e => { brewClose(); $("#go1").disabled = false;
     $("#status1").textContent = t("st.conn","連線失敗：") + e; });
 };
+
+if (new URLSearchParams(location.search).get("view") === "results") {
+  $("#p1")?.classList.add("results-only");
+  setTimeout(() => $("#go1")?.click(), 0);
+}
 
 function poll(id){
   fetch("/api/job/" + id).then(r => r.json()).then(j => {

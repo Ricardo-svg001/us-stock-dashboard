@@ -38,10 +38,14 @@ class HomeMobileOrderTests(unittest.TestCase):
         self.assertIn("納斯達克大盤", self.html)
         self.assertIn("產業速報", self.html)
         self.assertIn("近期選股環境", self.html)
-        self.assertRegex(self.html, r"\.island-shortcut b\{font:800 22px")
-        self.assertRegex(self.html, r"\.hs-head b \{[^}]*font-size:20px[^}]*font-weight:800")
-        self.assertRegex(self.html, r"\.market-data-card h2\{[^}]*font:800 20px")
-        self.assertRegex(self.html, r"\.home-industry-head h2\{[^}]*font:800 20px")
+        self.assertRegex(self.html, r"\.island-shortcut>b\{display:block;font:800 22px")
+        self.assertRegex(self.html, r"\.hs-head b \{[^}]*font-size:22px[^}]*font-weight:800")
+        self.assertRegex(self.html, r"\.market-data-card h2\{[^}]*font:800 22px")
+        self.assertRegex(self.html, r"\.home-industry-head h2\{[^}]*font:800 22px")
+        self.assertRegex(self.html, r"\.fed-policy-head h2\{[^}]*font:800 22px")
+        self.assertIn(".island-shortcut>span{", self.html)
+        self.assertIn("hs-meta", self.html)
+        self.assertNotIn("強勢股篩選：今天沒有符合條件", self.html)
 
 
 if __name__ == "__main__":

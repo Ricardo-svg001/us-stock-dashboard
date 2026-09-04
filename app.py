@@ -5973,7 +5973,7 @@ __SEO_HEAD__
   .home-dashboard .market-now-hero,
   .home-dashboard .market-returns-card,
   .home-dashboard .market-breadth-card,
-  .home-dashboard .fed-policy-panel{grid-column:1/-1}
+  .home-dashboard .fed-policy-panel{grid-column:1/-1;width:100%;max-width:none;min-width:0;margin-left:0;margin-right:0}
   .home-dashboard .market-now,.home-dashboard .market-now-grid{display:contents}
   #home:not(.market-data-view) .market-now-hero,
   #home:not(.market-data-view) .market-breadth-card{display:none!important}
@@ -6448,10 +6448,10 @@ __FED_POLICY_PANEL__
       <span><span class="q-zh">前高回落後重新靠近前高；查看 U 型底與杯柄結構。</span><span class="q-en" style="display:none">After a pullback from a prior high, look for U-bottoms and cup-with-handle outlines.</span></span>
       <em><span class="q-zh">進結構頁 →</span><span class="q-en" style="display:none">Open structure →</span></em>
     </a>
-    <a class="island-shortcut" href="/deduction">
-      <b><span class="q-zh">均線扣抵法</span><span class="q-en" style="display:none">Moving-average catch-up</span></b>
-      <span><span class="q-zh">季線、半年線、年線還要幾天追上現價。</span><span class="q-en" style="display:none">How many days until the 50 / 100 / 150-day averages catch the close.</span></span>
-      <em><span class="q-zh">進扣抵頁 →</span><span class="q-en" style="display:none">Open catch-up →</span></em>
+    <a class="island-shortcut" href="/pro/rs">
+      <b><span class="q-zh">RS 指數</span><span class="q-en" style="display:none">RS Ranking</span></b>
+      <span><span class="q-zh">比較市場相對強弱，快速查看高 RS 排名股票。</span><span class="q-en" style="display:none">Compare relative strength and find the market's highest-RS stocks.</span></span>
+      <em><span class="q-zh">進 RS 頁 →</span><span class="q-en" style="display:none">Open RS →</span></em>
     </a>
   </div>
 

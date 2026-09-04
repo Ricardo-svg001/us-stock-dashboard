@@ -6042,13 +6042,45 @@ __SEO_HEAD__
   .policy-board{margin:0;padding:0;list-style:none;border-top:1px solid var(--grounds)}.policy-board li{display:grid;grid-template-columns:130px minmax(0,.9fr) minmax(0,1.3fr);align-items:center;gap:14px;padding:12px 2px;border-bottom:1px dashed var(--grounds)}.policy-board li.policy-board-section{display:block;padding:15px 2px 7px;border-bottom:1px solid var(--grounds);font-family:var(--font-head);font-weight:800;color:var(--caramel-2)}.policy-board-section small{margin-left:8px;font-family:var(--font-num);font-weight:500;color:var(--mocha)}.policy-board-label{font-weight:800;color:var(--espresso)}.policy-board-label small{display:block;margin-top:2px;font-size:10px;font-weight:500;color:var(--mocha)}.policy-board-data{font:700 13px/1.55 var(--font-num);color:var(--espresso)}.policy-board-read{font-size:12px;line-height:1.6;color:var(--mocha)}.policy-board-read b{color:var(--caramel-2)}.policy-board-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:11px}.policy-board-limit{margin:0;max-width:650px;color:var(--mocha);font-size:10.5px;line-height:1.55}
   @media(max-width:900px){.liquidity-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.liquidity-metric:last-child{grid-column:1/-1}.liquidity-chart-head{align-items:flex-start;flex-direction:column}.liquidity-tabs{justify-content:flex-start}}
   @media(max-width:560px){.fed-policy-panel{padding:17px 16px}.fed-policy-head{display:block}.fed-policy-status{justify-content:flex-start;margin-top:10px}.fed-policy-grid{grid-template-columns:1fr}.policy-kpis{grid-template-columns:1fr 1fr}.fed-policy-fold>summary{padding:13px 12px}.fed-policy-fold>summary small{display:block;margin:3px 0 0}.liquidity-dashboard{padding:0 10px 11px}.liquidity-hero{align-items:flex-start;flex-direction:column;padding:14px}.liquidity-hero h3{font-size:24px}.liquidity-metrics{grid-template-columns:1fr 1fr}.liquidity-metric{padding:10px}.liquidity-metric:last-child{grid-column:1/-1}.liquidity-tabs{display:grid;grid-template-columns:repeat(3,1fr);width:100%}.liquidity-tabs button{padding:7px 4px}#liquidityChart{min-height:0}.policy-indicator-board{padding:0 10px 12px}.indicator-section{padding:18px 0}.indicator-section-head{gap:9px}.indicator-section-no{flex-basis:34px;height:34px}.indicator-section-head h3{font-size:19px}.indicator-summary{display:block;padding:10px 12px}.indicator-summary>b{display:block;margin-bottom:3px}.indicator-card-grid{grid-template-columns:1fr;gap:10px}.indicator-card,.indicator-card-wide{grid-column:auto;padding:17px 16px}.indicator-card h4{font-size:15px}.indicator-value{font-size:24px}.indicator-explain{font-size:12px;line-height:1.6}.indicator-detail-rows{grid-template-columns:1fr 1fr}.indicator-direction{max-width:100%;box-sizing:border-box}.policy-board li{grid-template-columns:1fr;gap:3px;padding:12px 0}.policy-board-label{color:var(--caramel-2)}.policy-board-data{font-size:13px}.policy-board-read{font-size:11.5px}}
+  @media(min-width:1024px){
+    /* 桌機 100% 直接呈現原本瀏覽器 125% 的閱讀比例；平板與手機不套用。
+       基準值改成 125%：瀏覽器縮放顯示 100% 時，畫面等同過去的 125%。 */
+    body{zoom:1.25}
+    .market-return-quartiles>em{font-size:11.5px;line-height:1.5}
+    .market-return-quartile{padding:8px 5px}
+    .market-return-quartile b{font-size:11.5px}
+    .market-return-quartile i{font-size:11px;line-height:1.45}
+  }
   @media(min-width:761px){
     .home-dashboard .market-chart-card{align-self:stretch;display:grid;grid-template-rows:auto minmax(0,1fr) auto;height:100%}
     .market-chart-card #homeIndexChart{display:grid;min-height:0}
     #homeIndexChart svg{height:100%;min-height:260px}
+    /* 桌機：包裝層不佔版面，選單鈕／Logo／右上按鈕維持原本 fixed 浮動。 */
+    #brandBar{display:contents}
   }
   @media(max-width:760px){
-    #topBrand{top:20px;left:62px}#topBrand small{display:none}
+    /* 手機 Logo 列獨立成一塊（對齊巴哈姆特 App：白底品牌列與內容分離）。 */
+    #brandBar{
+      position:fixed;z-index:100;top:0;left:0;right:0;
+      display:flex;align-items:center;gap:10px;
+      min-height:52px;
+      padding:8px 12px;
+      padding-top:max(8px, env(safe-area-inset-top));
+      background:var(--foam);
+      border-bottom:1px solid var(--grounds);
+      box-shadow:0 1px 0 rgba(51,36,26,.04);
+    }
+    html[data-theme="c"] #brandBar{box-shadow:0 1px 0 rgba(0,0,0,.25)}
+    #menuBtn,#topBrand,#topBtns{position:static;top:auto;left:auto;right:auto}
+    #menuBtn{flex:0 0 auto;width:40px;height:40px}
+    #topBrand{flex:1 1 auto;min-width:0;margin:0;pointer-events:none}
+    #topBrand b{font-size:18px;line-height:1.15}
+    #topBrand small{display:none}
+    #topBtns{flex:0 0 auto;margin:0;gap:6px}
+    #topBtns #themeBtn,#topBtns #langBtn{display:none}
+    #mktBtn{width:42px;min-width:42px;padding:0;justify-content:center}
+    #mktBtn span{display:none}
+    .wrap{padding-top:calc(64px + env(safe-area-inset-top))}
     .bpromise,.market-view-toggle{margin-left:0}
     /* 手機首頁固定順序：納斯達克大盤 → 強勢股篩選／產業速報 → 近期選股環境 → 聯準會 */
     .home-dashboard{display:flex;flex-direction:column;gap:15px}
@@ -6321,6 +6353,7 @@ __SEO_HEAD__
 </head>
 <body>
 
+<header id="brandBar" class="brand-bar" aria-label="品牌列">
 <button id="menuBtn" aria-label="選單" data-i18n-aria="ui.menu"><span></span><span></span><span></span></button>
 <div id="topBrand"><b data-i18n="brand.name">美股咖啡館</b><small><span class="q-zh">點左上角看全部功能</span><span class="q-en" style="display:none">Open the menu for every tool</span></small></div>
 <div id="topBtns">
@@ -6328,6 +6361,7 @@ __SEO_HEAD__
   <button id="themeBtn" type="button" aria-label="選擇咖啡館外觀" aria-expanded="false">☕ 外觀</button>
   <button id="langBtn" title="切換公司與產業的顯示語言">EN</button>
 </div>
+</header>
 <div id="themePicker" role="dialog" aria-label="咖啡館外觀"><div class="theme-picker-title"><span class="q-zh">選擇咖啡館外觀</span><span class="q-en" style="display:none">Choose café theme</span></div>
 <button class="theme-choice" data-theme-choice="b"><span class="theme-swatches"><i style="background:#F3EFE2"></i><i style="background:#42664C"></i><i style="background:#A45E2A"></i><i style="background:#FFFDF7"></i></span><span><b>B・京都喫茶</b><small>Kyoto Kissaten</small></span><span class="theme-check"></span></button>
 <button class="theme-choice" data-theme-choice="c"><span class="theme-swatches"><i style="background:#17252B"></i><i style="background:#21343A"></i><i style="background:#D2A65F"></i><i style="background:#F5EAD7"></i></span><span><b>C・午夜爵士</b><small>Midnight Jazz</small></span><span class="theme-check"></span></button>

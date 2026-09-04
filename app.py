@@ -6043,9 +6043,9 @@ __SEO_HEAD__
   @media(max-width:900px){.liquidity-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.liquidity-metric:last-child{grid-column:1/-1}.liquidity-chart-head{align-items:flex-start;flex-direction:column}.liquidity-tabs{justify-content:flex-start}}
   @media(max-width:560px){.fed-policy-panel{padding:17px 16px}.fed-policy-head{display:block}.fed-policy-status{justify-content:flex-start;margin-top:10px}.fed-policy-grid{grid-template-columns:1fr}.policy-kpis{grid-template-columns:1fr 1fr}.fed-policy-fold>summary{padding:13px 12px}.fed-policy-fold>summary small{display:block;margin:3px 0 0}.liquidity-dashboard{padding:0 10px 11px}.liquidity-hero{align-items:flex-start;flex-direction:column;padding:14px}.liquidity-hero h3{font-size:24px}.liquidity-metrics{grid-template-columns:1fr 1fr}.liquidity-metric{padding:10px}.liquidity-metric:last-child{grid-column:1/-1}.liquidity-tabs{display:grid;grid-template-columns:repeat(3,1fr);width:100%}.liquidity-tabs button{padding:7px 4px}#liquidityChart{min-height:0}.policy-indicator-board{padding:0 10px 12px}.indicator-section{padding:18px 0}.indicator-section-head{gap:9px}.indicator-section-no{flex-basis:34px;height:34px}.indicator-section-head h3{font-size:19px}.indicator-summary{display:block;padding:10px 12px}.indicator-summary>b{display:block;margin-bottom:3px}.indicator-card-grid{grid-template-columns:1fr;gap:10px}.indicator-card,.indicator-card-wide{grid-column:auto;padding:17px 16px}.indicator-card h4{font-size:15px}.indicator-value{font-size:24px}.indicator-explain{font-size:12px;line-height:1.6}.indicator-detail-rows{grid-template-columns:1fr 1fr}.indicator-direction{max-width:100%;box-sizing:border-box}.policy-board li{grid-template-columns:1fr;gap:3px;padding:12px 0}.policy-board-label{color:var(--caramel-2)}.policy-board-data{font-size:13px}.policy-board-read{font-size:11.5px}}
   @media(min-width:1024px){
-    /* 桌機 100% 直接呈現原本瀏覽器 125% 的閱讀比例；平板與手機不套用。
-       基準值改成 125%：瀏覽器縮放顯示 100% 時，畫面等同過去的 125%。 */
-    body{zoom:1.25}
+    /* 桌機 100% 直接呈現原本瀏覽器 120% 的閱讀比例；平板與手機不套用。
+       基準值改成 120%：瀏覽器縮放顯示 100% 時，畫面等同過去的 120%。 */
+    body{zoom:1.2}
     .market-return-quartiles>em{font-size:11.5px;line-height:1.5}
     .market-return-quartile{padding:8px 5px}
     .market-return-quartile b{font-size:11.5px}

@@ -1,4 +1,4 @@
-"""手機與桌機品牌列獨立區塊＋桌機 125% 基準縮放。"""
+"""手機與桌機品牌列獨立區塊＋桌機 120% 基準縮放。"""
 import re
 import unittest
 
@@ -44,7 +44,7 @@ class BrandBarAndDesktopZoomTests(unittest.TestCase):
         self.assertIn("#menuBtn,#topBrand,#topBtns{position:static", block)
         self.assertIn("#topBrand small{display:none}", block)
 
-    def test_desktop_sets_125_percent_zoom_baseline(self):
+    def test_desktop_sets_120_percent_zoom_baseline(self):
         desktop = re.search(
             r"@media\(min-width:1024px\)\{(.*?)\}"
             r"\s*@media\(min-width:761px\)",
@@ -53,7 +53,7 @@ class BrandBarAndDesktopZoomTests(unittest.TestCase):
         )
         self.assertIsNotNone(desktop, "missing desktop zoom media query")
         block = desktop.group(1)
-        self.assertIn("body{zoom:1.25}", block)
+        self.assertIn("body{zoom:1.2}", block)
         self.assertIn("基準值", self.html)
 
     def test_desktop_brand_bar_is_independent_fixed_block(self):

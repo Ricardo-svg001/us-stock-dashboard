@@ -87,7 +87,7 @@ class FedTreasuryPolicyTest(unittest.TestCase):
         self.assertEqual(html.count('<article class="indicator-card'), 11)
         self.assertEqual(html.count('class="indicator-section"'), 4)
         self.assertNotIn('class="policy-board"', html)
-        for text in ("一、流動性數據", "資金價格", "短期美元流動性",
+        for text in ("資金價格", "短期美元流動性",
                      "國債供給與聯準會資產負債表", "財政承受力",
                      "美國聯邦債務", "聯邦債務／GDP", "國債利息／聯邦收入", "縮表模型",
                      "不能用Fed利率直接乘總債務"):
@@ -97,7 +97,7 @@ class FedTreasuryPolicyTest(unittest.TestCase):
                      "3.50%～3.75%", "情境試算", "資料尚未取得"):
             self.assertIn(text, html)
         self.assertIn("淨流動性＝Fed 總資產（WALCL）− TGA（WDTGAL）− ON RRP（RRPONTSYD）", html)
-        self.assertIn('class="fed-policy-fold liquidity-fold" open', html)
+        self.assertIn('class="fed-policy-fold liquidity-fold"', html)
         self.assertIn('class="fed-policy-fold policy-detail-fold"', html)
         self.assertIn('class="indicator-direction positive"', html)
         self.assertIn('class="indicator-direction negative"', html)

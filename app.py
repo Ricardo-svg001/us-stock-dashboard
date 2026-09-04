@@ -6055,8 +6055,17 @@ __SEO_HEAD__
     .home-dashboard .market-chart-card{align-self:stretch;display:grid;grid-template-rows:auto minmax(0,1fr) auto;height:100%}
     .market-chart-card #homeIndexChart{display:grid;min-height:0}
     #homeIndexChart svg{height:100%;min-height:260px}
-    /* 桌機：包裝層不佔版面，選單鈕／Logo／右上按鈕維持原本 fixed 浮動。 */
-    #brandBar{display:contents}
+    /* 桌機品牌列：與主頁同色的 fixed 獨立區塊，避免捲動內容從控制項下方穿過。 */
+    :root{--desktop-brand-bar-h:64px}
+    #brandBar{
+      position:fixed;z-index:110;top:0;left:0;right:0;display:flex;align-items:center;gap:14px;
+      height:var(--desktop-brand-bar-h);padding:0 14px;background:var(--milk);border:0;box-shadow:none
+    }
+    #brandBar #menuBtn,#brandBar #topBrand,#brandBar #topBtns{position:static;top:auto;left:auto;right:auto;z-index:auto}
+    #brandBar #menuBtn{order:0;flex:0 0 40px}
+    #brandBar #topBrand{order:1;flex:1 1 auto;min-width:0}
+    #brandBar #topBtns{order:2;flex:0 0 auto}
+    .wrap{padding-top:calc(var(--desktop-brand-bar-h) + 14px)}
   }
   @media(max-width:760px){
     /* 手機 Logo 列：與主頁同色的 fixed 獨立區塊；opaque 底色避免捲動內容透出重疊。 */

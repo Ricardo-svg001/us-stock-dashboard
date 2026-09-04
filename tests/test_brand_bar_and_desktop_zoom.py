@@ -1,4 +1,4 @@
-"""手機品牌列獨立區塊＋桌機 125% 基準縮放。"""
+"""手機與桌機品牌列獨立區塊＋桌機 125% 基準縮放。"""
 import re
 import unittest
 
@@ -56,7 +56,7 @@ class BrandBarAndDesktopZoomTests(unittest.TestCase):
         self.assertIn("body{zoom:1.25}", block)
         self.assertIn("基準值", self.html)
 
-    def test_desktop_brand_bar_is_display_contents(self):
+    def test_desktop_brand_bar_is_independent_fixed_block(self):
         desktop_layout = re.search(
             r"@media\(min-width:761px\)\{(.*?)\}"
             r"\s*@media\(max-width:760px\)\{",
@@ -64,7 +64,14 @@ class BrandBarAndDesktopZoomTests(unittest.TestCase):
             re.S,
         )
         self.assertIsNotNone(desktop_layout, "missing desktop layout media query")
-        self.assertIn("#brandBar{display:contents}", desktop_layout.group(1))
+        block = desktop_layout.group(1)
+        self.assertIn("--desktop-brand-bar-h:64px", block)
+        self.assertIn("#brandBar{", block)
+        self.assertIn("position:fixed", block)
+        self.assertIn("display:flex", block)
+        self.assertIn("background:var(--milk)", block)
+        self.assertIn("#brandBar #menuBtn,#brandBar #topBrand,#brandBar #topBtns{position:static", block)
+        self.assertIn(".wrap{padding-top:calc(var(--desktop-brand-bar-h) + 14px)}", block)
 
 
 if __name__ == "__main__":

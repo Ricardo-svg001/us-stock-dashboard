@@ -73,6 +73,26 @@ class BrandBarAndDesktopZoomTests(unittest.TestCase):
         self.assertIn("#brandBar #menuBtn,#brandBar #topBrand,#brandBar #topBtns{position:static", block)
         self.assertIn(".wrap{padding-top:calc(var(--desktop-brand-bar-h) + 14px)}", block)
 
+    def test_topbar_has_one_article_link_and_round_menu_button(self):
+        start = self.html.find('<header id="brandBar"')
+        end = self.html.find("</header>", start)
+        topbar = self.html[start:end]
+        self.assertIn('id="topArticlesLink" href="/articles"', topbar)
+        self.assertNotIn('id="mktBtn"', topbar)
+        self.assertNotIn('id="themeBtn"', topbar)
+        self.assertNotIn('id="langBtn"', topbar)
+        self.assertIn(
+            "#brandBar #menuBtn{order:0;flex:0 0 46px;width:46px;min-width:46px;height:46px;aspect-ratio:1}",
+            self.html,
+        )
+
+    def test_sidebar_theme_and_language_do_not_depend_on_removed_topbar_buttons(self):
+        self.assertIn("function openThemePicker()", self.html)
+        self.assertIn("function toggleLang()", self.html)
+        self.assertNotIn('class="top-control-proxy"', self.html)
+        self.assertIn("openThemePicker();", self.html)
+        self.assertIn("toggleLang();", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()

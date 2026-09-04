@@ -6062,7 +6062,7 @@ __SEO_HEAD__
       height:var(--desktop-brand-bar-h);padding:0 14px;background:var(--milk);border:0;box-shadow:none
     }
     #brandBar #menuBtn,#brandBar #topBrand,#brandBar #topBtns{position:static;top:auto;left:auto;right:auto;z-index:auto}
-    #brandBar #menuBtn{order:0;flex:0 0 40px}
+    #brandBar #menuBtn{order:0;flex:0 0 46px;width:46px;min-width:46px;height:46px;aspect-ratio:1}
     #brandBar #topBrand{order:1;flex:1 1 auto;min-width:0}
     #brandBar #topBtns{order:2;flex:0 0 auto}
     .wrap{padding-top:calc(var(--desktop-brand-bar-h) + 14px)}
@@ -6083,12 +6083,13 @@ __SEO_HEAD__
       box-shadow:none;
     }
     #menuBtn,#topBrand,#topBtns{position:static;top:auto;left:auto;right:auto}
-    #menuBtn{flex:0 0 auto;width:40px;height:40px}
+    #menuBtn{flex:0 0 40px;width:40px;min-width:40px;height:40px;aspect-ratio:1}
     #topBrand{flex:1 1 auto;min-width:0;margin:0;pointer-events:none}
     #topBrand b{font-size:18px;line-height:1.15}
     #topBrand small{display:none}
     #topBtns{flex:0 0 auto;margin:0;gap:6px}
     #topBtns #themeBtn,#topBtns #langBtn{display:none}
+    #topArticlesLink{height:40px;padding:0 12px;box-shadow:none;font-size:13px}
     #mktBtn{width:42px;min-width:42px;padding:0;justify-content:center}
     #mktBtn span{display:none}
     /* 預留與頂欄等高的空間，內容從欄位下方開始，滑動時不會鑽進／重疊頂欄。 */
@@ -6295,6 +6296,13 @@ __SEO_HEAD__
   /* 右上角按鈕列：市場切換 ＋ 語言。用 flex 排，寬度變動不會互相蓋到 */
   #topBtns { position:fixed; top:14px; right:14px; z-index:100;
              display:flex; gap:8px; align-items:center; }
+  #topArticlesLink { height:40px; padding:0 16px; border-radius:20px;
+             display:inline-flex; align-items:center; justify-content:center;
+             border:1.5px solid var(--grounds); background:var(--foam);
+             color:var(--caramel-2); text-decoration:none; white-space:nowrap;
+             font-family:var(--font-head); font-weight:800; font-size:13px;
+             box-shadow:var(--shadow); }
+  #topArticlesLink:hover { border-color:var(--caramel); color:var(--caramel-2); }
   #topBtns #langBtn, #topBtns #mktBtn { position:static; top:auto; right:auto; }
   #themeBtn{height:40px;padding:0 13px;border-radius:20px;border:1.5px solid var(--grounds);background:var(--foam);color:var(--caramel-2);cursor:pointer;font-size:13px;font-weight:700;box-shadow:var(--shadow);white-space:nowrap}
   #themePicker{position:fixed;z-index:120;top:64px;right:14px;width:238px;padding:12px;background:var(--foam);border:1.5px solid var(--grounds);border-radius:16px;box-shadow:var(--shadow);display:none}#themePicker.show{display:block}
@@ -6369,9 +6377,9 @@ __SEO_HEAD__
 <button id="menuBtn" aria-label="選單" data-i18n-aria="ui.menu"><span></span><span></span><span></span></button>
 <div id="topBrand"><b data-i18n="brand.name">美股咖啡館</b><small><span class="q-zh">點左上角看全部功能</span><span class="q-en" style="display:none">Open the menu for every tool</span></small></div>
 <div id="topBtns">
-  <a id="mktBtn" href="__TW_URL__" title="切換到台股咖啡館" aria-label="切換到台股咖啡館" data-i18n-aria="ui.mkt.aria">🇹🇼 <span data-i18n="ui.mkt">台股</span></a>
-  <button id="themeBtn" type="button" aria-label="選擇咖啡館外觀" aria-expanded="false">☕ 外觀</button>
-  <button id="langBtn" title="切換公司與產業的顯示語言">EN</button>
+  <a id="topArticlesLink" href="/articles" aria-label="投資教學文章">
+    <span class="q-zh">投資教學</span><span class="q-en" style="display:none">Articles</span>
+  </a>
 </div>
 </header>
 <div id="themePicker" role="dialog" aria-label="咖啡館外觀"><div class="theme-picker-title"><span class="q-zh">選擇咖啡館外觀</span><span class="q-en" style="display:none">Choose café theme</span></div>
@@ -7069,7 +7077,8 @@ const APP_TOKEN = "__APP_TOKEN__";
 const START_PAGE = "__START_PAGE__";
 const CAFE_THEMES=['b','c','d'];
 function applyCafeTheme(name){const theme=CAFE_THEMES.includes(name)?name:'b';document.documentElement.dataset.theme=theme;try{localStorage.setItem('us-cafe-theme',theme)}catch(e){}document.querySelectorAll('[data-theme-choice]').forEach(el=>{const on=el.dataset.themeChoice===theme;el.classList.toggle('on',on);const c=el.querySelector('.theme-check');if(c)c.textContent=on?'✓':''});const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=theme==='c'?'#17252B':theme==='d'?'#50302F':'#263A2D'}
-function closeThemePicker(){const p=$("#themePicker"),b=$("#themeBtn");if(p)p.classList.remove('show');if(b)b.setAttribute('aria-expanded','false')}
+function closeThemePicker(){const p=$("#themePicker");if(p)p.classList.remove('show')}
+function openThemePicker(){const p=$("#themePicker");if(p)p.classList.add('show')}
 
 /* ---- 顯示語言（機制與台股版相同）----
    data-i18n      → 換 textContent（中文原文自動備份在 data-zh，不會遺失）
@@ -7403,8 +7412,8 @@ function applyLang(){
     el.style.display = (LANG === "en") ? "" : "none";
   });
   document.documentElement.lang = (LANG === "zh") ? "zh-Hant-TW" : "en";
-  const themeLabel = $("#themeBtn");
-  if (themeLabel) themeLabel.textContent = (LANG === "zh") ? "☕ 外觀" : "☕ Theme";
+  const topArticlesLink = $("#topArticlesLink");
+  if (topArticlesLink) topArticlesLink.href = (LANG === "zh") ? "/articles" : "/articles?lang=en";
   document.title = (LANG === "zh") ? TITLE_ZH : TITLE_EN;
   /* canonical 跟著語言走，與伺服器端注入的規則一致（英文＝?lang=en）。 */
   const can = document.querySelector('link[rel="canonical"]');
@@ -7420,13 +7429,9 @@ function coName(s){ return LANG === "zh" ? (s.name_zh || s.name) : s.name; }
 function coSector(s){ return LANG === "zh" ? (s.sector_zh || s.sector) : s.sector; }
 function sectorKey(s){ return s.sector; }        /* 篩選一律用英文原值當 key，避免對不上 */
 
-const langBtn = $("#langBtn");
-if (langBtn){
-  langBtn.textContent = (LANG === "zh") ? "EN" : "中";
-  langBtn.onclick = () => {
+function toggleLang(){
     LANG = (LANG === "zh") ? "en" : "zh";
     localStorage.setItem("us_lang", LANG);
-    langBtn.textContent = (LANG === "zh") ? "EN" : "中";
     /* 網址跟著語言改（不重新載入）。使用者複製網址分享時，對方才會看到同一種語言，
        也讓網址與 canonical／hreflang 說的是同一件事。 */
     try {
@@ -7454,7 +7459,6 @@ if (langBtn){
       drawHomeIndex(Number(active?.dataset.days||756));
     }
     if (typeof drawLiquidityChart === "function" && document.querySelector(".liquidity-fold")?.open) drawLiquidityChart();
-  };
 }
 
 /* ---- 側邊選單 ---- */
@@ -7467,8 +7471,15 @@ if ($("#menuCloseBtn")) $("#menuCloseBtn").onclick = () => {
 if ($("#appMoreBtn")) $("#appMoreBtn").onclick = () => {
   sidebar.classList.add("open"); overlay.classList.add("show");
 };
-if ($("#menuThemeBtn")) $("#menuThemeBtn").addEventListener("click", () => $("#themeBtn")?.click());
-if ($("#menuLangBtn")) $("#menuLangBtn").addEventListener("click", () => $("#langBtn")?.click());
+if ($("#menuThemeBtn")) $("#menuThemeBtn").addEventListener("click", e => {
+  e.preventDefault(); e.stopPropagation();
+  sidebar.classList.remove("open"); overlay.classList.remove("show");
+  openThemePicker();
+});
+if ($("#menuLangBtn")) $("#menuLangBtn").addEventListener("click", e => {
+  e.preventDefault(); e.stopPropagation();
+  toggleLang();
+});
 document.querySelectorAll(".navitem").forEach(i => i.onclick = () => {
   sidebar.classList.remove("open"); overlay.classList.remove("show");
 });
@@ -9957,7 +9968,7 @@ if (START_PAGE === "pind") loadIndustries();
 if (START_PAGE === "pstructure") loadBreakoutStructureScreen();
 loadHomeIndustryBrief();
 applyCafeTheme(document.documentElement.dataset.theme||'b');
-const themeBtn=$("#themeBtn"),themePicker=$("#themePicker");if(themeBtn&&themePicker){themeBtn.onclick=e=>{e.stopPropagation();const open=themePicker.classList.toggle('show');themeBtn.setAttribute('aria-expanded',open?'true':'false')};themePicker.onclick=e=>e.stopPropagation();document.querySelectorAll('[data-theme-choice]').forEach(el=>el.onclick=()=>{applyCafeTheme(el.dataset.themeChoice);closeThemePicker()});document.addEventListener('click',closeThemePicker);document.addEventListener('keydown',e=>{if(e.key==='Escape')closeThemePicker()})}
+const themePicker=$("#themePicker");if(themePicker){themePicker.onclick=e=>e.stopPropagation();document.querySelectorAll('[data-theme-choice]').forEach(el=>el.onclick=()=>{applyCafeTheme(el.dataset.themeChoice);closeThemePicker()});document.addEventListener('click',closeThemePicker);document.addEventListener('keydown',e=>{if(e.key==='Escape')closeThemePicker()})}
 applyLang();
 </script>
 </body>

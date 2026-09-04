@@ -148,6 +148,27 @@ class BreakoutStructureTest(unittest.TestCase):
         self.assertTrue(all(set(r["structure"].get("pattern_labels") or [])
                             .intersection(("U 型底", "杯柄"))
                             for r in result["results"]))
+        self.assertTrue(result["sectors"])
+        self.assertEqual(result["sector_filter"], "all")
+        self.assertTrue(any(item["id"] == "Technology" for item in result["sectors"]))
+
+    def test_structure_screen_filters_by_sector(self):
+        tech = app.get_breakout_structure_screen(
+            "5y", "all_stages", "u_or_cup", sector="Technology")
+        self.assertEqual(tech["sector_filter"], "Technology")
+        self.assertTrue(tech["results"])
+        self.assertTrue(all(r["sector"] == "Technology" for r in tech["results"]))
+        finance = app.get_breakout_structure_screen(
+            "5y", "all_stages", "u_or_cup", sector="Finance")
+        self.assertTrue(finance["results"])
+        self.assertTrue(all(r["sector"] == "Finance" for r in finance["results"]))
+        self.assertNotEqual(
+            {r["symbol"] for r in tech["results"]},
+            {r["symbol"] for r in finance["results"]})
+        unknown = app.get_breakout_structure_screen(
+            "5y", "all_stages", "u_or_cup", sector="NotASector")
+        self.assertEqual(unknown["sector_filter"], "all")
+        self.assertGreaterEqual(len(unknown["results"]), len(tech["results"]))
 
     def test_risk_is_capped_at_five_and_rs_uses_full_universe(self):
         self.assertEqual(app.RISK_MAX, 5)

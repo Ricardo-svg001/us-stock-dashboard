@@ -2170,18 +2170,40 @@ def _pattern_filter_pass(data, mode):
     return bool(labels.intersection(("U 型底", "杯柄")))
 
 
-def get_breakout_structure_screen(period="5y", status="all_stages", pattern="u_or_cup"):
+def _breakout_structure_sectors(seeded=None):
+    """回測種子裡出現過的 Nasdaq Sector；用英文名當穩定 id。"""
+    if seeded is None:
+        seeded, _meta = _load_breakout_structure_seed()
+    seen = {}
+    for row in (seeded or {}).values():
+        key = str(row.get("sector") or "").strip()
+        if not key or key in seen:
+            continue
+        seen[key] = str(row.get("sector_zh") or key).strip() or key
+    return [{"id": key, "name": key, "name_zh": seen[key]}
+            for key in sorted(seen.keys(), key=lambda k: (seen[k], k))]
+
+
+def get_breakout_structure_screen(period="5y", status="all_stages", pattern="u_or_cup",
+                                  sector="all"):
     period = period if period in STRUCTURE_PERIODS else "5y"
     status = status if status in ("matched", "near", "developing", "qualified",
                                   "all_stages") else "all_stages"
     pattern = pattern if pattern in ("u", "cup", "u_or_cup") else "u_or_cup"
+    sector = str(sector or "all").strip() or "all"
     seeded, meta = _load_breakout_structure_seed()
+    sectors = _breakout_structure_sectors(seeded)
+    allowed = {item["id"] for item in sectors}
+    if sector != "all" and sector not in allowed:
+        sector = "all"
     results, counts = [], {"matched": 0, "near": 0, "developing": 0,
                            "none": 0, "unavailable": 0}
     for symbol, source in seeded.items():
         value = breakout_structure_period_result(source, period)
         state = breakout_structure_status(value)
         counts[state] = counts.get(state, 0) + 1
+        if sector != "all" and str(source.get("sector") or "").strip() != sector:
+            continue
         if not _structure_filter_pass(value, status) or not _pattern_filter_pass(value, pattern):
             continue
         results.append({"rank": source.get("rank"), "symbol": symbol,
@@ -2195,6 +2217,7 @@ def get_breakout_structure_screen(period="5y", status="all_stages", pattern="u_o
                                 r.get("rank") or 9999, r["symbol"]))
     return {"as_of": meta.get("as_of"), "universe": meta.get("universe") or len(seeded),
             "period": period, "status_filter": status, "pattern_filter": pattern,
+            "sector_filter": sector, "sectors": sectors,
             "status_counts": counts, "results": results}
 
 
@@ -5811,7 +5834,7 @@ __SEO_HEAD__
   .structure-chart-read{min-height:18px;margin-left:42px;font:11px var(--font-num);color:var(--mocha)}
   .structure-note{font-size:10.5px;color:var(--mocha);line-height:1.55;margin-top:5px}
   .structure-reason{padding:8px 10px;border-radius:9px;background:rgba(137,107,77,.08);color:var(--mocha);font-size:12px;line-height:1.6;margin-bottom:8px}
-  .structure-screen-controls{max-width:760px;margin:0 auto 14px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+  .structure-screen-controls{max-width:760px;margin:0 auto 14px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
   .structure-screen-controls label{min-width:0;padding:13px;background:var(--foam);border:1px solid var(--grounds);border-radius:14px;box-shadow:var(--shadow)}
   .structure-screen-controls label>span{display:block;margin-bottom:7px;color:var(--mocha);font-size:12px;font-weight:800}
   .structure-screen-controls select{width:100%;box-sizing:border-box}
@@ -6509,6 +6532,7 @@ __FED_POLICY_PANEL__
     <label><span data-i18n="structureScreen.period">回測期間</span><select id="structurePeriod"><option value="6m" data-i18n="structureScreen.6m">6 個月</option><option value="1y" data-i18n="structureScreen.1y">1 年</option><option value="2y" data-i18n="structureScreen.2y">2 年</option><option value="5y" data-i18n="structureScreen.5y" selected>5 年</option></select></label>
     <label><span data-i18n="structureScreen.status">完成程度</span><select id="structureStatus"><option value="developing" data-i18n="structureScreen.developing">結構發展中</option><option value="near" data-i18n="structureScreen.near">結構接近完成</option><option value="matched" data-i18n="structureScreen.matched">結構符合</option><option value="all_stages" data-i18n="structureScreen.allStages" selected>全部結構候選</option><option value="qualified" data-i18n="structureScreen.qualified">符合或接近完成</option></select></label>
     <label><span data-i18n="structureScreen.pattern">型態</span><select id="structurePattern"><option value="u" data-i18n="structureScreen.u">U 型底</option><option value="cup" data-i18n="structureScreen.cup">杯柄</option><option value="u_or_cup" data-i18n="structureScreen.uOrCup" selected>U 型底或杯柄</option></select></label>
+    <label><span data-i18n="structureScreen.sector">產業</span><select id="structureSector"><option value="all" data-i18n="structureScreen.allSectors" selected>全部產業</option></select></label>
   </div>
   <button class="gobtn" id="structureRun" data-i18n="structureScreen.run">開始回測篩選</button>
   <div class="status" id="structureScreenStatus"></div>
@@ -7215,7 +7239,8 @@ const I18N = { en: {
   "structureScreen.introT": "Trace the full path from prior high through a deep base and renewed strength",
   "structureScreen.intro": "<p>Review the 300 largest US stocks over six months, one year, two years or five years.</p><p>80–90% of the prior high is Structure Developing, 90–98% is Nearly Complete, and green Match requires 98% plus over 30% momentum. Tracking continues after confirmation: a later swing high, a drawdown of at least 20%, at least 20 sessions, and renewed confirmation create another recorded cycle.</p><p>Higher lows, volatility contraction and rising 20/60-day averages are shown as early diagnostics. Milestones can be verified by point-in-time replay without future data.</p>",
   "structureScreen.period": "Backtest period", "structureScreen.status": "Completion status",
-  "structureScreen.pattern": "Pattern", "structureScreen.run": "Run structure screen",
+  "structureScreen.pattern": "Pattern", "structureScreen.sector": "Sector",
+  "structureScreen.run": "Run structure screen",
   "structureScreen.6m": "6 months", "structureScreen.1y": "1 year",
   "structureScreen.2y": "2 years", "structureScreen.5y": "5 years",
   "structureScreen.matched": "Structure matched", "structureScreen.near": "Structure nearly complete",
@@ -7223,6 +7248,7 @@ const I18N = { en: {
   "structureScreen.qualified": "Matched or nearly complete",
   "structureScreen.u": "U-shaped base", "structureScreen.cup": "Cup",
   "structureScreen.uOrCup": "U-shaped base or cup",
+  "structureScreen.allSectors": "All sectors",
   "screen.structureNote": "Trace the prior high, maximum drawdown, consolidation length and breakout date, with a draggable long-term closing-price chart. US stocks reuse the existing five-year price cache.",
   "screen.saveName": "Custom strategy name", "screen.save": "Save", "screen.saved": "Saved presets",
   "screen.apply": "Apply", "screen.delete": "Delete", "screen.export": "Export CSV",
@@ -7287,6 +7313,9 @@ function applyLang(){
   if (can){
     const base = location.origin + location.pathname;
     can.href = (LANG === "en") ? base + "?lang=en" : base;
+  }
+  if (typeof syncStructureSectorOptions === "function" && STRUCTURE_SCREEN_DATA){
+    syncStructureSectorOptions(STRUCTURE_SCREEN_DATA.sectors || []);
   }
 }
 function coName(s){ return LANG === "zh" ? (s.name_zh || s.name) : s.name; }
@@ -7808,19 +7837,36 @@ function initStructureChart(box){
 function setupStructureCharts(root){if(!root)return;root.querySelectorAll(".structure-details").forEach(d=>d.addEventListener("toggle",()=>{if(d.open)d.querySelectorAll(".structure-chart").forEach(initStructureChart)}))}
 
 let STRUCTURE_SCREEN_DATA=null,STRUCTURE_SCREEN_SIGNATURE="";
+function syncStructureSectorOptions(sectors){
+  const sel=$("#structureSector"); if(!sel) return;
+  const list=Array.isArray(sectors)?sectors:[];
+  const cur=sel.value||"all";
+  const esc=v=>String(v||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;");
+  sel.innerHTML=`<option value="all">${LANG==="en"?"All sectors":"全部產業"}</option>`
+    +list.map(s=>{
+      const id=s.id||s.name||"";
+      const label=LANG==="en"?(s.name||id):(s.name_zh||s.name||id);
+      return `<option value="${esc(id)}">${esc(label)}</option>`;
+    }).join("");
+  sel.value=[...sel.options].some(o=>o.value===cur)?cur:"all";
+}
 function renderBreakoutStructureScreen(data){
   const box=$("#structureScreenResult"),status=$("#structureScreenStatus");if(!box)return;
+  syncStructureSectorOptions(data.sectors||[]);
   const rows=data.results||[],periodNames={"6m":LANG==="en"?"6 months":"6 個月","1y":LANG==="en"?"1 year":"1 年","2y":LANG==="en"?"2 years":"2 年","5y":LANG==="en"?"5 years":"5 年"};
-  status.textContent=LANG==="en"?`${rows.length} candidates from ${data.universe||300} stocks · ${periodNames[data.period]||data.period} · as of ${data.as_of||"—"}`:`市值前 ${data.universe||300} 大中找到 ${rows.length} 檔候選・回測 ${periodNames[data.period]||data.period}・資料截至 ${data.as_of||"—"}`;
-  if(!rows.length){box.innerHTML=`<div class="concl gray">${LANG==="en"?"No candidate matches all selected filters.":"沒有同時符合目前完成程度與型態的候選。"}</div>`;return}
+  const sectorLabel=(!data.sector_filter||data.sector_filter==="all")
+    ?(LANG==="en"?"All sectors":"全部產業")
+    :(LANG==="en"?data.sector_filter:((data.sectors||[]).find(s=>s.id===data.sector_filter)||{}).name_zh||data.sector_filter);
+  status.textContent=LANG==="en"?`${rows.length} candidates from ${data.universe||300} stocks · ${periodNames[data.period]||data.period} · ${sectorLabel} · as of ${data.as_of||"—"}`:`市值前 ${data.universe||300} 大中找到 ${rows.length} 檔候選・回測 ${periodNames[data.period]||data.period}・${sectorLabel}・資料截至 ${data.as_of||"—"}`;
+  if(!rows.length){box.innerHTML=`<div class="concl gray">${LANG==="en"?"No candidate matches all selected filters.":"沒有同時符合目前完成程度、型態與產業的候選。"}</div>`;return}
   box.innerHTML=rows.map(r=>{const state=r.structure_status,label=state==="matched"?(LANG==="en"?"Structure match":"結構符合"):state==="developing"?(LANG==="en"?"Structure developing":"結構發展中"):(LANG==="en"?"Nearly complete":"結構接近完成"),name=LANG==="en"?r.name:(r.name_zh||r.name),sector=LANG==="en"?r.sector:(r.sector_zh||r.sector);return `<article class="structure-screen-item"><div class="structure-screen-head"><div><small>${LANG==="en"?"Cap rank":"市值排名"}</small><b>#${r.rank||"—"}</b></div><div class="structure-screen-company"><small>${LANG==="en"?"Company":"公司名稱"}</small><b><span>${screenEsc(r.symbol)}</span>${screenEsc(name)}</b></div><div class="structure-screen-sector"><small>${LANG==="en"?"Sector":"產業"}</small><b>${screenEsc(sector)}</b></div><span class="structure-screen-badge ${state}">${label}</span></div>${structurePanel({structure:r.structure})}</article>`}).join("");
   setupStructureCharts(box);
 }
 async function loadBreakoutStructureScreen(force=false){
-  const period=$("#structurePeriod")?.value||"5y",statusFilter=$("#structureStatus")?.value||"all_stages",pattern=$("#structurePattern")?.value||"u_or_cup",sig=[period,statusFilter,pattern].join("|");
+  const period=$("#structurePeriod")?.value||"5y",statusFilter=$("#structureStatus")?.value||"all_stages",pattern=$("#structurePattern")?.value||"u_or_cup",sector=$("#structureSector")?.value||"all",sig=[period,statusFilter,pattern,sector].join("|");
   if(!force&&STRUCTURE_SCREEN_DATA&&STRUCTURE_SCREEN_SIGNATURE===sig){renderBreakoutStructureScreen(STRUCTURE_SCREEN_DATA);return}
   const status=$("#structureScreenStatus"),box=$("#structureScreenResult");if(!status||!box)return;status.textContent=LANG==="en"?"Reading the offline structure backtest…":"讀取離線飆股結構回測…";box.innerHTML="";
-  try{const d=await readJson(await fetch(`/api/breakout-structure?period=${encodeURIComponent(period)}&status=${encodeURIComponent(statusFilter)}&pattern=${encodeURIComponent(pattern)}`));if(!d.ok)throw Error(d.error||"No data");STRUCTURE_SCREEN_DATA=d;STRUCTURE_SCREEN_SIGNATURE=sig;renderBreakoutStructureScreen(d)}catch(e){status.textContent="";box.innerHTML=`<div class="concl gray">${LANG==="en"?"Structure data is temporarily unavailable.":"飆股結構資料暫時無法使用。"}</div>`}
+  try{const d=await readJson(await fetch(`/api/breakout-structure?period=${encodeURIComponent(period)}&status=${encodeURIComponent(statusFilter)}&pattern=${encodeURIComponent(pattern)}&sector=${encodeURIComponent(sector)}`));if(!d.ok)throw Error(d.error||"No data");STRUCTURE_SCREEN_DATA=d;STRUCTURE_SCREEN_SIGNATURE=sig;renderBreakoutStructureScreen(d)}catch(e){status.textContent="";box.innerHTML=`<div class="concl gray">${LANG==="en"?"Structure data is temporarily unavailable.":"飆股結構資料暫時無法使用。"}</div>`}
 }
 if($("#structureRun"))$("#structureRun").onclick=()=>loadBreakoutStructureScreen(true);
 
@@ -12535,7 +12581,7 @@ def api_breakout_structure():
     """六個月～五年的 U 型底／杯柄候選；只讀離線回測種子。"""
     data = get_breakout_structure_screen(
         request.args.get("period", "5y"), request.args.get("status", "all_stages"),
-        request.args.get("pattern", "u_or_cup"))
+        request.args.get("pattern", "u_or_cup"), request.args.get("sector", "all"))
     if not data.get("universe"):
         return jsonify(ok=False, error="飆股結構資料尚未建立"), 503
     return jsonify(ok=True, **data)

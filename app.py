@@ -6295,6 +6295,28 @@ __SEO_HEAD__
   .site-footer a { color:var(--caramel-2); text-decoration:none; font-weight:700; }
   .site-footer a:hover { text-decoration:underline; }
   .site-version { margin-top:6px; font-size:11px; opacity:.68; letter-spacing:.02em; }
+  /* 手機下方快捷列：與台股咖啡館同一套四格導覽。 */
+  .app-tabs { display:none; }
+  .app-tab { appearance:none; border:0; background:transparent; color:var(--mocha);
+             text-decoration:none; min-width:0; min-height:50px; padding:4px 2px; border-radius:11px;
+             display:flex; flex-direction:column; align-items:center; justify-content:center;
+             gap:2px; font-size:11px; font-weight:700; cursor:pointer; font-family:var(--font-body); }
+  .app-tab i { font-style:normal; font-size:20px; line-height:1; }
+  .app-tab.active { color:var(--caramel-2); background:rgba(198,138,62,.12); }
+  .app-tabs { background:rgba(255,250,242,.94); border:0; border-radius:22px 22px 0 0;
+              box-shadow:0 -8px 30px rgba(60,42,20,.1); }
+  html[data-theme="c"] .app-tabs { background:rgba(23,37,43,.96); box-shadow:0 -8px 30px rgba(0,0,0,.35); }
+  html[data-theme="c"] .app-tab.active { color:var(--caramel-2); background:rgba(210,166,95,.16); }
+  html[data-theme="d"] .app-tabs { background:rgba(255,249,245,.96); }
+  @media(max-width:760px){
+    .app-tabs { display:grid; position:fixed; z-index:90; left:0; right:0; bottom:0;
+                grid-template-columns:repeat(4,1fr); min-height:62px;
+                padding:5px 8px calc(5px + env(safe-area-inset-bottom));
+                border-top:1px solid var(--grounds); }
+    .wrap { padding-bottom:calc(92px + env(safe-area-inset-bottom)); }
+    .site-footer { padding-bottom:calc(82px + env(safe-area-inset-bottom)); }
+    #menuBtn { display:none; }
+  }
 </style>
 </head>
 <body>
@@ -6988,6 +7010,13 @@ __FED_POLICY_PANEL__
   __BUILD_INFO__
 </footer>
 
+<nav class="app-tabs" aria-label="App 快捷列">
+  <a class="app-tab" data-tab="market" href="/"><i>☀️</i><span data-i18n="nav.tab.home">主頁面</span></a>
+  <a class="app-tab" data-tab="screen" href="/screener"><i>🔥</i><span data-i18n="p1.title">找強勢股</span></a>
+  <a class="app-tab" data-tab="structure" href="/breakout-structure"><i>🏗️</i><span data-i18n="nav.tab.structure">飆股結構</span></a>
+  <button class="app-tab" id="appMoreBtn" data-tab="more" type="button"><i>☰</i><span data-i18n="nav.more">更多</span></button>
+</nav>
+
 <script>
 const $ = s => document.querySelector(s);
 const APP_TOKEN = "__APP_TOKEN__";
@@ -7018,6 +7047,7 @@ const I18N = { en: {
   "brew.title": "Brewing, please wait", "brew.wait": "Getting ready…",
   "brand.name": "US Stock Coffee",
   "nav.home": "Menu", "nav.home.sub": "Is today a good day to act?",
+  "nav.tab.home": "Home", "nav.tab.structure": "Structure", "nav.more": "More",
   "nav.group": "Stock Screeners",
   "nav.group.sub": "Leaders · Pullbacks · Rates",
   "nav.screen.sub": "Find leading stocks",
@@ -7387,6 +7417,9 @@ $("#menuBtn").onclick = () => { sidebar.classList.toggle("open"); overlay.classL
 overlay.onclick = () => { sidebar.classList.remove("open"); overlay.classList.remove("show"); };
 if ($("#menuCloseBtn")) $("#menuCloseBtn").onclick = () => {
   sidebar.classList.remove("open"); overlay.classList.remove("show");
+};
+if ($("#appMoreBtn")) $("#appMoreBtn").onclick = () => {
+  sidebar.classList.add("open"); overlay.classList.add("show");
 };
 if ($("#menuThemeBtn")) $("#menuThemeBtn").addEventListener("click", () => $("#themeBtn")?.click());
 if ($("#menuLangBtn")) $("#menuLangBtn").addEventListener("click", () => $("#langBtn")?.click());
@@ -9865,6 +9898,11 @@ if (START_PAGE && $("#" + START_PAGE)){
   const activeNav = document.querySelector(`.navitem[data-page="${START_PAGE}"]`);
   if (activeNav && activeNav.closest("details")) activeNav.closest("details").open = true;
 }
+const activeTab = START_PAGE === "home" ? "market"
+                : START_PAGE === "p1" ? "screen"
+                : START_PAGE === "pstructure" ? "structure" : "more";
+document.querySelectorAll(".app-tab").forEach(el =>
+  el.classList.toggle("active", el.dataset.tab === activeTab));
 if (START_PAGE === "p7") buildTwTable();
 if (START_PAGE === "p12") cmpInit();
 if (START_PAGE === "pmac") loadMacro();

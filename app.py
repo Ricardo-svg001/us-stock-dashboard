@@ -6059,18 +6059,20 @@ __SEO_HEAD__
     #brandBar{display:contents}
   }
   @media(max-width:760px){
-    /* 手機 Logo 列獨立成一塊（對齊巴哈姆特 App：白底品牌列與內容分離）。 */
+    /* 手機 Logo 列：與主頁同色的 fixed 獨立區塊；opaque 底色避免捲動內容透出重疊。 */
+    :root{--brand-bar-h:52px}
     #brandBar{
       position:fixed;z-index:100;top:0;left:0;right:0;
       display:flex;align-items:center;gap:10px;
-      min-height:52px;
-      padding:8px 12px;
-      padding-top:max(8px, env(safe-area-inset-top));
-      background:var(--foam);
-      border-bottom:1px solid var(--grounds);
-      box-shadow:0 1px 0 rgba(51,36,26,.04);
+      height:calc(var(--brand-bar-h) + env(safe-area-inset-top));
+      min-height:calc(var(--brand-bar-h) + env(safe-area-inset-top));
+      padding:0 12px;
+      padding-top:env(safe-area-inset-top);
+      box-sizing:border-box;
+      background:var(--milk);
+      border-bottom:0;
+      box-shadow:none;
     }
-    html[data-theme="c"] #brandBar{box-shadow:0 1px 0 rgba(0,0,0,.25)}
     #menuBtn,#topBrand,#topBtns{position:static;top:auto;left:auto;right:auto}
     #menuBtn{flex:0 0 auto;width:40px;height:40px}
     #topBrand{flex:1 1 auto;min-width:0;margin:0;pointer-events:none}
@@ -6080,7 +6082,8 @@ __SEO_HEAD__
     #topBtns #themeBtn,#topBtns #langBtn{display:none}
     #mktBtn{width:42px;min-width:42px;padding:0;justify-content:center}
     #mktBtn span{display:none}
-    .wrap{padding-top:calc(64px + env(safe-area-inset-top))}
+    /* 預留與頂欄等高的空間，內容從欄位下方開始，滑動時不會鑽進／重疊頂欄。 */
+    .wrap{padding-top:calc(var(--brand-bar-h) + env(safe-area-inset-top) + 12px)}
     .bpromise,.market-view-toggle{margin-left:0}
     /* 手機首頁固定順序：納斯達克大盤 → 強勢股篩選／產業速報 → 近期選股環境 → 聯準會 */
     .home-dashboard{display:flex;flex-direction:column;gap:15px}

@@ -35,8 +35,12 @@ class BrandBarAndDesktopZoomTests(unittest.TestCase):
         block = mobile.group(1)
         self.assertIn("#brandBar{", block)
         self.assertIn("position:fixed", block)
-        self.assertIn("background:var(--foam)", block)
-        self.assertIn("border-bottom:1px solid var(--grounds)", block)
+        self.assertIn("background:var(--milk)", block)
+        self.assertIn("--brand-bar-h:52px", block)
+        self.assertIn(
+            ".wrap{padding-top:calc(var(--brand-bar-h) + env(safe-area-inset-top) + 12px)}",
+            block,
+        )
         self.assertIn("#menuBtn,#topBrand,#topBtns{position:static", block)
         self.assertIn("#topBrand small{display:none}", block)
 

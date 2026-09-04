@@ -4670,17 +4670,21 @@ def _home_screen_html():
     #    本來就可能一檔都沒有 —— 直接顯示「0 檔」會像壞掉，所以換一句話講清楚。
     if n == 0:
         return (
-            '<a class="hs-box" href="/screener?view=results">'
+            '<a class="hs-box hs-zero" href="/screener?view=results">'
             '<span class="hs-head">'
-            '<b class="q-zh">強勢股篩選：今天沒有符合條件</b>'
-            '<b class="q-en" style="display:none">Momentum screen: no matches today</b>'
+            '<b class="q-zh">強勢股篩選</b>'
+            '<b class="q-en" style="display:none">Momentum screen</b>'
             '</span>'
+            '<span class="hs-meta q-zh">今天沒有符合條件</span>'
+            '<span class="hs-meta q-en" style="display:none">No matches today</span>'
             '<span class="hs-list q-zh">'
             '嚴格多頭排列又站上 10 日線的個股掛零，'
             '通常出現在跌深或趨勢轉折的時候。</span>'
             '<span class="hs-list q-en" style="display:none">'
             'No stock is in a strict bullish alignment and above its 10-day line — '
             'this usually happens after a sharp drop or at a turning point.</span>'
+            '<span class="hs-go q-zh">查看篩選 →</span>'
+            '<span class="hs-go q-en" style="display:none">Open screener →</span>'
             '</a>')
 
     names_zh = "、".join(_h.escape("%s %s" % (r["symbol"], r.get("name_zh") or ""))
@@ -4696,13 +4700,13 @@ def _home_screen_html():
         '<span class="hs-unit q-zh">檔</span>'
         '<span class="hs-unit q-en" style="display:none">stocks</span>'
         '</span>'
-        '<span class="hs-list q-zh">' + names_zh + more_zh + '</span>'
-        '<span class="hs-list q-en" style="display:none">' + names_en + '</span>'
-        '<span class="hs-sub q-zh">市值前 300 大 · 均線嚴格多頭 · 站上 10 日線'
+        '<span class="hs-meta q-zh">市值前 300 大・嚴格多頭排列・站上 10 日線'
         + ('（' + as_of + ' 收盤）' if as_of else '') + '</span>'
-        '<span class="hs-sub q-en" style="display:none">Top 300 by cap · strict bullish '
+        '<span class="hs-meta q-en" style="display:none">Top 300 by cap · strict bullish '
         'alignment · above the 10-day line'
         + ((' (as of ' + as_of + ')') if as_of else '') + '</span>'
+        '<span class="hs-list q-zh">' + names_zh + more_zh + '</span>'
+        '<span class="hs-list q-en" style="display:none">' + names_en + '</span>'
         '<span class="hs-go q-zh">查看全部 →</span>'
         '<span class="hs-go q-en" style="display:none">See all →</span>'
         '</a>')
@@ -4715,20 +4719,22 @@ def _home_industry_brief_html():
     sectors = sorted(d.get("industries") or [],
                      key=lambda row: -float(row.get("median20") or 0))[:3]
     if not sectors:
-        return ('<span class="q-zh">產業資料正在背景建立中。</span>'
-                '<span class="q-en" style="display:none">Sector data is being prepared.</span>')
+        return ('<span class="home-industry-empty q-zh">產業資料正在背景建立中。</span>'
+                '<span class="home-industry-empty q-en" style="display:none">Sector data is being prepared.</span>')
     out = []
     for index, item in enumerate(sectors):
         value = float(item.get("median20") or 0)
         sign = "+" if value >= 0 else ""
-        out.append('<span class="q-zh">%s・<b>%s</b>　%s%.2f%%</span>'
-                   % ("近期最強" if index == 0 else "強勢 %d" % (index + 1),
-                      _h.escape(str(item.get("name_zh") or item.get("name") or "—")), sign, value))
-        out.append('<span class="q-en" style="display:none">%s · <b>%s</b>　%s%.2f%%</span>'
-                   % ("Strongest recently" if index == 0 else "Strong %d" % (index + 1),
-                      _h.escape(str(item.get("name") or "—")), sign, value))
-    out.append('<span class="q-zh">資料截至 %s</span>' % _h.escape(str(d.get("as_of") or "—")))
-    out.append('<span class="q-en" style="display:none">As of %s</span>' % _h.escape(str(d.get("as_of") or "—")))
+        rank_zh = "近期最強" if index == 0 else "強勢 %d" % (index + 1)
+        rank_en = "Strongest recently" if index == 0 else "Strong %d" % (index + 1)
+        name_zh = _h.escape(str(item.get("name_zh") or item.get("name") or "—"))
+        name_en = _h.escape(str(item.get("name") or "—"))
+        out.append('<span class="home-industry-item q-zh"><b>%s</b><small>%s · %s%.2f%%</small></span>'
+                   % (name_zh, rank_zh, sign, value))
+        out.append('<span class="home-industry-item q-en" style="display:none"><b>%s</b><small>%s · %s%.2f%%</small></span>'
+                   % (name_en, rank_en, sign, value))
+    out.append('<span class="home-industry-asof q-zh">資料截至 %s</span>' % _h.escape(str(d.get("as_of") or "—")))
+    out.append('<span class="home-industry-asof q-en" style="display:none">As of %s</span>' % _h.escape(str(d.get("as_of") or "—")))
     return "".join(out)
 
 
@@ -5976,14 +5982,14 @@ __SEO_HEAD__
   .market-chart-card{min-height:300px}
   .market-now-hero{background:linear-gradient(180deg,var(--foam),#F6EAD6)}
   html[data-theme="c"] .market-now-hero{background:var(--foam)}
-  .market-now-title{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.market-now-title h1{margin:0;font:900 22px var(--font-head);text-align:left}.market-now-title h1::after{display:none}
+  .market-now-title{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.market-now-title h1{margin:0;font:900 32px/1.2 var(--font-head);text-align:left;color:var(--espresso)}.market-now-title h1::after{display:none}
   .market-now-badge{display:inline-flex;padding:8px 20px;border-radius:999px;background:linear-gradient(135deg,var(--caramel),var(--caramel-2));color:#fff;font-weight:700}.market-now-hero p{margin:12px 0 0;color:var(--mocha);font-size:15px;line-height:1.7}
   .market-scope-note{margin-top:7px;color:var(--mocha);font-size:12px;line-height:1.65;opacity:.9}
-  .market-now-grid{display:grid;grid-template-columns:1fr;gap:14px}.market-data-card{padding:16px;min-width:0}.market-data-card h2{margin:0 0 12px;font:800 20px var(--font-head);letter-spacing:.02em}
+  .market-now-grid{display:grid;grid-template-columns:1fr;gap:14px}.market-data-card{padding:16px;min-width:0}.market-data-card h2{margin:0 0 12px;border:0;padding:0;font:800 22px/1.25 var(--font-head);letter-spacing:.02em;color:var(--espresso)}
   .market-return-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.market-return-card{min-width:0;overflow:hidden;border:1px solid var(--grounds);border-radius:12px;background:color-mix(in srgb,var(--foam) 95%,var(--grounds))}.market-return-card>header{padding:11px 14px;border-bottom:1px solid var(--grounds);font-family:var(--font-head);font-weight:800}.market-return-stats{display:grid;grid-template-columns:minmax(0,1fr) 116px;align-items:stretch}.market-return-participation,.market-return-med{padding:14px}.market-return-participation small,.market-return-med small{display:block;margin-bottom:6px;color:var(--mocha);font-size:11px}.market-return-count{display:flex;align-items:baseline;gap:7px;white-space:nowrap;font-family:var(--font-num)}.market-return-count b{font-size:27px;color:var(--up)}.market-return-count span{font-size:13px}.market-return-rate{display:block;margin-top:5px;font:800 20px var(--font-num);color:var(--up)}.market-return-med{border-left:1px solid var(--grounds);text-align:right}.market-return-med>b{display:block;font:800 20px var(--font-num);white-space:nowrap}.market-return-quartiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:9px 12px 11px;border-top:1px solid var(--grounds);background:color-mix(in srgb,var(--grounds) 18%,var(--foam))}.market-return-quartiles>em{grid-column:1/-1;color:var(--mocha);font:700 10px/1.4 var(--font-head);font-style:normal}.market-return-quartile{min-width:0;padding:6px 4px;border-radius:7px;background:var(--foam);text-align:center}.market-return-quartile b,.market-return-quartile i{display:block}.market-return-quartile b{font:800 10px var(--font-num);color:var(--caramel-2)}.market-return-quartile i{margin-top:2px;font:650 9.5px/1.3 var(--font-num);font-style:normal;color:var(--espresso);white-space:nowrap}
   .breadth-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.breadth-row{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:10px;margin:0;padding:12px;border:1px solid var(--grounds);border-radius:10px}.breadth-row b{font-family:var(--font-head)}.breadth-bar{display:flex;height:12px;overflow:hidden;border-radius:4px;background:var(--grounds)}.breadth-above{background:var(--up)}.breadth-below{background:var(--down)}
   .breadth-num{grid-column:1/-1;text-align:right;font:700 13px var(--font-num)}.breadth-num .up{color:var(--up)}.breadth-num .down{color:var(--down)}.breadth-legend{display:flex;gap:16px;margin-top:14px;color:var(--mocha);font-size:12px}.breadth-legend i{display:inline-block;width:9px;height:9px;margin-right:5px}
-  .market-chart-card{padding-bottom:10px}.market-chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:6px}.market-chart-head h2{margin:0}.market-periods{display:flex}.market-periods button{border:1px solid var(--grounds);border-right:0;background:var(--foam);padding:7px 14px;cursor:pointer;color:var(--mocha)}.market-periods button:first-child{border-radius:8px 0 0 8px}.market-periods button:last-child{border-right:1px solid var(--grounds);border-radius:0 8px 8px 0}.market-periods button.on{background:var(--espresso);color:#fff}
+  .market-chart-card{padding-bottom:10px}.market-chart-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:6px}.market-chart-head h2{margin:0;border:0;padding:0;font:800 22px/1.25 var(--font-head);color:var(--espresso)}.market-periods{display:flex}.market-periods button{border:1px solid var(--grounds);border-right:0;background:var(--foam);padding:7px 14px;cursor:pointer;color:var(--mocha)}.market-periods button:first-child{border-radius:8px 0 0 8px}.market-periods button:last-child{border-right:1px solid var(--grounds);border-radius:0 8px 8px 0}.market-periods button.on{background:var(--espresso);color:#fff}
   #homeIndexChart svg{width:100%;height:auto;display:block;touch-action:none;cursor:grab;user-select:none}#homeIndexChart svg.dragging{cursor:grabbing}.home-chart-read{min-height:20px;font:12px var(--font-num);color:var(--mocha);margin:2px 0 0 45px}.market-chart-note{font-size:11px;color:var(--mocha);text-align:right;margin-top:-3px}
   /* 「今日觀察」只是區段標題與內容容器，不另外鋪一層卡片底色。 */
   .home-action-panel{padding:0;background:transparent;border:0;box-shadow:none}
@@ -6004,17 +6010,30 @@ __SEO_HEAD__
   .home-shortcuts{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
   .island-shortcut{display:flex;min-height:150px;flex-direction:column;padding:20px;background:linear-gradient(180deg,var(--foam),#F6EAD6);color:var(--espresso);text-decoration:none}
   html[data-theme="c"] .island-shortcut{background:#21343a;color:#f5ead7}
-  .island-shortcut b{font:800 22px/1.35 var(--font-head);letter-spacing:.02em}
-  .island-shortcut span{margin:10px 0;color:var(--mocha);font:400 13px/1.7 var(--font-body)}
-  .island-shortcut em{margin-top:auto;color:var(--caramel-2);font:800 13px var(--font-body);font-style:normal}
-  .home-industry-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px}
-  .home-industry-head h2{margin:0;font:800 20px var(--font-head);letter-spacing:.02em}.home-industry-head>span{color:var(--mocha);font-weight:700;font-size:14px}
-  .home-industry-list{display:flex;gap:8px;flex-wrap:wrap}
-  .home-industry-list>span{width:100%;padding:7px 10px;border-radius:10px;background:rgba(255,255,255,.72);font-size:14px}
+  .island-shortcut>b{display:block;font:800 22px/1.3 var(--font-head);letter-spacing:.02em;color:var(--espresso)}
+  .island-shortcut>b span{font:inherit;color:inherit;margin:0}
+  .island-shortcut>span{display:block;margin:10px 0 12px;color:var(--mocha);font:400 13.5px/1.7 var(--font-body)}
+  .island-shortcut>span span{font:inherit;color:inherit;margin:0}
+  .island-shortcut>em{display:block;margin-top:auto;color:var(--caramel-2);font:800 13px var(--font-body);font-style:normal}
+  .island-shortcut>em span{font:inherit;color:inherit;margin:0}
+  html[data-theme="c"] .island-shortcut>b{color:#f5ead7}
+  html[data-theme="c"] .island-shortcut>span{color:#b8c7c1}
+  html[data-theme="c"] .island-shortcut>em{color:#8fc5a5}
+  .home-industry-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+  .home-industry-head h2{margin:0;border:0;padding:0;font:800 22px/1.25 var(--font-head);letter-spacing:.02em;color:var(--espresso)}
+  .home-industry-head h2 span{font:inherit;color:inherit}
+  .home-industry-head>span{flex:0 0 auto;color:var(--caramel-2);font:800 13px var(--font-body)}
+  .home-industry-head>span span{font:inherit;color:inherit}
+  .home-industry-list{display:flex;flex-direction:column;gap:8px}
+  .home-industry-item{display:flex;align-items:baseline;justify-content:space-between;gap:10px;width:100%;padding:9px 12px;border-radius:12px;background:rgba(255,255,255,.72);box-sizing:border-box}
+  .home-industry-item b{font:800 15px/1.35 var(--font-head);color:var(--espresso)}
+  .home-industry-item small{color:var(--mocha);font:500 12px/1.4 var(--font-body)}
+  .home-industry-asof,.home-industry-empty{width:100%;padding:2px 4px;color:var(--mocha);font:400 12px/1.6 var(--font-body)}
   html[data-theme="c"] .home-industry{background:#21343A;border-color:#466068}
-  html[data-theme="c"] .home-industry-list>span{background:#17252B;color:#F5EAD7}
+  html[data-theme="c"] .home-industry-item{background:#17252B;color:#F5EAD7}
+  html[data-theme="c"] .home-industry-item b{color:#F5EAD7}
   .liquidity-dashboard{padding:0!important;margin:0 0 12px}
-  .liquidity-chart-wrap{padding:0 16px 16px}.fed-policy-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}.fed-policy-head h2{margin:0 0 4px;font:800 20px var(--font-head);letter-spacing:.02em}.fed-policy-head p{margin:0;color:var(--mocha);font-size:12px;line-height:1.55}.fed-policy-status{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.policy-status{white-space:nowrap;border:1px solid var(--grounds);border-radius:999px;padding:4px 8px;font-size:11px;color:var(--mocha);background:var(--foam)}.policy-status.ok{color:var(--up);border-color:color-mix(in srgb,var(--up) 45%,var(--grounds))}.policy-status.warn{color:var(--caramel-2)}.policy-status.danger{color:var(--down)}
+  .liquidity-chart-wrap{padding:0 16px 16px}.fed-policy-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px}.fed-policy-head h2{margin:0 0 6px;border:0;padding:0;font:800 22px/1.25 var(--font-head);letter-spacing:.02em;color:var(--espresso)}.fed-policy-head h2 span{font:inherit;color:inherit}.fed-policy-head p{margin:0;color:var(--mocha);font:400 13px/1.6 var(--font-body)}.fed-policy-status{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.policy-status{white-space:nowrap;border:1px solid var(--grounds);border-radius:999px;padding:4px 8px;font-size:11px;color:var(--mocha);background:var(--foam)}.policy-status.ok{color:var(--up);border-color:color-mix(in srgb,var(--up) 45%,var(--grounds))}.policy-status.warn{color:var(--caramel-2)}.policy-status.danger{color:var(--down)}
   .fed-policy-fold{border:1px solid var(--grounds);border-radius:14px;background:color-mix(in srgb,var(--foam) 92%,var(--grounds));overflow:hidden}.fed-policy-fold+.fed-policy-fold{margin-top:10px}.fed-policy-fold>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;cursor:pointer;list-style:none;font-family:var(--font-head);font-weight:850;color:var(--espresso)}.fed-policy-fold>summary::-webkit-details-marker{display:none}.fed-policy-fold>summary:after{content:'›';font:700 24px/1 var(--font-num);color:var(--caramel-2);transform:rotate(90deg);transition:transform .18s}.fed-policy-fold[open]>summary:after{transform:rotate(-90deg)}.fed-policy-fold>summary small{margin-left:8px;font:500 11px var(--font-num);color:var(--mocha)}.policy-detail-fold>.policy-board{padding:0 16px 4px}.liquidity-dashboard{padding:0 16px 16px}.liquidity-hero{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 18px;border-radius:13px;background:linear-gradient(135deg,color-mix(in srgb,var(--caramel) 22%,var(--foam)),color-mix(in srgb,var(--up) 10%,var(--foam)));border:1px solid color-mix(in srgb,var(--caramel) 45%,var(--grounds))}.liquidity-hero small{color:var(--mocha)}.liquidity-hero h3{margin:3px 0 2px;font:850 27px var(--font-num)}.liquidity-delta{white-space:nowrap;padding:6px 9px;border-radius:999px;background:var(--foam);color:var(--up);font:700 12px var(--font-num)}.liquidity-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0 16px}.liquidity-metric{min-width:0;padding:12px;border:1px solid var(--grounds);border-radius:12px;background:var(--foam)}.liquidity-metric-top{display:flex;align-items:flex-start;justify-content:space-between;gap:4px;font-size:11px;font-weight:800;color:var(--espresso)}.liquidity-metric code{font-size:9px;color:var(--mocha)}.liquidity-metric>b{display:block;margin:8px 0 1px;font:800 17px var(--font-num);overflow-wrap:anywhere}.liquidity-metric>small{display:block;color:var(--caramel-2);font:700 10px var(--font-num)}.liquidity-metric>p{margin:8px 0 0;color:var(--mocha);font-size:10.5px;line-height:1.45}.liquidity-chart-head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:8px}.liquidity-chart-head h3{margin:0;font-size:16px}.liquidity-chart-formula{color:var(--mocha);font:600 10px/1.45 var(--font-num)}.liquidity-chart-head p{margin:2px 0 0;color:var(--mocha);font-size:10px}.liquidity-tabs{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.liquidity-tabs button{border:1px solid var(--grounds);border-radius:999px;background:var(--foam);color:var(--mocha);padding:5px 9px;font:700 10px var(--font-num);cursor:pointer}.liquidity-tabs button.on{background:var(--espresso);border-color:var(--espresso);color:var(--foam)}#liquidityChart{position:relative;min-height:220px;border:1px solid var(--grounds);border-radius:12px;padding:7px;background:var(--foam)}#liquidityChart svg{display:block;width:100%;height:auto;touch-action:none}.liquidity-chart-read{min-height:18px;padding:2px 5px;color:var(--espresso);font:700 11px var(--font-num)}.liquidity-formula-note{margin:8px 2px 0;color:var(--mocha);font-size:10px;line-height:1.5}
   .policy-rate-history{margin-top:13px;padding-top:10px;border-top:1px dashed var(--grounds)}.policy-rate-history-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--mocha);font-size:10px;font-weight:700}.policy-rate-history-head>span{white-space:nowrap;font:600 9px var(--font-num)}.policy-rate-history-head i{display:inline-block;width:7px;height:2px;margin:0 3px 2px 7px;vertical-align:middle}.policy-rate-history-head i.effr{background:var(--caramel-2)}.policy-rate-history-head i.iorb{background:var(--up)}#policyRateChart{min-height:145px;margin-top:5px}#policyRateChart svg{display:block;width:100%;height:auto;touch-action:none}.policy-rate-read{min-height:17px;color:var(--espresso);font:700 10px var(--font-num)}
   .fiscal-trend{margin-top:13px;padding-top:10px;border-top:1px dashed var(--grounds)}.fiscal-trend-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;color:var(--mocha);font-size:10px;font-weight:700}.fiscal-trend-tabs{display:flex;justify-content:flex-end;gap:4px;flex-wrap:wrap}.fiscal-trend-tabs button{border:1px solid var(--grounds);border-radius:999px;background:var(--foam);color:var(--mocha);padding:3px 6px;font:700 9px var(--font-num);cursor:pointer}.fiscal-trend-tabs button.on{background:var(--espresso);border-color:var(--espresso);color:var(--foam)}.fiscal-trend-chart{min-height:132px;margin-top:5px}.fiscal-trend-chart svg{display:block;width:100%;height:auto;touch-action:none}.fiscal-trend-read{min-height:17px;color:var(--espresso);font:700 10px var(--font-num)}
@@ -6048,11 +6067,11 @@ __SEO_HEAD__
     .home-dashboard .fed-policy-panel{order:5}
     .home-action-panel .home-actions{gap:15px}
     .home-shortcuts{grid-template-columns:1fr;gap:15px;margin-top:15px}
-    .island-shortcut b{font-size:22px;font-weight:800}
-    .hs-head b,.home-industry-head h2,.market-data-card h2,.fed-policy-head h2{font-size:20px;font-weight:800}
+    .island-shortcut>b,.hs-head b,.home-industry-head h2,.market-data-card h2,.fed-policy-head h2{font-size:22px;font-weight:800;line-height:1.25}
+    .market-now-title h1{font-size:30px}
   }
   @media(max-width:560px){.reading-row{grid-template-columns:54px 1fr}.ind-change-grid,.ind-stock-list{grid-template-columns:1fr}}
-  @media(max-width:560px){.market-now-grid,.market-return-grid,.breadth-grid{grid-template-columns:1fr}.market-now-hero{padding:17px 18px}.market-now-title h1{font-size:27px}.market-now-badge{padding:6px 13px}.market-return-stats{grid-template-columns:minmax(0,1fr) 108px}.market-return-participation,.market-return-med{padding:12px}.market-return-count b{font-size:24px}.market-return-quartiles{grid-template-columns:repeat(2,minmax(0,1fr))}.market-return-quartile i{font-size:10px}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods,.liquidity-periods{width:100%}.market-periods button,.liquidity-periods button{flex:1;padding:7px 5px}}
+  @media(max-width:560px){.market-now-grid,.market-return-grid,.breadth-grid{grid-template-columns:1fr}.market-now-hero{padding:17px 18px}.market-now-title h1{font-size:30px}.market-now-badge{padding:6px 13px}.market-return-stats{grid-template-columns:minmax(0,1fr) 108px}.market-return-participation,.market-return-med{padding:12px}.market-return-count b{font-size:24px}.market-return-quartiles{grid-template-columns:repeat(2,minmax(0,1fr))}.market-return-quartile i{font-size:10px}.market-chart-head{align-items:flex-start;flex-direction:column}.market-periods,.liquidity-periods{width:100%}.market-periods button,.liquidity-periods button{flex:1;padding:7px 5px}}
   /* 今日市場：市場階段（可展開看說明） */
   /* 到價提醒的股票選擇器（自台股版移植） */
   .stockpick { position:relative; }
@@ -6100,15 +6119,18 @@ __SEO_HEAD__
            transition:border-color .15s, transform .15s; }
   .hs-box:hover { border-color:var(--caramel); transform:translateY(-1px); }
   .hs-head { display:flex; align-items:baseline; gap:8px; }
-  .hs-head b { font-family:var(--font-head); font-size:20px; font-weight:800; letter-spacing:.02em; }
-  .hs-n { font-family:var(--font-num); font-size:26px; color:var(--caramel-2);
-           font-weight:700; margin-left:auto; }
-  .hs-unit { font-size:13px; color:var(--mocha); }
-  .hs-list { display:block; margin-top:8px; font-size:13px; color:var(--mocha);
+  .hs-head b { font-family:var(--font-head); font-size:22px; font-weight:800; line-height:1.2; letter-spacing:.02em; color:var(--espresso); }
+  .hs-n { font-family:var(--font-num); font-size:32px; color:var(--caramel-2);
+           font-weight:800; margin-left:auto; line-height:1; }
+  .hs-unit { font-size:16px; font-weight:800; color:var(--espresso); }
+  .hs-meta { display:block; margin:8px 0 0; font-family:var(--font-head);
+           font-size:16px; font-weight:700; line-height:1.45; color:var(--espresso); }
+  .hs-list { display:block; margin-top:10px; font-size:13px; color:var(--mocha);
            line-height:1.7; overflow:hidden; text-overflow:ellipsis;
            display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
   .hs-sub { display:block; margin-top:8px; font-size:12px; color:var(--mocha); }
-  .hs-go { display:block; margin-top:8px; font-size:13px; color:var(--caramel-2); }
+  .hs-zero .hs-head b { color:var(--espresso); }
+  .hs-go { display:block; margin-top:10px; font-size:13px; font-weight:800; color:var(--caramel-2); }
   .mk-body { padding:2px 16px 14px; border-top:1px solid var(--grounds);
            font-size:14px; color:#555; line-height:1.9; }
   .mk-body b { color:var(--espresso); }

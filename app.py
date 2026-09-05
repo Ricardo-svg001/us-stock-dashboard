@@ -4712,6 +4712,131 @@ def _home_screen_html():
         '</a>')
 
 
+def _daily_menu_date(value):
+    """將收盤資料日期轉成社群文案採用的 M/D。"""
+    match = re.search(r"(?:^|[^0-9])(\d{4})[-/](\d{1,2})[-/](\d{1,2})", str(value or ""))
+    if not match:
+        return "—"
+    return "%d/%d" % (int(match.group(2)), int(match.group(3)))
+
+
+def _home_daily_menu_share_html():
+    """美股首頁分享文案：只讀既有快取，分享不會觸發重新抓取或計算。"""
+    import html as _h
+
+    market_counts = _load_cache(MARKET_COUNT_CACHE, None) or {}
+    recent = market_counts.get("recent_returns") or {}
+    recent_rows = {int(row.get("days") or 0): row for row in (recent.get("rows") or [])}
+    r20, r60 = recent_rows.get(20, {}), recent_rows.get(60, {})
+    snapshot = get_ma_breadth_snapshot() or {}
+    ma_rows = {int(row.get("period") or 0): row for row in (snapshot.get("rows") or [])}
+
+    def pct(value, digits=1, signed=False):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "—"
+        return ("%+.*f%%" if signed else "%.*f%%") % (digits, number)
+
+    def count(row):
+        try:
+            return "%d/%d" % (int(row.get("winners")), int(row.get("base")))
+        except (AttributeError, TypeError, ValueError):
+            return "—"
+
+    # 嚴格多頭結果只使用與首頁相同、且沒有落後市場寬度的快取。
+    screen = _load_cache("home_screen.json", None) or {}
+    target = _home_screen_target_date()
+    as_of_screen = str(screen.get("as_of") or "")
+    screen_ready = bool(screen) and (not target or as_of_screen >= target)
+    try:
+        screen_n = int(screen.get("n")) if screen_ready else None
+        screen_count = "%d檔" % screen_n
+    except (TypeError, ValueError):
+        screen_n = None
+        screen_count = "資料更新中"
+
+    top = (screen.get("top") or []) if screen_ready else []
+    leaders = "、".join(str(row.get("symbol") or "").strip() for row in top[:3]
+                       if str(row.get("symbol") or "").strip())
+    if not leaders:
+        leaders = "無（今日無符合檔）" if screen_n == 0 else "資料更新中"
+
+    sectors = (screen.get("sectors") or []) if screen_ready else []
+    sector_names = [str(row.get("name_zh") or row.get("name") or "").strip()
+                    for row in sectors if str(row.get("name_zh") or row.get("name") or "").strip()]
+    sector_brief = "、".join(sector_names[:2])
+    if not sector_brief:
+        sector_brief = "無（今日無符合檔）" if screen_n == 0 else "資料更新中"
+    leading_sector = sector_names[0] if sector_names else sector_brief
+
+    data_date = recent.get("as_of") or snapshot.get("date") or screen.get("as_of")
+    date = _daily_menu_date(data_date)
+    template_one = """☕ 美股咖啡館・今日菜單（%s）
+
+20日：上漲 %s、中位報酬 %s
+60日：上漲 %s、中位報酬 %s
+
+站上 50MA %s｜100MA %s｜150MA %s
+
+今日符合「市值前300・嚴格多頭・站上10日」：%s
+產業偏：%s
+
+不是買點清單，是今天的盤面處境。
+us.stock-coffee.com""" % (
+        date, pct(r20.get("win_pct")), pct(r20.get("median_return"), 2, signed=True),
+        pct(r60.get("win_pct")), pct(r60.get("median_return"), 2, signed=True),
+        pct(ma_rows.get(50, {}).get("pct")), pct(ma_rows.get(100, {}).get("pct")),
+        pct(ma_rows.get(150, {}).get("pct")), screen_count, sector_brief)
+    template_two = """盤後整理｜市場寬度與均線強勢股（%s）
+先講限制：以下是市值前300大美股已實現收盤資料，只描述過去選股環境，不預測下一段。
+【寬度】
+過去20日：上漲家數 %s（%s），中位報酬 %s
+過去60日：上漲家數 %s（%s），中位報酬 %s
+站上 50MA %s／100MA %s／150MA %s
+【今日篩選】
+條件：市值前300 + 嚴格多頭排列（10＞20＞50＞150）+ 站上10日線
+結果：%s
+前幾名：%s
+產業較集中：%s（這本身是訊息，不是保證續強）
+【怎麼用】
+均線看的是一段期間買方的平均成本處境，不是黃金交叉神器。
+檔數多、產業集中，代表近期趨勢股擁擠；檔數少，代表能同時滿足條件的標的變窄。
+工具：https://us.stock-coffee.com""" % (
+        date, count(r20), pct(r20.get("win_pct")), pct(r20.get("median_return"), 2, signed=True),
+        count(r60), pct(r60.get("win_pct")), pct(r60.get("median_return"), 2, signed=True),
+        pct(ma_rows.get(50, {}).get("pct")), pct(ma_rows.get(100, {}).get("pct")),
+        pct(ma_rows.get(150, {}).get("pct")), screen_count, leaders, leading_sector)
+
+    # 特殊股名或產業名稱只能作為文字內容，不能改變 HTML attribute 結構。
+    t1, t2 = _h.escape(template_one, quote=True), _h.escape(template_two, quote=True)
+    return '''<div class="daily-menu-share" id="dailyMenuShare" data-template-1="%s" data-template-2="%s">
+  <div class="daily-menu-dialog" id="dailyMenuDialog" hidden role="dialog" aria-modal="true" aria-labelledby="dailyMenuDialogTitle">
+    <div class="daily-menu-dialog-card">
+      <div class="daily-menu-dialog-head"><div><h2 id="dailyMenuDialogTitle">今日菜單文案</h2><p>選擇模板後，可複製文字或開啟系統分享。</p></div><button class="daily-menu-close" id="dailyMenuClose" type="button" aria-label="關閉">×</button></div>
+      <div class="daily-menu-templates" role="group" aria-label="文案模板"><button class="daily-menu-template" type="button" data-template="1" aria-pressed="true">模板 1・短文</button><button class="daily-menu-template" type="button" data-template="2" aria-pressed="false">模板 2・完整整理</button></div>
+      <textarea class="daily-menu-text" id="dailyMenuText" readonly aria-label="今日菜單分享文案">%s</textarea>
+      <div class="daily-menu-actions"><button id="dailyMenuNativeShare" type="button">系統分享</button><button id="dailyMenuCopy" class="primary" type="button">複製文案</button></div>
+      <div class="daily-menu-status" id="dailyMenuStatus" aria-live="polite"></div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var root=document.getElementById('dailyMenuShare'); if(!root) return;
+  var dialog=document.getElementById('dailyMenuDialog'), open=document.getElementById('menuDailyShareBtn');
+  var close=document.getElementById('dailyMenuClose'), text=document.getElementById('dailyMenuText');
+  var copy=document.getElementById('dailyMenuCopy'), nativeShare=document.getElementById('dailyMenuNativeShare');
+  var status=document.getElementById('dailyMenuStatus'), selected='1', templates={'1':root.dataset.template1||'', '2':root.dataset.template2||''};
+  function setTemplate(kind){selected=kind;text.value=templates[kind]||'';status.textContent='';root.querySelectorAll('[data-template]').forEach(function(button){var active=button.dataset.template===kind;button.setAttribute('aria-pressed',active?'true':'false');});}
+  function show(){dialog.hidden=false;setTemplate(selected);close.focus();var sidebar=document.getElementById('sidebar'),overlay=document.getElementById('overlay');if(sidebar)sidebar.classList.remove('open');if(overlay)overlay.classList.remove('show');}
+  function hide(){dialog.hidden=true;status.textContent='';if(open)open.focus();}
+  async function copyText(){var value=text.value;try{if(navigator.clipboard&&window.isSecureContext)await navigator.clipboard.writeText(value);else{text.focus();text.select();if(!document.execCommand('copy'))throw new Error('copy failed');}status.textContent='已複製文案，現在可直接貼到社群平台。';}catch(e){text.focus();text.select();status.textContent='請手動選取並複製文案。';}}
+  if(open)open.addEventListener('click',function(e){e.preventDefault();show();});close.addEventListener('click',hide);dialog.addEventListener('click',function(e){if(e.target===dialog)hide();});document.addEventListener('keydown',function(e){if(e.key==='Escape'&&!dialog.hidden)hide();});root.querySelectorAll('[data-template]').forEach(function(button){button.addEventListener('click',function(){setTemplate(button.dataset.template);});});copy.addEventListener('click',copyText);nativeShare.addEventListener('click',async function(){if(!navigator.share){await copyText();return;}try{await navigator.share({title:'美股咖啡館・今日菜單',text:text.value});status.textContent='已開啟系統分享。';}catch(e){if(e&&e.name!=='AbortError')status.textContent='系統分享未完成，可改用複製文案。';}});setTemplate('1');if(new URLSearchParams(window.location.search).get('share')==='1')show();
+})();
+</script>''' % (t1, t2, t1)
+
+
 def _home_industry_brief_html():
     """首頁產業速報：顯示完整產業分析的近期 20 日前三名。只讀快取。"""
     import html as _h
@@ -6338,10 +6463,31 @@ __SEO_HEAD__
   .navitem i{width:28px;margin-right:10px;vertical-align:top;font-size:16px}
   .navitem b{font:800 14px var(--font-body)}
   .navitem small{padding-left:38px;margin-top:2px;color:var(--mocha);font:400 11px/1.4 var(--font-body)}
+  /* 「今日市場」保留完整主標與副標；分享按鈕獨立在右側，避免硬切文字。 */
+  .nav-home-row{display:grid;grid-template-columns:minmax(0,1fr) 58px;gap:6px;align-items:stretch}
+  .nav-home-row>.navitem{width:auto;min-width:0}
+  .nav-home-row>.navitem b,.nav-home-row>.navitem small{white-space:nowrap}
+  .nav-home-share{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+    min-width:0;padding:7px 4px;border:1px solid var(--grounds);border-radius:12px;background:var(--milk);
+    color:var(--espresso);text-align:center;text-decoration:none;font:800 11px/1.15 var(--font-body)}
+  .nav-home-share i{width:auto;margin:0;font-style:normal;font-size:18px;line-height:1;color:var(--caramel-2)}
+  .nav-home-share:hover{border-color:var(--caramel);background:#F4EAD8}
+  html[data-theme="c"] .nav-home-share{background:#192c32;border-color:#466068;color:#f5ead7}
+  /* 側欄分享鈕開啟的兩種今日菜單文案。 */
+  .daily-menu-share{display:contents}.daily-menu-dialog[hidden]{display:none!important}
+  .daily-menu-dialog{position:fixed;z-index:330;inset:0;display:grid;place-items:center;padding:20px;background:rgba(51,36,26,.56)}
+  .daily-menu-dialog-card{width:min(100%,670px);max-height:min(760px,calc(100dvh - 40px));display:flex;flex-direction:column;padding:20px;overflow:hidden;border:1px solid var(--grounds);border-radius:24px;background:var(--foam);box-shadow:0 28px 68px rgba(51,36,26,.34)}
+  .daily-menu-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.daily-menu-dialog-head h2{margin:0;color:var(--espresso);font:900 22px/1.3 var(--font-head)}.daily-menu-dialog-head p{margin:5px 0 0;color:var(--mocha);font-size:13px;line-height:1.6}
+  .daily-menu-close{appearance:none;flex:0 0 38px;width:38px;height:38px;border:1px solid var(--grounds);border-radius:50%;background:transparent;color:var(--mocha);cursor:pointer;font-size:24px;line-height:1}.daily-menu-close:hover{border-color:var(--caramel);color:var(--espresso)}
+  .daily-menu-templates{display:flex;gap:8px;margin:18px 0 10px}.daily-menu-template{flex:1;min-height:42px;padding:0 12px;appearance:none;border:1px solid var(--grounds);border-radius:11px;background:var(--milk);color:var(--mocha);cursor:pointer;font:800 14px var(--font-body)}.daily-menu-template[aria-pressed="true"]{border-color:var(--caramel);background:var(--caramel);color:#fff}
+  .daily-menu-text{width:100%;min-height:300px;box-sizing:border-box;resize:vertical;padding:14px;border:1px solid var(--grounds);border-radius:13px;background:#fffdf9;color:var(--espresso);font:14px/1.65 var(--font-body);white-space:pre-wrap}
+  .daily-menu-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;margin-top:12px}.daily-menu-actions button{min-height:42px;padding:0 15px;appearance:none;border:1px solid var(--grounds);border-radius:11px;background:transparent;color:var(--espresso);cursor:pointer;font:800 14px var(--font-body)}.daily-menu-actions button.primary{border-color:var(--caramel);background:var(--caramel);color:#fff}.daily-menu-actions button:hover{border-color:var(--caramel-2)}.daily-menu-status{min-height:20px;margin:10px 2px 0;color:var(--mocha);font-size:12px}
+  html[data-theme="c"] .daily-menu-dialog-card{background:#21343a;border-color:#466068}html[data-theme="c"] .daily-menu-dialog-head h2{color:#f5ead7}html[data-theme="c"] .daily-menu-dialog-head p,html[data-theme="c"] .daily-menu-status{color:#b8c7c1}html[data-theme="c"] .daily-menu-close,html[data-theme="c"] .daily-menu-template,html[data-theme="c"] .daily-menu-actions button{background:#192c32;color:#f5ead7;border-color:#466068}html[data-theme="c"] .daily-menu-template[aria-pressed="true"],html[data-theme="c"] .daily-menu-actions button.primary{background:var(--caramel);border-color:var(--caramel);color:#fff}html[data-theme="c"] .daily-menu-text{background:#192c32;color:#f5ead7;border-color:#466068}
   @media(max-width:760px){
     #sidebar{top:12px;bottom:12px;left:-110%;width:calc(100% - 24px);border-radius:24px}
     #sidebar.open{left:12px}
   }
+  @media(max-width:560px){.daily-menu-dialog{padding:12px}.daily-menu-dialog-card{max-height:calc(100dvh - 24px);padding:16px;border-radius:20px}.daily-menu-dialog-head h2{font-size:20px}.daily-menu-text{min-height:275px;font-size:13px}.daily-menu-actions{display:grid;grid-template-columns:1fr 1fr}.daily-menu-actions button{width:100%;padding:0 8px}}
   .site-footer { max-width:1180px; margin:0 auto; padding:0 18px calc(28px + env(safe-area-inset-bottom)); text-align:center;
                  color:var(--mocha); font-size:12px; line-height:1.8; }
   .site-footer a { color:var(--caramel-2); text-decoration:none; font-weight:700; }
@@ -6404,7 +6550,10 @@ __SEO_HEAD__
 <nav id="sidebar">
   <header class="menu-head"><div><div class="sbTitle"><span class="q-zh">本日菜單</span><span class="q-en" style="display:none">Today's Menu</span></div><p><span class="q-zh">全部功能從這裡進出。首頁只是開胃菜。</span><span class="q-en" style="display:none">All tools live here. The home page is the daily starter.</span></p></div><button id="menuCloseBtn" type="button" aria-label="關閉選單">×</button></header>
   <div class="nav-section"><span class="q-zh">今日營業</span><span class="q-en" style="display:none">Today</span></div>
-  <a class="navitem active" data-page="home" href="/"><i>☀️</i><b data-i18n="nav.home">今日市場</b><small data-i18n="nav.home.sub">今天適合出手嗎</small></a>
+  <div class="nav-home-row">
+    <a class="navitem active" data-page="home" href="/"><i>☀️</i><b data-i18n="nav.home">今日市場</b><small data-i18n="nav.home.sub">今天適合出手嗎</small></a>
+    <a class="nav-home-share" id="menuDailyShareBtn" href="/?share=1" aria-label="分享今日菜單"><i aria-hidden="true">↗</i><span class="q-zh">分享</span><span class="q-en" style="display:none">Share</span></a>
+  </div>
   <a class="navitem" data-page="p1" href="/screener"><i>🔥</i><b data-i18n="p1.title">找強勢股</b><small data-i18n="nav.screen.sub">找出強勢主流題材股</small></a>
   <a class="navitem" data-page="pind" href="/industries"><i>🧱</i><b data-i18n="nav.industry">產業分析</b><small data-i18n="nav.industry.sub">動能擴散・產業領先股</small></a>
   <a class="navitem" data-page="p4" href="/alerts"><i>🔔</i><b data-i18n="p4.title">到價提醒</b><small data-i18n="nav.alert.sub">收盤到價提醒（測試中）</small></a>
@@ -6471,6 +6620,8 @@ __FED_POLICY_PANEL__
       <em><span class="q-zh">進 RS 頁 →</span><span class="q-en" style="display:none">Open RS →</span></em>
     </a>
   </div>
+
+  __HOME_DAILY_MENU_SHARE__
 
 </div>
 
@@ -11538,6 +11689,7 @@ def _render(slug=None):
     html = html.replace("__UPDATE_NOTE__", _update_note_html())
     html = html.replace("__FED_POLICY_PANEL__", _fed_policy_panel_html())
     html = html.replace("__HOME_SCREEN__", _home_screen_html())
+    html = html.replace("__HOME_DAILY_MENU_SHARE__", _home_daily_menu_share_html())
     html = html.replace("__HOME_INDUSTRY_BRIEF__", _home_industry_brief_html())
     html = html.replace("__BUILD_INFO__", _build_badge_html())
     # ⚠️ 只放**公開**金鑰。VAPID_PRIVATE 絕對不能出現在頁面上。

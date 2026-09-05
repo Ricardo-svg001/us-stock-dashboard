@@ -4811,6 +4811,10 @@ us.stock-coffee.com""" % (
     # 特殊股名或產業名稱只能作為文字內容，不能改變 HTML attribute 結構。
     t1, t2 = _h.escape(template_one, quote=True), _h.escape(template_two, quote=True)
     return '''<div class="daily-menu-share" id="dailyMenuShare" data-template-1="%s" data-template-2="%s">
+  <section class="home-daily-share-card" aria-labelledby="homeDailyShareTitle">
+    <div class="home-daily-share-copy"><b id="homeDailyShareTitle">每日「今日菜單」文案</b><span>自動帶入盤後數據，可選短文或完整整理後分享。</span></div>
+    <button class="home-daily-share-button" id="homeDailyShareBtn" type="button">分享今日菜單</button>
+  </section>
   <div class="daily-menu-dialog" id="dailyMenuDialog" hidden role="dialog" aria-modal="true" aria-labelledby="dailyMenuDialogTitle">
     <div class="daily-menu-dialog-card">
       <div class="daily-menu-dialog-head"><div><h2 id="dailyMenuDialogTitle">今日菜單文案</h2><p>選擇模板後，可複製文字或開啟系統分享。</p></div><button class="daily-menu-close" id="dailyMenuClose" type="button" aria-label="關閉">×</button></div>
@@ -4824,15 +4828,16 @@ us.stock-coffee.com""" % (
 <script>
 (function(){
   var root=document.getElementById('dailyMenuShare'); if(!root) return;
-  var dialog=document.getElementById('dailyMenuDialog'), open=document.getElementById('menuDailyShareBtn');
+  var dialog=document.getElementById('dailyMenuDialog');
+  var openers=[document.getElementById('homeDailyShareBtn'),document.getElementById('menuDailyShareBtn')].filter(Boolean),lastOpener=null;
   var close=document.getElementById('dailyMenuClose'), text=document.getElementById('dailyMenuText');
   var copy=document.getElementById('dailyMenuCopy'), nativeShare=document.getElementById('dailyMenuNativeShare');
-  var status=document.getElementById('dailyMenuStatus'), selected='1', templates={'1':root.dataset.template1||'', '2':root.dataset.template2||''};
+  var status=document.getElementById('dailyMenuStatus'), selected='1', templates={'1':root.getAttribute('data-template-1')||'', '2':root.getAttribute('data-template-2')||''};
   function setTemplate(kind){selected=kind;text.value=templates[kind]||'';status.textContent='';root.querySelectorAll('[data-template]').forEach(function(button){var active=button.dataset.template===kind;button.setAttribute('aria-pressed',active?'true':'false');});}
-  function show(){dialog.hidden=false;setTemplate(selected);close.focus();var sidebar=document.getElementById('sidebar'),overlay=document.getElementById('overlay');if(sidebar)sidebar.classList.remove('open');if(overlay)overlay.classList.remove('show');}
-  function hide(){dialog.hidden=true;status.textContent='';if(open)open.focus();}
+  function show(opener){lastOpener=opener||null;dialog.hidden=false;setTemplate(selected);close.focus();var sidebar=document.getElementById('sidebar'),overlay=document.getElementById('overlay');if(sidebar)sidebar.classList.remove('open');if(overlay)overlay.classList.remove('show');}
+  function hide(){dialog.hidden=true;status.textContent='';if(lastOpener)lastOpener.focus();}
   async function copyText(){var value=text.value;try{if(navigator.clipboard&&window.isSecureContext)await navigator.clipboard.writeText(value);else{text.focus();text.select();if(!document.execCommand('copy'))throw new Error('copy failed');}status.textContent='已複製文案，現在可直接貼到社群平台。';}catch(e){text.focus();text.select();status.textContent='請手動選取並複製文案。';}}
-  if(open)open.addEventListener('click',function(e){e.preventDefault();show();});close.addEventListener('click',hide);dialog.addEventListener('click',function(e){if(e.target===dialog)hide();});document.addEventListener('keydown',function(e){if(e.key==='Escape'&&!dialog.hidden)hide();});root.querySelectorAll('[data-template]').forEach(function(button){button.addEventListener('click',function(){setTemplate(button.dataset.template);});});copy.addEventListener('click',copyText);nativeShare.addEventListener('click',async function(){if(!navigator.share){await copyText();return;}try{await navigator.share({title:'美股咖啡館・今日菜單',text:text.value});status.textContent='已開啟系統分享。';}catch(e){if(e&&e.name!=='AbortError')status.textContent='系統分享未完成，可改用複製文案。';}});setTemplate('1');if(new URLSearchParams(window.location.search).get('share')==='1')show();
+  openers.forEach(function(opener){opener.addEventListener('click',function(e){e.preventDefault();show(opener);});});close.addEventListener('click',hide);dialog.addEventListener('click',function(e){if(e.target===dialog)hide();});document.addEventListener('keydown',function(e){if(e.key==='Escape'&&!dialog.hidden)hide();});root.querySelectorAll('[data-template]').forEach(function(button){button.addEventListener('click',function(){setTemplate(button.dataset.template);});});copy.addEventListener('click',copyText);nativeShare.addEventListener('click',async function(){if(!navigator.share){await copyText();return;}try{await navigator.share({title:'美股咖啡館・今日菜單',text:text.value});status.textContent='已開啟系統分享。';}catch(e){if(e&&e.name!=='AbortError')status.textContent='系統分享未完成，可改用複製文案。';}});setTemplate('1');if(new URLSearchParams(window.location.search).get('share')==='1')show(openers[0]);
 })();
 </script>''' % (t1, t2, t1)
 
@@ -5633,6 +5638,8 @@ __SEO_HEAD__
                    font-family:var(--font-num); font-size:11.5px; }
   /* 總體經濟數據 */
   .macro-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  .macro-countries,.macro-yields { display:contents; }
+  .alert-layout { display:contents; }
   .mstat { background:var(--milk); border:1px solid var(--grounds); border-radius:12px; padding:12px 14px; }
   .mstat .ml { font-size:12.5px; color:var(--mocha); }
   .mstat .mv { font-family:var(--font-num); font-size:22px; font-weight:700; color:var(--espresso); margin-top:4px; }
@@ -5930,6 +5937,12 @@ __SEO_HEAD__
   .scard-body { padding:10px 12px; display:grid; grid-template-columns:1fr 1fr; gap:6px 14px; }
   .scard-body .kv { font-size:12.5px; color:var(--mocha); display:flex; justify-content:space-between; gap:8px; }
   .scard-body .kv b { color:var(--espresso); font-family:var(--font-num); font-weight:700; }
+  /* 正2 各年度卡（2025、2024…同一套）：展開後指數／倍數與月份表預設置中。
+     篩選結果卡仍用上面的左右對齊；這裡把表格拉成全寬，避免落在兩欄 grid 的左格。 */
+  #p11 .scard-body { text-align:center; justify-items:center; }
+  #p11 .scard-body .kv { flex-direction:column; justify-content:center; gap:2px; width:100%; }
+  #p11 .scard-body table { grid-column:1/-1; width:100%; }
+  #p11 .scard-body th,#p11 .scard-body td { text-align:center; }
   /* 結果產業二次篩選 */
   .resfilter { display:flex; align-items:center; gap:10px; margin:0 0 12px; flex-wrap:wrap; }
   .resfilter .rflabel { font-size:13px; color:var(--mocha); font-weight:700; }
@@ -6175,6 +6188,89 @@ __SEO_HEAD__
     .market-return-quartile{padding:8px 5px}
     .market-return-quartile b{font-size:11.5px}
     .market-return-quartile i{font-size:11px;line-height:1.45}
+
+    /* 桌機資料工作區：說明維持窄欄，篩選／比較／看圖的頁面展開。 */
+    #p1,#p3,#pstructure,#pind,#pmac,#p4,#pm,#pgrow,#p5,#p9,#p8,#p10,#p7,#p12,#p11{
+      max-width:1180px;margin-left:auto;margin-right:auto}
+    #p1>.pgintro,#p3>.pgintro,#pstructure>.pgintro,#pind>.pgintro,#pmac>.pgintro,
+    #p8>.pgintro,#p10>.pgintro,#p7>.pgintro,#p12>.pgintro,#p11>.pgintro,#pgrow>.pgintro{max-width:760px}
+
+    #p1.page.show,#p3.page.show{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}
+    #p1>.ptitle,#p1>.pgintro,#p1>#modeCard,#p1>.screen-tools,#p1>.gobtn,#p1>.status,#p1>#result1,
+    #p3>.ptitle,#p3>.pgintro,#p3>.screen-tools,#p3>.gobtn,#p3>.status,#p3>#result3{grid-column:1/-1}
+    #p1>.card,#p3>.card{max-width:none;margin:0;min-height:168px}
+    #p1>.screen-tools,#p3>.screen-tools,#p1>.status,#p3>.status,#p1>#result1,#p3>#result3{max-width:none}
+    #p1>.gobtn,#p3>.gobtn{max-width:360px;justify-self:end}
+
+    #pstructure>.card,.structure-screen-controls{max-width:none}
+    .structure-screen-controls{grid-template-columns:repeat(4,minmax(0,1fr))}
+    #pstructure>.gobtn{max-width:360px;margin-left:auto}
+    #pstructure>#structureScreenResult,#pstructure>.status{max-width:none}
+
+    #pind>.card{max-width:none}
+    #pind>.card:first-of-type{display:grid;grid-template-columns:minmax(270px,.72fr) minmax(0,1.28fr);gap:0 22px;align-items:start}
+    #pind>.card:first-of-type .ind-kind-tabs{grid-column:1;grid-row:1}
+    #pind>.card:first-of-type .ind-search{grid-column:1;grid-row:2}
+    #pind>.card:first-of-type .ind-taxonomy-meta{grid-column:1;grid-row:3}
+    #pind>.card:first-of-type>h2{grid-column:2;grid-row:1;margin-bottom:12px}
+    #pind>.card:first-of-type .ind-quad{grid-column:2;grid-row:2 / span 2;grid-template-columns:repeat(2,minmax(0,1fr));align-self:stretch}
+    #pind>.card:nth-of-type(2){display:grid;grid-template-columns:270px minmax(0,1fr);gap:0 22px;align-items:start}
+    #pind>.card:nth-of-type(2)>h2{grid-column:1;grid-row:1}
+    #pind>.card:nth-of-type(2) .ind-filter-tools{grid-column:1;grid-row:2;position:sticky;top:86px;align-self:start}
+    #pind>.card:nth-of-type(2)>#indStatus{grid-column:2;grid-row:1;align-self:end;margin:0 0 12px;text-align:left}
+    #pind>.card:nth-of-type(2)>#indRank{grid-column:2;grid-row:2;min-width:0}
+
+    #pmac>.card{max-width:760px}
+    #macroBox{max-width:none}
+    #macroBox .macro-countries .card,#macroBox .macro-yields .card{max-width:none;margin:0}
+    #macroBox>.card{max-width:none}
+    #macroBox>.status{max-width:none;margin:8px 0 14px}
+    .macro-countries,.macro-yields{display:grid;gap:14px;margin:0 0 14px}
+    .macro-countries{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+    .macro-countries .macro-grid{grid-template-columns:1fr}
+    .macro-yields{grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch}
+    .macro-yields>.yield-card{height:100%}
+
+    #p4 .card,#p4 .gobtn,#p4>.status{max-width:none}
+    .alert-layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(280px,1fr);gap:14px 18px;align-items:start}
+    .alert-compose{display:flex;flex-direction:column;min-width:0;grid-column:1;grid-row:1 / span 3}
+    .alert-compose>.gobtn{width:100%;margin:0}
+    .alert-note,.alert-test,.alert-list{min-width:0;margin:0}
+    .alert-note{grid-column:2;grid-row:1}
+    .alert-list{grid-column:2;grid-row:2}
+    .alert-test{grid-column:2;grid-row:3}
+
+    #pm>.card{max-width:none}
+    #pm .alinks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    #pm .alinks li{margin:0}
+
+    #pgrow>#resultGrow,#p5>.card,#p9>.card{max-width:none}
+    #pgrow>#resultGrow .card{max-width:none}
+    #pgrow .growlist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px}
+
+    /* 我的績效：左欄依序放基本設定、逐月填寫，右欄放挑戰大盤，方便對照。 */
+    #p7.page.show{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(280px,.95fr);gap:14px;align-items:start}
+    #p7>.ptitle,#p7>.pgintro,#p7>.gobtn,#p7>.tw-savebar,#p7>.status,
+    #p7>#twResult,#p7>.data-quality-strip{grid-column:1/-1}
+    #p7>.pgintro{max-width:760px;width:100%;justify-self:center}
+    #p7>.card:first-of-type{grid-column:1;grid-row:3;max-width:none;margin:0}
+    #p7>.card:nth-of-type(2){grid-column:1;grid-row:4;max-width:none;margin:0}
+    #p7>.tw-market-card{grid-column:2;grid-row:3 / span 2;max-width:none;margin:0;align-self:stretch}
+    #p7>.gobtn{max-width:360px;justify-self:end}
+
+    /* 正2 逐月績效：整頁閱讀欄置中，不要貼左吃滿 1440。 */
+    #p11{max-width:720px;margin-left:auto;margin-right:auto}
+    #p11>.pgintro,#p11>#resultLev,#p11 .scard,#p11>#resultLev>.card{max-width:720px;margin-left:auto;margin-right:auto}
+    #p11 .pgintro-b p{text-align:center}
+
+    #p8.page.show,#p10.page.show,#p12.page.show{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}
+    #p8>.ptitle,#p8>.pgintro,#p8>.gobtn,#p8>.status,#p8>#rkResult,
+    #p10>.ptitle,#p10>.pgintro,#p10>.gobtn,#p10>.status,#p10>#dedResult,#p10>.ded-warn,
+    #p12>.ptitle,#p12>.pgintro,#p12>.gobtn,#p12>.status,#p12>#cmpResult{grid-column:1/-1}
+    #p8>.card,#p10>.card,#p12>.card{max-width:none;margin:0}
+    #p8>.gobtn,#p10>.gobtn,#p12>.gobtn{max-width:360px;justify-self:end}
+    #rkResult{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px}
+    #rkResult .rk-card{max-width:none;margin:0}
   }
   @media(min-width:761px){
     .home-dashboard .market-chart-card{align-self:stretch;display:grid;grid-template-rows:auto minmax(0,1fr) auto;height:100%}
@@ -6473,8 +6569,8 @@ __SEO_HEAD__
   .nav-home-share i{width:auto;margin:0;font-style:normal;font-size:18px;line-height:1;color:var(--caramel-2)}
   .nav-home-share:hover{border-color:var(--caramel);background:#F4EAD8}
   html[data-theme="c"] .nav-home-share{background:#192c32;border-color:#466068;color:#f5ead7}
-  /* 側欄分享鈕開啟的兩種今日菜單文案。 */
-  .daily-menu-share{display:contents}.daily-menu-dialog[hidden]{display:none!important}
+  /* 首頁底部與側欄共用同一個今日菜單文案視窗。 */
+  .daily-menu-share{display:block;margin-top:16px}.home-daily-share-card{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:18px 20px;border:1px solid var(--grounds);border-radius:18px;background:var(--foam);box-shadow:var(--shadow)}.home-daily-share-copy b{display:block;color:var(--espresso);font:900 18px/1.35 var(--font-head)}.home-daily-share-copy span{display:block;margin-top:4px;color:var(--mocha);font-size:13px;line-height:1.6}.home-daily-share-button{appearance:none;flex:0 0 auto;min-height:44px;padding:0 18px;border:1px solid var(--caramel);border-radius:12px;background:var(--caramel);color:#fff;cursor:pointer;font:800 14px var(--font-body);box-shadow:0 7px 18px rgba(117,76,42,.16)}.home-daily-share-button:hover{background:var(--caramel-2);border-color:var(--caramel-2)}.daily-menu-dialog[hidden]{display:none!important}
   .daily-menu-dialog{position:fixed;z-index:330;inset:0;display:grid;place-items:center;padding:20px;background:rgba(51,36,26,.56)}
   .daily-menu-dialog-card{width:min(100%,670px);max-height:min(760px,calc(100dvh - 40px));display:flex;flex-direction:column;padding:20px;overflow:hidden;border:1px solid var(--grounds);border-radius:24px;background:var(--foam);box-shadow:0 28px 68px rgba(51,36,26,.34)}
   .daily-menu-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.daily-menu-dialog-head h2{margin:0;color:var(--espresso);font:900 22px/1.3 var(--font-head)}.daily-menu-dialog-head p{margin:5px 0 0;color:var(--mocha);font-size:13px;line-height:1.6}
@@ -6482,12 +6578,12 @@ __SEO_HEAD__
   .daily-menu-templates{display:flex;gap:8px;margin:18px 0 10px}.daily-menu-template{flex:1;min-height:42px;padding:0 12px;appearance:none;border:1px solid var(--grounds);border-radius:11px;background:var(--milk);color:var(--mocha);cursor:pointer;font:800 14px var(--font-body)}.daily-menu-template[aria-pressed="true"]{border-color:var(--caramel);background:var(--caramel);color:#fff}
   .daily-menu-text{width:100%;min-height:300px;box-sizing:border-box;resize:vertical;padding:14px;border:1px solid var(--grounds);border-radius:13px;background:#fffdf9;color:var(--espresso);font:14px/1.65 var(--font-body);white-space:pre-wrap}
   .daily-menu-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;margin-top:12px}.daily-menu-actions button{min-height:42px;padding:0 15px;appearance:none;border:1px solid var(--grounds);border-radius:11px;background:transparent;color:var(--espresso);cursor:pointer;font:800 14px var(--font-body)}.daily-menu-actions button.primary{border-color:var(--caramel);background:var(--caramel);color:#fff}.daily-menu-actions button:hover{border-color:var(--caramel-2)}.daily-menu-status{min-height:20px;margin:10px 2px 0;color:var(--mocha);font-size:12px}
-  html[data-theme="c"] .daily-menu-dialog-card{background:#21343a;border-color:#466068}html[data-theme="c"] .daily-menu-dialog-head h2{color:#f5ead7}html[data-theme="c"] .daily-menu-dialog-head p,html[data-theme="c"] .daily-menu-status{color:#b8c7c1}html[data-theme="c"] .daily-menu-close,html[data-theme="c"] .daily-menu-template,html[data-theme="c"] .daily-menu-actions button{background:#192c32;color:#f5ead7;border-color:#466068}html[data-theme="c"] .daily-menu-template[aria-pressed="true"],html[data-theme="c"] .daily-menu-actions button.primary{background:var(--caramel);border-color:var(--caramel);color:#fff}html[data-theme="c"] .daily-menu-text{background:#192c32;color:#f5ead7;border-color:#466068}
+  html[data-theme="c"] .daily-menu-dialog-card,html[data-theme="c"] .home-daily-share-card{background:#21343a;border-color:#466068}html[data-theme="c"] .daily-menu-dialog-head h2,html[data-theme="c"] .home-daily-share-copy b{color:#f5ead7}html[data-theme="c"] .daily-menu-dialog-head p,html[data-theme="c"] .daily-menu-status,html[data-theme="c"] .home-daily-share-copy span{color:#b8c7c1}html[data-theme="c"] .daily-menu-close,html[data-theme="c"] .daily-menu-template,html[data-theme="c"] .daily-menu-actions button{background:#192c32;color:#f5ead7;border-color:#466068}html[data-theme="c"] .daily-menu-template[aria-pressed="true"],html[data-theme="c"] .daily-menu-actions button.primary{background:var(--caramel);border-color:var(--caramel);color:#fff}html[data-theme="c"] .daily-menu-text{background:#192c32;color:#f5ead7;border-color:#466068}
   @media(max-width:760px){
     #sidebar{top:12px;bottom:12px;left:-110%;width:calc(100% - 24px);border-radius:24px}
     #sidebar.open{left:12px}
   }
-  @media(max-width:560px){.daily-menu-dialog{padding:12px}.daily-menu-dialog-card{max-height:calc(100dvh - 24px);padding:16px;border-radius:20px}.daily-menu-dialog-head h2{font-size:20px}.daily-menu-text{min-height:275px;font-size:13px}.daily-menu-actions{display:grid;grid-template-columns:1fr 1fr}.daily-menu-actions button{width:100%;padding:0 8px}}
+  @media(max-width:560px){.home-daily-share-card{align-items:stretch;flex-direction:column;padding:16px}.home-daily-share-button{width:100%}.daily-menu-dialog{padding:12px}.daily-menu-dialog-card{max-height:calc(100dvh - 24px);padding:16px;border-radius:20px}.daily-menu-dialog-head h2{font-size:20px}.daily-menu-text{min-height:275px;font-size:13px}.daily-menu-actions{display:grid;grid-template-columns:1fr 1fr}.daily-menu-actions button{width:100%;padding:0 8px}}
   .site-footer { max-width:1180px; margin:0 auto; padding:0 18px calc(28px + env(safe-area-inset-bottom)); text-align:center;
                  color:var(--mocha); font-size:12px; line-height:1.8; }
   .site-footer a { color:var(--caramel-2); text-decoration:none; font-weight:700; }
@@ -6924,14 +7020,14 @@ __FED_POLICY_PANEL__
   </div>
 
   <button class="gobtn" id="twCalc" data-i18n="twr.calc">計算績效</button>
-  <div style="text-align:center;margin-top:10px">
+  <div class="tw-savebar" style="text-align:center;margin-top:10px">
     <span id="twSaved" style="font-size:12px;color:#A56C24"></span>
     <a id="twClear" style="font-size:13px;color:#c0392b;cursor:pointer;margin-left:12px;text-decoration:underline" data-i18n="twr.clear">清空所有資料</a>
   </div>
   <div class="status" id="statusTw"></div>
   <div id="twResult"></div>
 
-  <div class="card" style="margin-top:16px">
+  <div class="card tw-market-card">
     <h2 data-i18n="twr.vs">挑戰大盤</h2>
     <div style="font-size:12px;color:#888;line-height:1.7;margin-bottom:10px" data-i18n="twr.vsNote">查看納斯達克綜合指數最近兩年的每月漲跌幅、年度報酬率與當年度 CPI，和你的績效放在同一尺度比較。</div>
     <button class="gobtn" id="twMarket" data-i18n="twr.vsBtn">查看大盤近兩年表現</button>
@@ -7098,13 +7194,14 @@ __FED_POLICY_PANEL__
 <!-- ============ 我的自選股：推播通知 ============ -->
 <div class="page" id="p4">
   <h2 class="ptitle" data-i18n="p4.title">推播通知</h2>
-
-  <div class="card" style="background:#fff8e6;border:1px solid #f0d98a">
+  <div class="alert-layout">
+  <div class="card alert-note" style="background:#fff8e6;border:1px solid #f0d98a">
     <div style="font-size:14px;color:#8a6d00;line-height:1.8">
       <span data-i18n-html="alert.note">⚠️ 本功能尚在測試中。每天美股收盤後以<b>收盤價</b>檢查一次，不是盤中即時服務。可從市值前 300 大裡選最多 3 檔，收盤價落在你設定價位的 ±2% 時發送通知，期限一個月。</span>
     </div>
   </div>
 
+  <div class="alert-compose">
   <div class="card">
     <h2 data-i18n="alert.add">新增提醒</h2>
     <div style="margin-bottom:10px">
@@ -7124,8 +7221,9 @@ __FED_POLICY_PANEL__
   </div>
   <button class="gobtn" id="alAdd" data-i18n="alert.btn">開啟通知並新增提醒</button>
   <div class="status" id="status4"></div>
+  </div>
 
-  <div class="card" style="margin-top:16px">
+  <div class="card alert-test" style="margin-top:16px">
     <h2 data-i18n="alert.test">推播測試</h2>
     <div style="font-size:13px;color:#666;margin-bottom:10px">
       <span data-i18n="alert.testNote">按下後立即發送一則測試通知到本裝置，用來確認伺服器金鑰與通知權限是否正常。</span>
@@ -7134,9 +7232,10 @@ __FED_POLICY_PANEL__
     <div class="status" id="statusTest"></div>
   </div>
 
-  <div class="card" style="margin-top:16px">
+  <div class="card alert-list" style="margin-top:16px">
     <h2 data-i18n="alert.list">已設定的提醒</h2>
     <div id="alList" style="font-size:14px;color:#999" data-i18n="alert.none">尚無提醒</div>
+  </div>
   </div>
 </div>
 
@@ -8328,6 +8427,7 @@ if ($("#goLev")) $("#goLev").onclick = async () => {
         const tag = s.partial ? ` <span class="badge">${LANG==="en"?"partial":"未完月"}</span>` : "";
         trs += `<tr><td>${s.m.slice(5)}${LANG==="en"?"":"月"}${tag}</td><td ${col(s.etf)}>${pct(s.etf)}</td><td ${col(s.idx)}>${pct(s.idx)}</td><td>${mult(s.ratio)}</td></tr>`;
       }
+      /* 每年一張卡（2025、2024…）。內文預設置中，見 #p11 .scard-body。 */
       html += `<details class="scard"${i===0?" open":""}><summary><span class="sc-l"><b>${yr.y}</b>${ytag}</span>`+
         `<span class="sc-r" ${col(yr.etf)}>${pct(yr.etf)}</span></summary><div class="scard-body">`+
         `<div class="kv"><span>${LANG==="en"?"Nasdaq Composite":"納斯達克綜合"}</span><b>${pct(yr.idx)}</b></div>`+
@@ -9898,13 +9998,13 @@ async function loadMacro(cachedData=null){
       [LANG==="en"?"Japan government bonds":"日本公債（日圓利率）", ["jp2y", "jp10y", "jp30y"]],
       [t("pmac.cpi", "累積物價漲幅"), ["cpi_ytd", "cpi_5y", "cpi_10y"]]
     ];
-    let html = "";
-    groups.forEach(group => {
+    const card = group => {
       const tiles = group[1].filter(k => byKey[k]).map(k => macroTile(byKey[k])).join("");
-      if (tiles) html += `<div class="card"><h2>${group[0]}</h2><div class="macro-grid">${tiles}</div></div>`;
-    });
-    html += yieldChart(data.yield_history,"us",US_YIELD_DAYS);
-    html += yieldChart(data.jp_yield_history,"jp");
+      return tiles ? `<div class="card"><h2>${group[0]}</h2><div class="macro-grid">${tiles}</div></div>` : "";
+    };
+    let html = `<div class="macro-countries">${groups.slice(0,2).map(card).join("")}</div>`;
+    html += card(groups[2]);
+    html += `<div class="macro-yields">${yieldChart(data.yield_history,"us",US_YIELD_DAYS)}${yieldChart(data.jp_yield_history,"jp")}</div>`;
     if (data.yield_conclusions && data.yield_conclusions.length){
       html += `<div class="card"><h2>${LANG==="en"?"Yield curve reading":"殖利率判讀卡"}</h2><div class="reading-card"><div class="reading-row"><b>${LANG==="en"?"Data":"數據"}</b><span>${LANG==="en"?`Checked ${data.updated||"—"}; latest available closing yields.`:`資料檢查日 ${data.updated||"—"}；顯示最近可用收盤殖利率。`}</span></div><div class="reading-row"><b>${LANG==="en"?"Reading":"解讀"}</b><ul class="yield-findings">${data.yield_conclusions.map(c=>`<li class="${c.level||""}">${c.text}</li>`).join("")}</ul></div><div class="reading-row"><b>${LANG==="en"?"Limit":"限制"}</b><span>${LANG==="en"?"Rule-based review of past reversals, percentiles and curve spreads; it cannot predict the next rate move.":"依過去反轉、百分位與曲線利差整理，不能據此預測下一次利率方向。"}</span></div></div></div>`;
     }
@@ -10346,10 +10446,23 @@ ARTICLES_DIR = os.path.join(BASE_DIR, "articles")
 SITE_URL = "https://us.stock-coffee.com"
 
 
+def _heading_id(text, used):
+    slug = re.sub(r"<[^>]+>", "", text)
+    slug = re.sub(r"[^\w]+", "-", slug, flags=re.UNICODE).strip("-") or "section"
+    if slug[0].isdigit():
+        slug = "s-" + slug
+    base, n = slug, 2
+    while slug in used:
+        slug = "%s-%s" % (base, n)
+        n += 1
+    used.add(slug)
+    return slug
+
+
 def _md_to_html(md):
     """本站文章需要的輕量 Markdown：標題、粗體、清單、段落與連結。"""
     import html as _h
-    out, list_kind = [], None
+    out, list_kind, used_ids = [], None, set()
 
     def close_list():
         nonlocal list_kind
@@ -10378,9 +10491,9 @@ def _md_to_html(md):
     for raw in md.splitlines():
         s = raw.rstrip()
         if s.startswith("### "):
-            close_list(); out.append("<h3>%s</h3>" % inline(s[4:]))
+            close_list(); out.append('<h3 id="%s">%s</h3>' % (_heading_id(s[4:], used_ids), inline(s[4:])))
         elif s.startswith("## "):
-            close_list(); out.append("<h2>%s</h2>" % inline(s[3:]))
+            close_list(); out.append('<h2 id="%s">%s</h2>' % (_heading_id(s[3:], used_ids), inline(s[3:])))
         elif s.startswith("- "):
             if list_kind != "ul":
                 close_list(); out.append("<ul>"); list_kind = "ul"
@@ -10488,11 +10601,24 @@ main{max-width:760px;margin:auto;padding:24px 18px calc(60px + env(safe-area-ins
 h1{font-size:28px;line-height:1.45;margin:12px 0 5px}.meta{font-size:12px;color:var(--mocha)}.summary{margin:18px 0 28px;background:var(--foam);border:1px solid var(--grounds);border-left:4px solid var(--caramel);border-radius:0 12px 12px 0;padding:12px 16px;color:var(--mocha)}
 article{font-size:16.5px}article h2{font-size:20px;margin:34px 0 10px;border-left:4px solid var(--caramel);padding-left:10px}article h3{font-size:17px;color:var(--caramel2);margin:26px 0 8px}article p{margin:12px 0}article li{margin:7px 0}article strong{color:var(--espresso)}
 .cta{display:block;margin-top:36px;padding:13px;text-align:center;background:var(--caramel);color:white;border-radius:999px;text-decoration:none;font-weight:800}.more{margin-top:35px;border-top:1px solid var(--grounds);padding-top:18px}.more a{color:var(--caramel2);text-decoration:none}
-</style></head><body><div class="top"><a href="__HOME__">☕ 美股咖啡館</a><a class="go" href="__HOME__">__CTA_TOP__</a></div>
-<main><nav class="crumb"><a href="__HOME__">__S_HOME__</a> › <a href="__PRE__/articles">__S_ARTS__</a> › __TITLE__</nav>
+.art-main{min-width:0}.art-aside{display:none}
+.art-toc,.art-tools{background:var(--foam);border:1.5px solid var(--grounds);border-radius:16px;padding:14px 16px;margin:0 0 12px}
+.art-toc h2,.art-tools h2{font-size:13px;font-weight:800;margin:0 0 10px;letter-spacing:.08em;color:var(--mocha);border:0;padding:0}
+.art-toc ol{list-style:none;padding:0;margin:0}.art-toc li{margin:0 0 8px}.art-toc a{color:var(--espresso);text-decoration:none;font-size:13.5px;line-height:1.5}
+.art-tools a{display:block;color:var(--caramel2);text-decoration:none;font-size:13.5px;font-weight:700;padding:6px 0}
+@media(min-width:1024px){
+  body.art-detail main{max-width:1100px;display:grid;grid-template-columns:minmax(0,760px) minmax(220px,280px);grid-template-areas:"main aside" "more aside";column-gap:28px;align-items:start}
+  body.art-detail .art-main{grid-area:main;max-width:760px}
+  body.art-detail .art-aside{display:block;grid-area:aside;position:sticky;top:18px;align-self:start}
+  body.art-detail .more{grid-area:more}
+}
+</style></head><body class="art-detail"><div class="top"><a href="__HOME__">☕ 美股咖啡館</a><a class="go" href="__HOME__">__CTA_TOP__</a></div>
+<main><div class="art-main"><nav class="crumb"><a href="__HOME__">__S_HOME__</a> › <a href="__PRE__/articles">__S_ARTS__</a> › __TITLE__</nav>
 <span class="tag">__TAG__</span><h1>__TITLE__</h1><div class="meta">__DATE__</div>
 <div class="summary">__DESC__</div><article>__BODY__</article>
-<a class="cta" href="__HOME__">__CTA__</a><div class="more"><b>__S_MORE__</b><ul>__MORE__</ul></div></main></body></html>"""
+<a class="cta" href="__HOME__">__CTA__</a></div>
+<aside class="art-aside">__ASIDE__</aside>
+<div class="more"><b>__S_MORE__</b><ul>__MORE__</ul></div></main></body></html>"""
 
 ARTICLE_STRINGS = {
     "zh": {"home": "首頁", "arts": "文章區", "more": "其他文章",
@@ -10502,6 +10628,51 @@ ARTICLE_STRINGS = {
            "cta_top": "Open the screener", "cta": "Use the free US stock screener — no sign-up →",
            "htmllang": "en"},
 }
+
+
+ARTICLE_TOOL_LABELS = {
+    "/": ("今日市場", "Today's market"),
+    "/screener": ("找強勢股", "Screener"),
+    "/pullback": ("拉回找買點", "Pullbacks"),
+    "/breakout-structure": ("飆股結構", "Breakout structure"),
+    "/industries": ("產業分析", "Sectors"),
+    "/macro": ("利率與購買力", "Rates & purchasing power"),
+    "/alerts": ("到價提醒", "Price alerts"),
+    "/risk": ("風控管理", "Risk"),
+    "/deduction": ("均線扣抵", "MA deduction"),
+    "/twr": ("我的績效", "TWR calculator"),
+    "/growth": ("長期成長股", "Growth list"),
+    "/pro": ("創新高", "New highs"),
+    "/pro/rs": ("RS 指數", "RS ranking"),
+}
+
+
+def _article_aside(html, lang):
+    import html as _h
+    toc_title = "On this page" if lang == "en" else "本篇目錄"
+    tools_title = "Related tools" if lang == "en" else "相關工具"
+    parts = []
+    heads = re.findall(r'<(h[23]) id="([^"]+)">(.*?)</\1>', html)
+    if len(heads) >= 2:
+        items = []
+        for _tag, hid, text in heads:
+            label = re.sub(r"<[^>]+>", "", text)
+            items.append('<li><a href="#%s">%s</a></li>' % (
+                _h.escape(hid, quote=True), _h.escape(label)))
+        parts.append('<nav class="art-toc"><h2>%s</h2><ol>%s</ol></nav>'
+                     % (toc_title, "".join(items)))
+    seen, tools = set(), []
+    for href in re.findall(r'href="(/[^"#?]*)', html):
+        path = href.rstrip("/") or "/"
+        if path in seen or path not in ARTICLE_TOOL_LABELS:
+            continue
+        seen.add(path)
+        zh, en = ARTICLE_TOOL_LABELS[path]
+        tools.append('<a href="%s">%s</a>' % (path, en if lang == "en" else zh))
+    if tools:
+        parts.append('<nav class="art-tools"><h2>%s</h2>%s</nav>'
+                     % (tools_title, "".join(tools)))
+    return "".join(parts)
 
 
 def _render_article(a, lang, others):
@@ -10535,7 +10706,8 @@ def _render_article(a, lang, others):
             "__HOME__": "/?lang=en" if lang == "en" else "/",
             "__S_HOME__": S["home"], "__S_ARTS__": S["arts"], "__S_MORE__": S["more"],
             "__CTA_TOP__": S["cta_top"], "__CTA__": S["cta"],
-            "__SITE__": SITE_URL, "__JSONLD__": json.dumps(ld, ensure_ascii=False)}
+            "__SITE__": SITE_URL, "__JSONLD__": json.dumps(ld, ensure_ascii=False),
+            "__ASIDE__": _article_aside(a["html"], lang)}
     for k, v in vals.items():
         out = out.replace(k, v)
     return out

@@ -1,6 +1,17 @@
 """手機與桌機品牌列獨立區塊＋桌機 120% 基準縮放。"""
+import os
 import re
+import sys
+import types
 import unittest
+
+os.environ.setdefault("ENABLE_PREFETCH", "0")
+os.environ.setdefault("ENABLE_DAILY_UPDATE", "0")
+try:
+    import holidays  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules["holidays"] = types.SimpleNamespace(
+        country_holidays=lambda *args, **kwargs: {})
 
 import app
 
@@ -92,6 +103,33 @@ class BrandBarAndDesktopZoomTests(unittest.TestCase):
         self.assertNotIn('class="top-control-proxy"', self.html)
         self.assertIn("openThemePicker();", self.html)
         self.assertIn("toggleLang();", self.html)
+
+    def test_desktop_workspace_widens_screener_industry_macro_alerts_and_articles(self):
+        self.assertIn("#p1.page.show,#p3.page.show{display:grid", self.html)
+        self.assertIn("#pind>.card:first-of-type{display:grid", self.html)
+        self.assertIn(".macro-countries{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}", self.html)
+        self.assertIn(".macro-yields{grid-template-columns:repeat(2,minmax(0,1fr))", self.html)
+        self.assertIn(".alert-layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(280px,1fr)", self.html)
+        self.assertIn("#pm .alinks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", self.html)
+        self.assertIn("alert-compose", self.html)
+
+    def test_desktop_twr_growth_risk_and_leverage_match_taiwan_layout(self):
+        self.assertIn("#p7>.tw-market-card{grid-column:2;grid-row:3 / span 2", self.html)
+        self.assertIn("#pgrow .growlist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", self.html)
+        self.assertIn("#rkResult{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr))", self.html)
+        self.assertIn("#p11{max-width:720px;margin-left:auto;margin-right:auto}", self.html)
+        self.assertIn("#p11 .scard-body th,#p11 .scard-body td { text-align:center; }", self.html)
+        twr = self.client.get("/twr").get_data(as_text=True)
+        self.assertIn('class="tw-savebar"', twr)
+        self.assertIn("tw-market-card", twr)
+
+    def test_article_page_has_sticky_toc_aside(self):
+        items = app._load_articles("zh")
+        self.assertTrue(items)
+        html = self.client.get("/article/" + items[0]["slug"]).get_data(as_text=True)
+        self.assertIn('class="art-detail"', html)
+        self.assertIn("position:sticky", html)
+        self.assertIn('class="art-toc"', html)
 
 
 if __name__ == "__main__":

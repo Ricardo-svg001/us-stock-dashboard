@@ -53,6 +53,7 @@ class BrandBarAndDesktopZoomTests(unittest.TestCase):
             block,
         )
         self.assertIn("#menuBtn,#topBrand,#topBtns{position:static", block)
+        self.assertIn("display:flex!important", block)
         self.assertIn("#topBrand small{display:none}", block)
 
     def test_desktop_sets_120_percent_zoom_baseline(self):
@@ -114,7 +115,8 @@ class BrandBarAndDesktopZoomTests(unittest.TestCase):
         self.assertIn("alert-compose", self.html)
 
     def test_desktop_twr_growth_risk_and_leverage_match_taiwan_layout(self):
-        self.assertIn("#p7>.tw-market-card{grid-column:2;grid-row:3 / span 2", self.html)
+        self.assertIn("#p7 .tw-compare{display:grid", self.html)
+        self.assertIn("#p7 .tw-compare{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(280px,.95fr);gap:14px;align-items:start}", self.html)
         self.assertIn("#pgrow .growlist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))", self.html)
         self.assertIn("#rkResult{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr))", self.html)
         self.assertIn("#p11{max-width:720px;margin-left:auto;margin-right:auto}", self.html)
@@ -122,6 +124,8 @@ class BrandBarAndDesktopZoomTests(unittest.TestCase):
         twr = self.client.get("/twr").get_data(as_text=True)
         self.assertIn('class="tw-savebar"', twr)
         self.assertIn("tw-market-card", twr)
+        self.assertIn("tw-compare", twr)
+        self.assertIn("tw-compose", twr)
 
     def test_article_page_has_sticky_toc_aside(self):
         items = app._load_articles("zh")

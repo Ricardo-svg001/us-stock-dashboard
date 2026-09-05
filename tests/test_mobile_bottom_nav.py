@@ -1,6 +1,17 @@
 """手機下方快捷列：對應美股四個入口。"""
+import os
 import re
+import sys
+import types
 import unittest
+
+os.environ.setdefault("ENABLE_PREFETCH", "0")
+os.environ.setdefault("ENABLE_DAILY_UPDATE", "0")
+try:
+    import holidays  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules["holidays"] = types.SimpleNamespace(
+        country_holidays=lambda *args, **kwargs: {})
 
 import app
 
@@ -25,6 +36,8 @@ class MobileBottomNavTests(unittest.TestCase):
             html,
             r"@media\(max-width:760px\)\{[^}]*\.app-tabs \{[^}]*display:grid",
         )
+        self.assertNotIn("#menuBtn { display:none; }", html)
+        self.assertIn("#menuBtn{\n      display:flex!important", html)
         self.assertIn('el.dataset.tab === activeTab', html)
 
     def test_screener_marks_screen_tab_active(self):

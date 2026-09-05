@@ -6248,15 +6248,11 @@ __SEO_HEAD__
     #pgrow>#resultGrow .card{max-width:none}
     #pgrow .growlist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px}
 
-    /* 我的績效：左欄依序放基本設定、逐月填寫，右欄放挑戰大盤，方便對照。 */
-    #p7.page.show{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(280px,.95fr);gap:14px;align-items:start}
-    #p7>.ptitle,#p7>.pgintro,#p7>.gobtn,#p7>.tw-savebar,#p7>.status,
-    #p7>#twResult,#p7>.data-quality-strip{grid-column:1/-1}
-    #p7>.pgintro{max-width:760px;width:100%;justify-self:center}
-    #p7>.card:first-of-type{grid-column:1;grid-row:3;max-width:none;margin:0}
-    #p7>.card:nth-of-type(2){grid-column:1;grid-row:4;max-width:none;margin:0}
-    #p7>.tw-market-card{grid-column:2;grid-row:3 / span 2;max-width:none;margin:0;align-self:stretch}
-    #p7>.gobtn{max-width:360px;justify-self:end}
+    /* 我的績效：左欄基本設定＋逐月填寫、右欄挑戰大盤。
+       用獨立 .tw-compare 兩欄（align-items:start），不要讓大盤結果跨列撐高左欄，否則逐月填寫會往下跑。 */
+    #p7 .tw-compare{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(280px,.95fr);gap:14px;align-items:start}
+    #p7 .tw-compose>.card,#p7 .tw-market-card{max-width:none;margin-left:0;margin-right:0}
+    #p7 .tw-compose>.gobtn{max-width:360px;margin-left:auto}
 
     /* 正2 逐月績效：整頁閱讀欄置中，不要貼左吃滿 1440。 */
     #p11{max-width:720px;margin-left:auto;margin-right:auto}
@@ -6304,7 +6300,11 @@ __SEO_HEAD__
       box-shadow:none;
     }
     #menuBtn,#topBrand,#topBtns{position:static;top:auto;left:auto;right:auto}
-    #menuBtn{flex:0 0 40px;width:40px;min-width:40px;height:40px;aspect-ratio:1}
+    #menuBtn{
+      display:flex!important;flex:0 0 40px;width:40px;min-width:40px;height:40px;aspect-ratio:1;
+      background:radial-gradient(circle at 30% 28%, #5A4030, #24362C);
+      box-shadow:0 6px 14px rgba(36,54,44,.18)
+    }
     #topBrand{flex:1 1 auto;min-width:0;margin:0;pointer-events:none}
     #topBrand b{font-size:18px;line-height:1.15}
     #topBrand small{display:none}
@@ -6580,7 +6580,7 @@ __SEO_HEAD__
   .daily-menu-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;margin-top:12px}.daily-menu-actions button{min-height:42px;padding:0 15px;appearance:none;border:1px solid var(--grounds);border-radius:11px;background:transparent;color:var(--espresso);cursor:pointer;font:800 14px var(--font-body)}.daily-menu-actions button.primary{border-color:var(--caramel);background:var(--caramel);color:#fff}.daily-menu-actions button:hover{border-color:var(--caramel-2)}.daily-menu-status{min-height:20px;margin:10px 2px 0;color:var(--mocha);font-size:12px}
   html[data-theme="c"] .daily-menu-dialog-card,html[data-theme="c"] .home-daily-share-card{background:#21343a;border-color:#466068}html[data-theme="c"] .daily-menu-dialog-head h2,html[data-theme="c"] .home-daily-share-copy b{color:#f5ead7}html[data-theme="c"] .daily-menu-dialog-head p,html[data-theme="c"] .daily-menu-status,html[data-theme="c"] .home-daily-share-copy span{color:#b8c7c1}html[data-theme="c"] .daily-menu-close,html[data-theme="c"] .daily-menu-template,html[data-theme="c"] .daily-menu-actions button{background:#192c32;color:#f5ead7;border-color:#466068}html[data-theme="c"] .daily-menu-template[aria-pressed="true"],html[data-theme="c"] .daily-menu-actions button.primary{background:var(--caramel);border-color:var(--caramel);color:#fff}html[data-theme="c"] .daily-menu-text{background:#192c32;color:#f5ead7;border-color:#466068}
   @media(max-width:760px){
-    #sidebar{top:12px;bottom:12px;left:-110%;width:calc(100% - 24px);border-radius:24px}
+    #sidebar{top:12px;bottom:82px;left:-110%;width:calc(100% - 24px);border-radius:24px}
     #sidebar.open{left:12px}
   }
   @media(max-width:560px){.home-daily-share-card{align-items:stretch;flex-direction:column;padding:16px}.home-daily-share-button{width:100%}.daily-menu-dialog{padding:12px}.daily-menu-dialog-card{max-height:calc(100dvh - 24px);padding:16px;border-radius:20px}.daily-menu-dialog-head h2{font-size:20px}.daily-menu-text{min-height:275px;font-size:13px}.daily-menu-actions{display:grid;grid-template-columns:1fr 1fr}.daily-menu-actions button{width:100%;padding:0 8px}}
@@ -6609,7 +6609,6 @@ __SEO_HEAD__
                 border-top:1px solid var(--grounds); }
     .wrap { padding-bottom:calc(92px + env(safe-area-inset-bottom)); }
     .site-footer { padding-bottom:calc(82px + env(safe-area-inset-bottom)); }
-    #menuBtn { display:none; }
   }
 </style>
 </head>
@@ -6901,7 +6900,7 @@ __FED_POLICY_PANEL__
   <h2 class="ptitle" data-i18n="grow.title">長期成長股列表</h2>
   <details class="pgintro" open>
     <summary data-i18n="grow.introT">十年下來，誰真的漲上去了</summary>
-    <div class="pgintro-b" data-i18n-html="grow.intro"><p>這裡列出<b>市值前 300 大</b>美股<b>固定回溯十年</b>的累計漲幅與年化報酬率，可以依兩者任一排序。所有個股用<b>同一個起跑點</b>，累計漲幅才能互相比較——若改用各自的上市日，期間長短不同，排名就沒有意義。</p><p><b>⚠️ 這份清單回答的是「現在的大公司過去十年漲了多少」，不是「十年前該買什麼」。</b>股票池是<b>今天</b>的前 300 大：十年前還很小、後來長大的公司被預先放進來，十年前很大、後來衰退掉出榜外的則完全看不到。這叫存活者偏誤加前視偏誤，會讓整份清單看起來比實際好很多。</p><p><b>⚠️ 未還原配息。</b>報價已還原拆股，但沒有還原股息，所以<b>高股息個股的報酬被系統性低估</b>——年配 6~7% 的十年下來可能少算五成以上。排名前段集中在科技股，有一部分是這個原因造成的。<b>台股站的同名頁面是含息的，兩邊的數字不能並排比較。</b></p><p><b>年數欄位要跟年化一起看。</b>上市不滿十年的個股會標示實際年數；短期間內一段暴漲會被年化放大成很誇張的數字。</p></div>
+    <div class="pgintro-b" data-i18n-html="grow.intro"><p>這裡列出<b>市值前 300 大</b>美股<b>固定回溯十年</b>的累計漲幅與年化報酬率，可以依兩者任一排序。所有個股用<b>同一個起跑點</b>，累計漲幅才能互相比較——若改用各自的上市日，期間長短不同，排名就沒有意義。</p><p><b>⚠️ 這份清單回答的是「現在的大公司過去十年漲了多少」，不是「十年前該買什麼」。</b>股票池是<b>今天</b>的前 300 大：十年前還很小、後來長大的公司被預先放進來，十年前很大、後來衰退掉出榜外的則完全看不到。這叫存活者偏誤加前視偏誤，會讓整份清單看起來比實際好很多。</p><p><b>⚠️ 未還原配息。</b>報價已還原拆股，但沒有還原股息，所以<b>高股息個股的報酬被系統性低估</b>——年配 6~7% 的十年下來可能少算五成以上。排名前段集中在科技股，有一部分是這個原因造成的。<b>台股站的同名頁面是含息的，兩邊的數字不能並排比較。</b></p><p><b>年數欄位要跟年化一起看。</b>標 ⚠️ 的多數是真的公開交易不滿十年（IPO 或分拆新上市）。少數是 Nasdaq 歷史在改掛代號後被截斷，這類已用 Yahoo 同一代號的連續收盤價補回十年——重疊日與 Nasdaq 一致，同樣不含息。不能把母公司或分拆前另一檔股票硬接進來。</p></div>
   </details>
   <div class="status" id="statusGrow"></div>
   <div id="resultGrow"></div>
@@ -6991,6 +6990,8 @@ __FED_POLICY_PANEL__
     </div>
   </details>
 
+  <div class="tw-compare">
+  <div class="tw-compose">
   <div class="card">
     <h2 data-i18n="twr.basic">基本設定</h2>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
@@ -7025,8 +7026,7 @@ __FED_POLICY_PANEL__
     <a id="twClear" style="font-size:13px;color:#c0392b;cursor:pointer;margin-left:12px;text-decoration:underline" data-i18n="twr.clear">清空所有資料</a>
   </div>
   <div class="status" id="statusTw"></div>
-  <div id="twResult"></div>
-
+  </div>
   <div class="card tw-market-card">
     <h2 data-i18n="twr.vs">挑戰大盤</h2>
     <div style="font-size:12px;color:#888;line-height:1.7;margin-bottom:10px" data-i18n="twr.vsNote">查看納斯達克綜合指數最近兩年的每月漲跌幅、年度報酬率與當年度 CPI，和你的績效放在同一尺度比較。</div>
@@ -7034,6 +7034,8 @@ __FED_POLICY_PANEL__
     <div class="status" id="statusMkt"></div>
     <div id="mktResult"></div>
   </div>
+  </div>
+  <div id="twResult"></div>
 </div>
 
 <!-- ============ 我的自選股：同期比較 ============ -->
@@ -7463,7 +7465,7 @@ const I18N = { en: {
   "grow.title": "Long-Term Growth List",
   "nav.grow.sub": "10-year total & annualised",
   "grow.introT": "Who actually went up over ten years",
-  "grow.intro": "<p>This lists the <b>ten-year</b> cumulative and annualised returns for the <b>300 largest US stocks</b>, sortable by either. Every stock uses the <b>same starting date</b> so cumulative returns can be compared \u2014 using each stock's own listing date would make the periods different lengths and the ranking meaningless.</p><p><b>\u26a0\ufe0f This answers \"how much did today's large companies rise over the past ten years\", not \"what should you have bought ten years ago.\"</b> The universe is <b>today's</b> top 300: companies that were small then and grew are pre-loaded into the list, while companies that were large then and shrank out of the top 300 are invisible. That is survivorship plus look-ahead bias, and it makes the whole list look better than reality.</p><p><b>\u26a0\ufe0f Not dividend-adjusted.</b> Prices are split-adjusted but dividends are not added back, so <b>high-yield stocks are systematically understated</b> \u2014 a 6-7% yielder can be understated by more than half over ten years. The concentration of technology names at the top is partly caused by this.</p><p><b>Read the years column alongside the annualised figure.</b> Stocks listed for less than ten years are flagged; a single sharp run inside a short window gets magnified into an extreme annualised number.</p>",
+  "grow.intro": "<p>This lists the <b>ten-year</b> cumulative and annualised returns for the <b>300 largest US stocks</b>, sortable by either. Every stock uses the <b>same starting date</b> so cumulative returns can be compared \u2014 using each stock's own listing date would make the periods different lengths and the ranking meaningless.</p><p><b>\u26a0\ufe0f This answers \"how much did today's large companies rise over the past ten years\", not \"what should you have bought ten years ago.\"</b> The universe is <b>today's</b> top 300: companies that were small then and grew are pre-loaded into the list, while companies that were large then and shrank out of the top 300 are invisible. That is survivorship plus look-ahead bias, and it makes the whole list look better than reality.</p><p><b>\u26a0\ufe0f Not dividend-adjusted.</b> Prices are split-adjusted but dividends are not added back, so <b>high-yield stocks are systematically understated</b> \u2014 a 6-7% yielder can be understated by more than half over ten years. The concentration of technology names at the top is partly caused by this.</p><p><b>Read the years column alongside the annualised figure.</b> Most \u26a0\ufe0f names are genuinely listed for less than ten years (IPO or spin-off). A few were truncated by Nasdaq after a ticker change; those are filled from Yahoo's continuous close for the same ticker \u2014 overlapping days match Nasdaq, still excluding dividends. Parent-company or other spin-off shares are not spliced in.</p>",
   "grow.loading": "Loading long-term growth data\u2026",
   "grow.fail": "Failed to load",
   "grow.bench": "Nasdaq Composite, same period",
